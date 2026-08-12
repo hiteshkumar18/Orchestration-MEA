@@ -1,0 +1,38 @@
+# systemd user service for Orchestration-MEA.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp docs/orchestration-mea.service ~/.config/systemd/user/
+#   $EDITOR ~/.config/systemd/user/orchestration-mea.service   # set WorkingDirectory
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now orchestration-mea
+#
+# No root required. To keep it running while logged out (needs root once):
+#   sudo loginctl enable-linger $USER
+#
+# Logs:  journalctl --user -u orchestration-mea -f
+
+[Unit]
+Description=Orchestration-MEA control UI
+Documentation=https://github.com/hiteshkumar18/Orchestration-MEA
+After=network.target
+
+[Service]
+Type=simple
+
+# CHANGE THIS to your checkout.
+WorkingDirectory=%h/Orchestration-MEA
+ExecStart=%h/Orchestration-MEA/run.sh
+
+Restart=on-failure
+RestartSec=10s
+
+# Do not restart endlessly on a configuration error — 3 failures in 5 minutes
+# is a problem to look at, not to retry.
+StartLimitBurst=3
+StartLimitIntervalSec=300
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+# Web layer
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# Analysis (activity_scan.py, activity_trends.py)
+h5py>=3.8
+numpy>=1.24
+matplotlib>=3.7
+
+# Optional: exact Mann-Whitney U in activity_trends.py (falls back to a
+# normal approximation when absent)
+# scipy>=1.10

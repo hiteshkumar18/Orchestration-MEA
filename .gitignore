@@ -1,0 +1,25 @@
+# Per-machine configuration and runtime state
+config.env
+.env
+.env.local
+.mea-watcher/
+**/watcher_state.json
+**/job.json
+
+# Analysis output
+activity_scan_output/
+scan_out/
+AnalyzedData/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
