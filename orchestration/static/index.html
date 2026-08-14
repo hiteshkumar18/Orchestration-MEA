@@ -511,79 +511,67 @@ function Field({spec,value,onChange}){
     <span className="f-h">{spec.help}</span></div>;
 }
 
-function Browser({initial,onPick,onClose}){
+function Browser({initial,onPick,onClose,picker,onNative,busyNative}){
   const [d,setD]=useState(null),[p,setP]=useState(initial||""),[e,setE]=useState("");
   const load=useCallback(async q=>{
     try{setE("");const r=await api("/api/browse",{method:"POST",body:JSON.stringify({path:q})});
         setD(r);setP(r.path);}catch(x){setE(x.message);}},[]);
   useEffect(()=>{load(initial||"");},[load,initial]);
+
+  // Clickable path segments — faster than retyping a long path.
+  const crumbs=[];
+  if(d?.path){
+    const parts=d.path.split("/").filter(Boolean);
+    crumbs.push({name:"/",path:"/"});
+    let acc="";
+    for(const seg of parts){acc+="/"+seg;crumbs.push({name:seg,path:acc});}
+  }
+
   return (
     <div className="br">
       <div className="br-p">
         <input className="inp mono" value={p} onChange={e=>setP(e.target.value)}
                onKeyDown={e=>e.key==="Enter"&&load(p)} aria-label="Path"/>
         <button className="btn btn-s" onClick={()=>load(p)}>Go</button>
+        {picker?.available&&
+          <button className="btn btn-s" disabled={busyNative} onClick={onNative}
+                  title={`Open the ${picker.tool} folder chooser on the server`}>
+            {busyNative?<><span className="spin"/> Waiting…</>:<><Folder s={12}/> File manager</>}
+          </button>}
         <button className="btn btn-s btn-pri" onClick={()=>{onPick(p);onClose();}}>Select</button>
       </div>
+
+      {crumbs.length>0&&(
+        <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:2,
+                     padding:"7px 12px",borderBottom:"1px solid var(--line)",
+                     background:"var(--raise)",fontSize:12}}>
+          {crumbs.map((c,i)=>(
+            <React.Fragment key={c.path}>
+              {i>0&&<span style={{color:"var(--ink-3)"}}>/</span>}
+              <button className="btn btn-q btn-s" style={{height:22,padding:"0 6px",
+                      fontFamily:"var(--mono)",fontSize:11.5}}
+                      onClick={()=>load(c.path)}>{c.name}</button>
+            </React.Fragment>))}
+        </div>)}
+
       {e&&<div style={{padding:"10px 14px",fontSize:12.5,color:"var(--bad)"}}>{e}</div>}
       <div className="br-l">
         {d?.parent&&<div className="br-i" onClick={()=>load(d.parent)}>
           <Folder s={14}/><span className="br-n" style={{color:"var(--ink-3)"}}>..</span></div>}
         {d?.entries?.length===0&&<div style={{padding:"14px",fontSize:12.5,color:"var(--ink-3)"}}>No subfolders</div>}
         {d?.entries?.map(x=>(
-          <div key={x.path} className="br-i" onClick={()=>load(x.path)}>
+          <div key={x.path} className="br-i" onClick={()=>load(x.path)}
+               onDoubleClick={()=>{onPick(x.path);onClose();}}>
             <Folder s={14}/><span className="br-n">{x.name}</span>
+            {x.recordings>0&&<span className="f-h" style={{flex:"none"}}>{x.recordings} rec</span>}
             {x.is_run&&<span className={"pill "+(x.finished?"p-o":"p-w")}>
               <span className="dot"/>{x.finished?"run · finished":"run · in progress"}</span>}
           </div>))}
       </div>
-    </div>
-  );
-}
-
-function Wells({rows,summary}){
-  if(!rows?.length) return null;
-  const cls={complete:"p-o",failed:"p-b",running:"p-a",pending:"p-n"};
-  return (
-    <div style={{padding:"0 24px 18px",borderTop:"1px solid var(--line)",paddingTop:16}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,flexWrap:"wrap"}}>
-        <span className={"pill "+(summary.verdict==="complete"?"p-o":
-          summary.verdict==="failed"?"p-b":summary.verdict==="partial"?"p-w":"p-a")}>
-          {summary.verdict==="partial"?"Partial":summary.verdict==="complete"?"All wells complete":
-           summary.verdict==="failed"?"All wells failed":"In progress"}
-        </span>
-        <span className="f-h">
-          {summary.complete}/{summary.wells} complete
-          {summary.failed>0&&<> · <span style={{color:"var(--bad)"}}>{summary.failed} failed</span></>}
-          {summary.running>0&&<> · {summary.running} running</>}
-        </span>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:8}}>
-        {rows.map(w=>(
-          <div key={w.checkpoint_file}
-               style={{display:"flex",alignItems:"center",gap:9,padding:"7px 10px",
-                       background:"var(--sunken)",borderRadius:"var(--r1)",minWidth:0}}>
-            <span className={"pill "+(cls[w.status]||"p-n")} style={{height:20,padding:"0 8px"}}>
-              {w.well}</span>
-            <span style={{fontSize:12,color:"var(--ink-2)",overflow:"hidden",
-                          textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}
-                  title={w.error||w.stage_name}>
-              {w.status==="failed"?`failed at ${w.failed_stage||w.stage_name}`:w.stage_name}
-            </span>
-          </div>))}
-      </div>
-      {summary.errors?.length>0&&(
-        <div className="note n-b" style={{marginTop:12}}>
-          <span className="n-i"><Alert s={15}/></span>
-          <div style={{minWidth:0}}>
-            {summary.errors.map((e,i)=>(
-              <div key={i} style={{marginTop:i?8:0}}>
-                <b>{e.well}</b> — {e.failed_stage}
-                <div className="mono" style={{fontSize:11.5,marginTop:3,opacity:.9,
-                     whiteSpace:"pre-wrap",wordBreak:"break-word"}}>
-                  {(e.error||"").split("\n")[0].slice(0,240)}</div>
-              </div>))}
-          </div></div>)}
+      {picker&&!picker.available&&(
+        <div style={{padding:"8px 12px",borderTop:"1px solid var(--line)"}} className="f-h">
+          {picker.reason}
+        </div>)}
     </div>
   );
 }
@@ -674,6 +662,8 @@ function App(){
   const [act,setAct]=useState([]);
   const [follow,setFollow]=useState(true);
   const [showCfg,setShowCfg]=useState(true);
+  const [picker,setPicker]=useState(null);
+  const [busyNative,setBusyNative]=useState(false);
   const [wells,setWells]=useState({});      // run key -> checkpoint payload
   const [openWells,setOpenWells]=useState({});
   const tid=useRef(0), seq=useRef(0), openWellsRef=useRef({});
@@ -692,6 +682,7 @@ function App(){
     setSchema(s);setCfg(c);
     const o={};s.groups.forEach((g,i)=>o[g.group]=!g.group.toLowerCase().includes("advanced"));
     setOpen(o);
+    try{ setPicker(await api("/api/picker")); }catch(e){ setPicker({available:false}); }
   }catch(e){setFatal(e.message);}})();},[]);
 
   const refresh=useCallback(async()=>{
@@ -785,6 +776,17 @@ function App(){
                     "Run reset",`${r.run} will be processed again.`);
   const onLog  =r=>act_(async()=>{const d=await api(`/api/runs/log?path=${encodeURIComponent(r.log)}`);
                     setLog({run:r.run,lines:d.lines,path:r.log});});
+  const pickNative=(start,title,apply)=>{
+    setBusyNative(true);
+    act_(async()=>{
+      try{
+        const d=await api("/api/picker",{method:"POST",
+          body:JSON.stringify({start:start||"",title})});
+        if(!d.cancelled&&d.path) apply(d.path);
+      } finally { setBusyNative(false); }
+    });
+  };
+
   const onWells=r=>{
     const isOpen=!!openWells[r.path];
     setOpenWells(o=>({...o,[r.path]:!isOpen}));
@@ -948,7 +950,10 @@ function App(){
                     </div>
                     <span className="f-h">Folder containing run folders such as <code className="mono">000041</code>.</span>
                     {browsing==="in"&&<Browser initial={cfg.watch_dir} onClose={()=>setBrowsing(null)}
-                                               onPick={p=>setT("watch_dir",p)}/>}
+                                               onPick={p=>setT("watch_dir",p)}
+                                               picker={picker} busyNative={busyNative}
+                                               onNative={()=>pickNative(cfg.watch_dir,"Select input folder",
+                                                 p=>setT("watch_dir",p))}/>}
                   </div>
                   <div className="f">
                     <label className="f-l" htmlFor="out">Output</label>
@@ -961,7 +966,10 @@ function App(){
                     </div>
                     <span className="f-h">Passed as <code className="mono">--output-dir</code>.</span>
                     {browsing==="out"&&<Browser initial={cfg.driver_options.output_dir||""} onClose={()=>setBrowsing(null)}
-                                                onPick={p=>setO("output_dir",p)}/>}
+                                                onPick={p=>setO("output_dir",p)}
+                                                picker={picker} busyNative={busyNative}
+                                                onNative={()=>pickNative(cfg.driver_options.output_dir,"Select output folder",
+                                                  p=>setO("output_dir",p))}/>}
                   </div>
                 </div>
               </div>

@@ -60,21 +60,93 @@ experiment.
 ./run.sh
 ```
 
-Binds to `127.0.0.1` by default. The UI is unauthenticated and can browse the
-filesystem, so reach it over an SSH tunnel rather than exposing the port. From
-your laptop:
+Binds to `127.0.0.1` by default. At the machine itself, open
+<http://localhost:8000>. From anywhere else, forward the port over SSH — see
+[section 4](#4-connecting-from-your-own-computer).
+
+Override with `UI_HOST=0.0.0.0 ./run.sh` only if you have a reason to; the UI is
+unauthenticated and can browse the filesystem.
+
+---
+
+## 4. Connecting from your own computer
+
+The UI runs on the analysis server and binds to `127.0.0.1`. You reach it by
+forwarding a port over SSH — it is unauthenticated and can browse the server's
+filesystem, so it should not be exposed on the network.
+
+**Picking folders works the same from any client.** The folder button in the UI
+lists directories *on the server* and returns *server* paths. It is a web page
+talking to the server, so there is nothing to install and no difference between
+Windows, macOS, and Linux.
+
+### macOS / Linux
 
 ```bash
 ssh -N -L 8000:127.0.0.1:8000 user@server
 ```
 
-Then open <http://localhost:8000>. Use `127.0.0.1` rather than `localhost` in
-the `-L` argument — on some servers `localhost` resolves to IPv6 first and the
-forward is refused.
+Leave it running, then open <http://localhost:8000>.
+
+Use `127.0.0.1` rather than `localhost` in the `-L` argument: on some servers
+`localhost` resolves to IPv6 first and the forward is refused. If port 8000 is
+busy on your own machine, map a different one: `-L 9000:127.0.0.1:8000`.
+
+### Windows
+
+Windows 10 and 11 include OpenSSH, so in PowerShell or Windows Terminal the
+command is identical:
+
+```powershell
+ssh -N -L 8000:127.0.0.1:8000 user@server
+```
+
+With **PuTTY** instead: Connection → SSH → Tunnels, Source port `8000`,
+Destination `127.0.0.1:8000`, Local, **Add**, then connect.
+
+Then open <http://localhost:8000>. Nothing else is required.
+
+### Optional: the native file manager dialog
+
+The **File manager** button in the folder picker opens the desktop's own chooser
+(`zenity`, the dialog GNOME/Nautilus uses). It appears only when the server has a
+display, because it is a real GUI window that opens on the server's screen.
+
+| Situation | Native dialog | Built-in browser |
+|---|---|---|
+| Sitting at the lab machine | Yes | Yes |
+| SSH tunnel, no X forwarding | No — hidden | Yes |
+| SSH tunnel with X11 forwarding | Yes | Yes |
+
+To get it remotely, forward X11 as well. The dialog then renders on your
+computer while still browsing the **server's** filesystem, which is what you
+want.
+
+**macOS** — install [XQuartz](https://www.xquartz.org), then:
+
+```bash
+ssh -X -L 8000:127.0.0.1:8000 user@server
+cd Orchestration-MEA && ./run.sh      # must start from this session
+```
+
+**Windows** — you need an X server:
+
+* **MobaXterm** — easiest; bundles one and enables forwarding by default
+* **VcXsrv** or **Xming** — start it, then `ssh -X user@server`
+* **WSL2 on Windows 11** — WSLg is built in; SSH with `-X` from inside WSL
+
+With PuTTY also tick Connection → SSH → X11 → *Enable X11 forwarding*.
+
+`run.sh` must be launched from the forwarded session so it inherits `DISPLAY`.
+A systemd service will not have it unless you add `Environment=DISPLAY=:0`.
+
+X11 dialogs are noticeably laggy over a network. For everyday use the built-in
+browser is faster and needs no setup — the native dialog is a convenience, not a
+capability, and both return the same server paths.
 
 ---
 
-## 4. Keep it running
+## 5. Keep it running
 
 `run.sh` in the foreground stops when you log out. Two options:
 
@@ -103,7 +175,7 @@ To keep it running when you are not logged in: `sudo loginctl enable-linger $USE
 
 ---
 
-## 5. Verify
+## 6. Verify
 
 ```bash
 # Imports and option mirror
@@ -121,7 +193,7 @@ print('OK ·',len(driver_schema.FIELDS),'options')"
 
 ---
 
-## 6. First run through the UI
+## 7. First run through the UI
 
 1. **Setup → Folders** — input is the folder *containing* run folders; output is
    where the pipeline writes.

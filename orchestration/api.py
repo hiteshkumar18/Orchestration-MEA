@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from driver_schema import schema_for_ui, validate_options, default_options  # noqa: E402
 from checkpoints import read_checkpoints, summarise  # noqa: E402
 from mea_repo import find_mea_repo, describe as describe_repo, report as report_repo  # noqa: E402
+import native_picker  # noqa: E402
 from watcher import (  # noqa: E402
     JobConfig, Watcher, DEFAULT_WORK_DIR, JOB_LABELS,
     find_recording, find_recordings, has_finished_marker,
@@ -139,6 +140,11 @@ class ConfigPayload(BaseModel):
 
 class BrowsePayload(BaseModel):
     path: str = ""
+
+
+class PickPayload(BaseModel):
+    start: str = ""
+    title: str = "Select folder"
 
 
 class RunKeyPayload(BaseModel):
@@ -301,6 +307,30 @@ def api_browse(payload: BrowsePayload):
                          if rec is not None else None),
         })
     return {"path": str(p), "parent": str(p.parent) if p.parent != p else None, "entries": items}
+
+
+@app.get("/api/picker")
+def api_picker_status():
+    """Whether a desktop folder chooser can be used on this machine."""
+    return native_picker.describe()
+
+
+@app.post("/api/picker")
+def api_pick(payload: PickPayload):
+    """Open the desktop folder chooser and return the chosen path.
+
+    Blocks until the dialog is dismissed. The dialog appears on the *server's*
+    display, so this is only useful when the browser is on the same machine.
+    """
+    info = native_picker.describe()
+    if not info["available"]:
+        raise HTTPException(400, info["reason"] or "No folder chooser available")
+    LOG.info("Opening %s folder chooser…", info["tool"])
+    path = native_picker.choose_directory(payload.start, payload.title)
+    if not path:
+        return {"cancelled": True, "path": None}
+    LOG.info("Folder chosen: %s", path)
+    return {"cancelled": False, "path": path, "is_dir": Path(path).is_dir()}
 
 
 @app.post("/api/preview")

@@ -69,8 +69,13 @@ Reach the UI over an SSH tunnel rather than exposing the port; it is
 unauthenticated and can browse the filesystem:
 
 ```bash
-ssh -N -L 8000:127.0.0.1:8000 user@server
+ssh -N -L 8000:127.0.0.1:8000 user@server        # macOS/Linux, and Windows PowerShell
 ```
+
+Folder selection works the same from any client — the picker lists directories
+on the *server* and returns *server* paths, so there is nothing to install on
+Windows, macOS, or Linux. Windows/PuTTY setup and the optional native file
+manager dialog are covered in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#4-connecting-from-your-own-computer).
 
 To keep it running: `tmux new -s mea './run.sh'`, or install the systemd user
 service in [docs/](docs/orchestration-mea.service). See
