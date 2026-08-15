@@ -663,6 +663,7 @@ function App(){
   const [follow,setFollow]=useState(true);
   const [showCfg,setShowCfg]=useState(true);
   const [picker,setPicker]=useState(null);
+  const [pyCheck,setPyCheck]=useState(null);
   const [busyNative,setBusyNative]=useState(false);
   const [wells,setWells]=useState({});      // run key -> checkpoint payload
   const [openWells,setOpenWells]=useState({});
@@ -722,7 +723,9 @@ function App(){
     queue_poll_seconds:Number(cfg.queue_poll_seconds)||1,
     settle_seconds:Number(cfg.settle_seconds), poll_seconds:Number(cfg.poll_seconds),
     require_finished_marker:!!cfg.require_finished_marker,
-    skip_settle_for_existing:!!cfg.skip_settle_for_existing, dry_run:!!cfg.dry_run,
+    skip_settle_for_existing:!!cfg.skip_settle_for_existing,
+    driver_python:cfg.driver_python||"", logs_in_output:cfg.logs_in_output!==false,
+    dry_run:!!cfg.dry_run,
   }),[cfg]);
 
   const act_=useCallback(async(fn,t,m)=>{setBusy(true);
@@ -776,6 +779,11 @@ function App(){
                     "Run reset",`${r.run} will be processed again.`);
   const onLog  =r=>act_(async()=>{const d=await api(`/api/runs/log?path=${encodeURIComponent(r.log)}`);
                     setLog({run:r.run,lines:d.lines,path:r.log});});
+  const testPython=()=>act_(async()=>{
+    setPyCheck(await api("/api/driver-python",{method:"POST",
+      body:JSON.stringify({python:cfg.driver_python||""})}));
+  });
+
   const pickNative=(start,title,apply)=>{
     setBusyNative(true);
     act_(async()=>{
@@ -1026,6 +1034,40 @@ function App(){
                         label="Activity scan — whole-array maps"
                         hint="Activity maps, QC metrics, network bursts. CPU only; seconds per chip."/>
               </div>
+              {cfg.run_network&&(<>
+                <div className="sep"/>
+                <div className="f">
+                  <label className="f-l" htmlFor="dpy">Pipeline interpreter</label>
+                  <div className="f-row">
+                    <input id="dpy" className="inp mono"
+                           placeholder="(auto-detect — the environment MEA-Analysis is installed in)"
+                           value={cfg.driver_python??""}
+                           onChange={e=>setT("driver_python",e.target.value)}/>
+                    <button className="btn" onClick={testPython} disabled={busy}>Test</button>
+                  </div>
+                  <span className="f-h">
+                    Must have the pipeline's dependencies (pandas, spikeinterface, kilosort, torch).
+                    This tool's own virtualenv does not — launching the driver with it fails at
+                    <code className="mono"> import pandas</code>.
+                  </span>
+                  {pyCheck&&(
+                    <div className={"note "+(pyCheck.ok?"n-a":"n-b")} style={{marginTop:8}}>
+                      <span className="n-i">{pyCheck.ok?<Check s={15}/>:<Alert s={15}/>}</span>
+                      <div style={{minWidth:0}}>
+                        <div><b className="mono">{pyCheck.python}</b>
+                          {pyCheck.version&&<> · Python {pyCheck.version}</>}
+                          {pyCheck.source&&<> · {pyCheck.source}</>}</div>
+                        {pyCheck.ok
+                          ? <div style={{marginTop:3}}>All pipeline dependencies present.</div>
+                          : <div style={{marginTop:3}}>
+                              Missing: <b>{(pyCheck.missing||[]).join(", ")||pyCheck.error}</b>.
+                              Set the path to the environment MEA-Analysis runs in.
+                            </div>}
+                      </div>
+                    </div>)}
+                </div>
+              </>)}
+
               {cfg.run_activity&&(<>
                 <div className="sep"/>
                 <div className="grid2">
@@ -1090,6 +1132,11 @@ function App(){
                   <span className="f-h">How often a queued job looks for a free slot.</span>
                 </div>
               </div>
+              <div className="sep"/>
+              <Switch id="lio" checked={cfg.logs_in_output!==false}
+                      onChange={v=>setT("logs_in_output",v)}
+                      label="Write logs beside the results"
+                      hint="Per-run logs go to <output>/orchestration_logs/ as well, so the log lives with the output it describes. Falls back to the work directory if that is not writable."/>
               {!cfg.run_network&&!cfg.run_activity&&
                 <div className="note n-b" style={{marginTop:"var(--s3)"}}>
                   <span className="n-i"><Alert s={15}/></span>

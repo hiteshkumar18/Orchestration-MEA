@@ -58,7 +58,7 @@ from typing import Any, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from driver_schema import build_driver_args, default_options  # noqa: E402
-from mea_repo import find_mea_repo  # noqa: E402
+from mea_repo import find_mea_repo, find_driver_python  # noqa: E402
 
 LOG = logging.getLogger("mea.watcher")
 
@@ -139,7 +139,17 @@ class JobConfig:
 
     # Execution
     driver: str = str(DEFAULT_DRIVER)
+    # Interpreter for THIS tool (the activity scan runs in our own venv).
     python: str = sys.executable
+    # Interpreter for run_pipeline_driver.py. Blank = auto-detect.
+    #
+    # This must be the environment the pipeline is installed in — pandas, torch,
+    # kilosort, spikeinterface. Our virtualenv deliberately does not have them,
+    # so launching the driver with it fails at `import pandas`.
+    driver_python: str = ""
+    # Write per-run logs beside the results as well as in the work dir, so the
+    # log lives with the output it describes.
+    logs_in_output: bool = True
     work_dir: str = str(DEFAULT_WORK_DIR)   # where state + logs are written
     dry_run: bool = False
 
@@ -162,6 +172,13 @@ class JobConfig:
         if self.run_activity:
             jobs.append(JOB_ACTIVITY)
         return jobs
+
+    def resolve_driver_python(self) -> str:
+        """Interpreter to launch the driver with (configured, else detected)."""
+        if self.driver_python:
+            return self.driver_python
+        repo = Path(self.driver).parent if self.driver else None
+        return find_driver_python(repo).get("python") or self.python
 
     def subfolder_for(self, job: str) -> str:
         return self.assay_subfolder if job == JOB_NETWORK else self.activity_subfolder
@@ -582,7 +599,7 @@ class Watcher:
         else:
             recording = find_recording(run_dir, self.cfg.h5_glob, self.cfg.assay_subfolder)
             target = str(recording) if recording else str(run_dir)
-        return [self.cfg.python, str(self.cfg.driver), target,
+        return [self.cfg.resolve_driver_python(), str(self.cfg.driver), target,
                 *build_driver_args(self.cfg.driver_options)]
 
     def _build_activity_command(self, run_dir: Path) -> list[str]:
@@ -623,7 +640,7 @@ class Watcher:
             self.on_event("detected", {"run": run_dir.name, "job": job, "command": printable})
             return
 
-        log_path = self.log_dir / f"{run_dir.name}_{job}_{datetime.now():%Y%m%d_%H%M%S}.log"
+        log_path = self._log_path_for(run_dir, job)
         self.state.update(key, status="dispatched", dispatched_at=_now(),
                           log=str(log_path), **common)
         self.on_event("dispatched", {"run": run_dir.name, "job": job, "log": str(log_path)})
@@ -632,6 +649,27 @@ class Watcher:
             target=self._run_job, args=(run_dir, job, key, cmd, log_path),
             name=f"mea-{job}-{run_dir.name}", daemon=True,
         ).start()
+
+    def _log_path_for(self, run_dir: Path, job: str) -> Path:
+        """Where this run's log goes.
+
+        Prefer the output folder so the log sits with the results it describes;
+        fall back to the work dir when that is unset or not writable.
+        """
+        name = f"{run_dir.name}_{job}_{datetime.now():%Y%m%d_%H%M%S}.log"
+        if self.cfg.logs_in_output:
+            base = self.cfg.activity_out if job == JOB_ACTIVITY else self.cfg.output_dir
+            if base:
+                try:
+                    d = Path(base) / "orchestration_logs"
+                    d.mkdir(parents=True, exist_ok=True)
+                    probe = d / ".write_test"
+                    probe.touch()
+                    probe.unlink()
+                    return d / name
+                except OSError as exc:
+                    LOG.warning("Cannot write logs to %s (%s); using %s", base, exc, self.log_dir)
+        return self.log_dir / name
 
     def _run_job(self, run_dir: Path, job: str, key: str,
                  cmd: list[str], log_path: Path) -> None:

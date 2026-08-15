@@ -32,6 +32,103 @@ LOG = logging.getLogger("mea.repo")
 DRIVER_NAME = "run_pipeline_driver.py"
 ROUTINE_NAME = "mea_analysis_routine.py"
 
+# What the pipeline needs that this orchestrator deliberately does not install.
+# Used to check an interpreter before it is used to launch the driver.
+DRIVER_IMPORTS = ("pandas", "h5py", "spikeinterface")
+
+
+def _in_our_venv(python: str) -> bool:
+    """True if this interpreter is the orchestration virtualenv."""
+    try:
+        return Path(python).resolve().is_relative_to(
+            (Path(__file__).resolve().parent.parent / ".venv").resolve())
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def candidate_pythons(repo: Optional[Path]) -> list[str]:
+    """Interpreters that might have the pipeline's dependencies, best first.
+
+    The orchestration venv is intentionally last: it holds fastapi/h5py/numpy
+    for this tool, not pandas/torch/kilosort for the pipeline. Launching the
+    driver with it fails at ``import pandas``.
+    """
+    import shutil
+    import sys as _sys
+
+    out: list[str] = []
+    if repo:
+        for rel in (".venv/bin/python", "venv/bin/python", "env/bin/python"):
+            p = repo / rel
+            if p.is_file():
+                out.append(str(p))
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found and not _in_our_venv(found):
+            out.append(found)
+    out.append(_sys.executable)          # last resort
+    # de-duplicate, keep order
+    seen, uniq = set(), []
+    for p in out:
+        rp = str(Path(p).resolve()) if Path(p).exists() else p
+        if rp not in seen:
+            seen.add(rp)
+            uniq.append(p)
+    return uniq
+
+
+def check_python(python: str, modules: tuple[str, ...] = DRIVER_IMPORTS) -> dict[str, Any]:
+    """Ask an interpreter which of the pipeline's dependencies it can import."""
+    import subprocess
+    code = ("import json,sys;m={};" +
+            "".join(f"\ntry:\n import {m} as _x\n m[{m!r}]=getattr(_x,'__version__','?')\n"
+                    f"except Exception as e:\n m[{m!r}]=None\n" for m in modules) +
+            "\nprint(json.dumps({'v':sys.version.split()[0],'m':m}))")
+    try:
+        r = subprocess.run([python, "-c", code], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return {"python": python, "ok": False, "error": (r.stderr or "").strip()[:200]}
+        import json as _json
+        data = _json.loads(r.stdout.strip().splitlines()[-1])
+    except Exception as exc:  # noqa: BLE001
+        return {"python": python, "ok": False, "error": str(exc)[:200]}
+
+    missing = [k for k, v in data["m"].items() if v is None]
+    return {
+        "python": python,
+        "version": data["v"],
+        "modules": data["m"],
+        "missing": missing,
+        "ok": not missing,
+    }
+
+
+def find_driver_python(repo: Optional[Path], explicit: str = "") -> dict[str, Any]:
+    """Pick an interpreter that can actually run the driver.
+
+    An explicit choice is reported as-is even when incomplete — the operator's
+    setting is not silently replaced, but the problem is named.
+    """
+    if explicit:
+        res = check_python(explicit)
+        res["source"] = "configured"
+        return res
+
+    tried = []
+    for cand in candidate_pythons(repo):
+        res = check_python(cand)
+        tried.append({"python": cand, "missing": res.get("missing"), "ok": res.get("ok")})
+        if res.get("ok"):
+            res["source"] = "auto-detected"
+            res["tried"] = tried
+            return res
+
+    import sys as _sys
+    fallback = check_python(_sys.executable)
+    fallback["source"] = "fallback"
+    fallback["tried"] = tried
+    return fallback
+
 
 def candidate_paths(explicit: Optional[str] = None) -> list[Path]:
     here = Path(__file__).resolve().parent.parent

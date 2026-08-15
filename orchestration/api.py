@@ -38,7 +38,10 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from driver_schema import schema_for_ui, validate_options, default_options  # noqa: E402
 from checkpoints import read_checkpoints, summarise  # noqa: E402
-from mea_repo import find_mea_repo, describe as describe_repo, report as report_repo  # noqa: E402
+from mea_repo import (  # noqa: E402
+    find_mea_repo, describe as describe_repo, report as report_repo,
+    find_driver_python, check_python,
+)
 import native_picker  # noqa: E402
 from watcher import (  # noqa: E402
     JobConfig, Watcher, DEFAULT_WORK_DIR, JOB_LABELS,
@@ -135,6 +138,8 @@ class ConfigPayload(BaseModel):
     poll_seconds: int = 30
     require_finished_marker: bool = True
     skip_settle_for_existing: bool = False
+    driver_python: str = ""
+    logs_in_output: bool = True
     dry_run: bool = False
 
 
@@ -209,6 +214,8 @@ def api_get_config():
         "poll_seconds": cfg.poll_seconds,
         "require_finished_marker": cfg.require_finished_marker,
         "skip_settle_for_existing": cfg.skip_settle_for_existing,
+        "driver_python": cfg.driver_python,
+        "logs_in_output": cfg.logs_in_output,
         "dry_run": cfg.dry_run,
         "work_dir": cfg.work_dir,
     }
@@ -246,6 +253,8 @@ def api_set_config(payload: ConfigPayload):
         poll_seconds=payload.poll_seconds,
         require_finished_marker=payload.require_finished_marker,
         skip_settle_for_existing=payload.skip_settle_for_existing,
+        driver_python=payload.driver_python,
+        logs_in_output=payload.logs_in_output,
         work_dir=str(WORK_DIR),
         dry_run=payload.dry_run,
     )
@@ -307,6 +316,27 @@ def api_browse(payload: BrowsePayload):
                          if rec is not None else None),
         })
     return {"path": str(p), "parent": str(p.parent) if p.parent != p else None, "entries": items}
+
+
+class PythonPayload(BaseModel):
+    python: str = ""
+
+
+@app.post("/api/driver-python")
+def api_driver_python(payload: PythonPayload):
+    """Check whether an interpreter can actually run the pipeline.
+
+    The orchestration virtualenv deliberately lacks pandas/torch/kilosort, so
+    launching the driver with it fails at `import pandas`. This reports which
+    dependencies a candidate interpreter is missing, before a run is started.
+    """
+    watcher = get_watcher()
+    repo = Path(watcher.cfg.driver).parent if watcher.cfg.driver else None
+    if payload.python:
+        res = check_python(payload.python)
+        res["source"] = "configured"
+        return res
+    return find_driver_python(repo)
 
 
 @app.get("/api/picker")
@@ -435,15 +465,24 @@ def api_log(path: str, tail: int = 400):
     design, so an unrestricted path parameter here would be an arbitrary
     file-read primitive for anyone who can reach the port.
     """
-    log_root = Path(get_watcher().log_dir).resolve()
+    watcher = get_watcher()
+    # Logs may live in the work dir or beside the results, so several roots are
+    # allowed — but still only these, never an arbitrary path.
+    roots = []
+    for candidate in (watcher.log_dir, watcher.cfg.output_dir, watcher.cfg.activity_out):
+        if candidate:
+            try:
+                roots.append(Path(candidate).resolve())
+            except OSError:
+                pass
     try:
         p = Path(path).resolve(strict=True)
     except (OSError, RuntimeError):
         raise HTTPException(404, "Log not found")
 
-    if p != log_root and log_root not in p.parents:
-        LOG.warning("Rejected log read outside %s: %s", log_root, p)
-        raise HTTPException(403, "Log path is outside the watcher log directory")
+    if not any(p == r or r in p.parents for r in roots):
+        LOG.warning("Rejected log read outside %s: %s", roots, p)
+        raise HTTPException(403, "Log path is outside the allowed log directories")
     if not p.is_file():
         raise HTTPException(404, "Log not found")
 
