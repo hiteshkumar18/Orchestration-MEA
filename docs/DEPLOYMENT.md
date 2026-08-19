@@ -13,29 +13,56 @@ git clone https://github.com/<you>/Orchestration-MEA.git
 cd Orchestration-MEA
 
 ./setup.sh                          # finds ../MEA-Analysis automatically
-./setup.sh /path/to/MEA-Analysis    # or say where it is
+./setup.sh --mea-repo /path/to/MEA-Analysis
 ```
 
-`setup.sh` creates `.venv`, installs dependencies, writes `config.env`, and
-verifies the link to the analysis repo:
+### Which environment?
+
+The pipeline is launched as a **subprocess**, so whatever interpreter runs it
+must have `pandas`, `torch`, `kilosort` and `spikeinterface`. There are two ways
+to satisfy that:
+
+| Mode | What it does | Use when |
+|---|---|---|
+| **Shared** (default) | Adds `fastapi` + `uvicorn` to the environment MEA-Analysis already runs in | The pipeline is installed on this machine — almost always |
+| **Separate** (`--separate`) | Creates `.venv` with its own numpy/h5py/matplotlib | The pipeline is *not* installed here; UI and activity scan only |
+
+Shared is the default because it makes the requirement true by construction:
+one environment, nothing to configure, and the driver cannot be launched with an
+interpreter that lacks its dependencies.
+
+Only `fastapi` and `uvicorn` are installed, with
+`--upgrade-strategy only-if-needed`, so the pinned scientific stack the pipeline
+depends on is left alone.
 
 ```
-Python 3.10  (/usr/bin/python3)
-Creating virtualenv at .venv
-Installing dependencies
 MEA-Analysis: /home/you/MEA-Analysis
+Looking for the environment MEA-Analysis runs in
+  /home/you/MEA-Analysis/.venv/bin/python  →  missing pandas,spikeinterface
+  /usr/bin/python3                          →  has the analysis stack
+Installing into the pipeline's environment
 Verifying
   driver options mirrored: 39
-  INFO    MEA-Analysis: /home/you/MEA-Analysis (main @ 41c05b95)
-  INFO    Driver option contract: OK
+  INFO  Driver option contract: OK
+  pipeline interpreter: /usr/bin/python3 [auto-detected] — OK
 ```
 
-**"Driver option contract: OK"** means this repo's understanding of
-`run_pipeline_driver.py` matches the checkout. If upstream renames or adds a
-flag, it is listed here instead of failing silently later.
+Two lines matter. **"Driver option contract: OK"** means this repo's view of
+`run_pipeline_driver.py` matches the checkout — a rename upstream is listed here
+rather than failing later. **"pipeline interpreter … OK"** means spike sorting
+will actually start; if it says `MISSING pandas, …` the Network analysis will
+fail at import, and you should re-run with `--python` pointing at the right
+environment.
 
-If `python3 -m venv` fails on Debian/Ubuntu: `sudo apt install python3-venv`,
-or use conda: `conda create -n mea python=3.10 && conda activate mea && pip install -r requirements.txt`.
+For conda:
+
+```bash
+conda activate mea               # your pipeline environment
+./setup.sh --python "$(which python)"
+```
+
+If `python3 -m venv` fails on Debian/Ubuntu when using `--separate`:
+`sudo apt install python3-venv`.
 
 ---
 

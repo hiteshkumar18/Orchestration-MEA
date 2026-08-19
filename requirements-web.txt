@@ -1,0 +1,9 @@
+# The ONLY packages the MEA-Analysis environment does not already have.
+# Use this when installing into that environment (the recommended setup):
+#
+#   pip install -r requirements-web.txt
+#
+# Nothing here pulls in numpy, h5py or matplotlib, so it cannot disturb the
+# pinned scientific stack the pipeline depends on.
+fastapi>=0.110
+uvicorn[standard]>=0.27

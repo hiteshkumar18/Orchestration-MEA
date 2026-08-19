@@ -14,13 +14,17 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
-[[ -x "$HERE/.venv/bin/python" ]] || {
-  echo "No virtualenv found. Run ./setup.sh first." >&2; exit 1; }
-
 # config.env is optional; flags and the environment still work without it.
 if [[ -f "$HERE/config.env" ]]; then
   set -a; . "$HERE/config.env"; set +a
 fi
+
+# Interpreter that runs this tool. In shared mode this is the pipeline's own
+# environment; in separate mode it is the local virtualenv.
+PY_BIN="${PYTHON:-$HERE/.venv/bin/python}"
+[[ -x "$PY_BIN" ]] || {
+  echo "Interpreter not found: $PY_BIN" >&2
+  echo "Run ./setup.sh first, or set PYTHON in config.env." >&2; exit 1; }
 
 PORT="${UI_PORT:-8000}"
 WORK="${WORK_DIR:-$HERE/.mea-watcher}"
@@ -30,6 +34,6 @@ WORK="${WORK_DIR:-$HERE/.mea-watcher}"
 #   ssh -N -L 8000:127.0.0.1:8000 user@server
 HOST="${UI_HOST:-127.0.0.1}"
 
-exec "$HERE/.venv/bin/python" orchestration/api.py \
+exec "$PY_BIN" orchestration/api.py \
   --host "$HOST" --port "$PORT" --work-dir "$WORK" \
   ${MEA_REPO:+--mea-repo "$MEA_REPO"} "$@"

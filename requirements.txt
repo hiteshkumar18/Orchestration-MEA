@@ -1,12 +1,18 @@
-# Web layer
+# Full standalone set — for a separate virtualenv that does NOT share the
+# pipeline's environment (UI + activity scan only; spike sorting needs the
+# pipeline's own env).
+#
+# If you are installing into the MEA-Analysis environment, use
+# requirements-web.txt instead: everything below except fastapi/uvicorn is
+# already there, and re-resolving it risks changing pinned versions.
+
 fastapi>=0.110
 uvicorn[standard]>=0.27
 
-# Analysis (activity_scan.py, activity_trends.py)
 h5py>=3.8
 numpy>=1.24
 matplotlib>=3.7
 
-# Optional: exact Mann-Whitney U in activity_trends.py (falls back to a
-# normal approximation when absent)
+# Optional: exact Mann-Whitney U in activity_trends.py (falls back to a normal
+# approximation when absent)
 # scipy>=1.10

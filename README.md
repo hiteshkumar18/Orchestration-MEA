@@ -44,21 +44,45 @@ Use `--strict` to refuse to start in that state.
 
 ## Install
 
-Runs from a virtualenv — no Docker, no root, nothing system-wide.
+No Docker, no root, nothing system-wide.
 
 ```bash
 git clone https://github.com/<you>/Orchestration-MEA.git
 cd Orchestration-MEA
 
-./setup.sh                          # finds ../MEA-Analysis automatically
-./setup.sh /path/to/MEA-Analysis    # or say where it is
-
+./setup.sh          # installs into the environment MEA-Analysis already runs in
 ./run.sh
 ```
 
-`setup.sh` creates `.venv`, installs dependencies, writes `config.env`, and
-verifies the link to the analysis repo. `run.sh` starts the UI on
-`127.0.0.1:8000`.
+`setup.sh` finds the interpreter that can already import the analysis stack and
+adds only `fastapi` and `uvicorn` to it — two packages, not a second 10 GB
+environment. It then writes `config.env` and verifies the link:
+
+```
+MEA-Analysis: /home/you/MEA-Analysis
+Looking for the environment MEA-Analysis runs in
+  /usr/bin/python3  →  has the analysis stack
+Installing into the pipeline's environment
+Verifying
+  driver options mirrored: 39
+  INFO  Driver option contract: OK
+  pipeline interpreter: /usr/bin/python3 [auto-detected] — OK
+```
+
+**Why shared by default.** The pipeline is launched as a subprocess, so it needs
+an interpreter with `pandas`, `torch`, `kilosort` and `spikeinterface`. Running
+this tool in the same environment means that is true by construction, with
+nothing to configure.
+
+Only `fastapi`/`uvicorn` are installed, with `--upgrade-strategy only-if-needed`,
+so the pinned scientific stack the pipeline depends on is not disturbed.
+
+**Separate environment** — for a machine without the pipeline installed:
+
+```bash
+./setup.sh --separate      # own .venv; UI + activity scan work, spike sorting does not
+./setup.sh --python /path/to/pipeline/env    # or name the environment explicitly
+```
 
 The MEA checkout is located in this order: `--mea-repo` → `$MEA_REPO` →
 `config.env` → a sibling `../MEA-Analysis`. An explicitly given path is never
