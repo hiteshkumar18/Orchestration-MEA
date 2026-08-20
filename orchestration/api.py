@@ -101,12 +101,30 @@ def _record_event(kind: str, payload: dict) -> None:
 
 
 def load_job_config() -> JobConfig:
+    """Saved intent + this machine's environment, resolved now.
+
+    The driver path is always taken from the repo detected at startup, never
+    from the saved file: a config written before the repos were split, or on a
+    different machine, must not pin an interpreter or driver that does not
+    exist here.
+    """
+    cfg = None
     if CONFIG_PATH.exists():
         try:
-            return JobConfig.load(CONFIG_PATH)
+            cfg = JobConfig.load(CONFIG_PATH)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Could not load %s (%s); using defaults", CONFIG_PATH, exc)
-    return JobConfig(work_dir=str(WORK_DIR))
+    if cfg is None:
+        cfg = JobConfig()
+
+    cfg.work_dir = str(WORK_DIR)
+    repo = find_mea_repo(os.environ.get("MEA_REPO"))
+    if repo:
+        driver = repo / "run_pipeline_driver.py"
+        if str(driver) != cfg.driver:
+            LOG.info("Driver resolved to %s", driver)
+        cfg.driver = str(driver)
+    return cfg
 
 
 def get_watcher() -> Watcher:

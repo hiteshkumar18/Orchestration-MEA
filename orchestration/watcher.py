@@ -58,7 +58,7 @@ from typing import Any, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from driver_schema import build_driver_args, default_options  # noqa: E402
-from mea_repo import find_mea_repo, find_driver_python  # noqa: E402
+from mea_repo import find_mea_repo, find_driver_python, check_python, required_imports  # noqa: E402
 
 LOG = logging.getLogger("mea.watcher")
 
@@ -67,8 +67,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ACTIVITY_SCRIPT = Path(__file__).resolve().parent / "activity_scan.py"
 
 # The MEA-Analysis checkout is external and located at runtime — see mea_repo.py.
-_found = find_mea_repo()
-DEFAULT_DRIVER = (_found / "run_pipeline_driver.py") if _found else Path("run_pipeline_driver.py")
+def _default_driver() -> str:
+    """Absolute path to the driver, or "" when the repo cannot be found.
+
+    Never a bare relative path: that silently becomes CWD-dependent and fails
+    in a way that looks like a missing file rather than a missing repo.
+    """
+    found = find_mea_repo()
+    return str(found / "run_pipeline_driver.py") if found else ""
+
+
+DEFAULT_DRIVER = _default_driver()
 
 # The two independent analyses.
 JOB_NETWORK = "network"
@@ -138,7 +147,12 @@ class JobConfig:
     skip_settle_for_existing: bool = False
 
     # Execution
-    driver: str = str(DEFAULT_DRIVER)
+    #
+    # These three describe THIS MACHINE, not what the user asked for. They are
+    # re-resolved on every load and excluded from save(), so a config written on
+    # one machine — or before the repos were split — cannot pin a stale
+    # interpreter or driver path that no amount of re-running setup can fix.
+    driver: str = DEFAULT_DRIVER
     # Interpreter for THIS tool (the activity scan runs in our own venv).
     python: str = sys.executable
     # Interpreter for run_pipeline_driver.py. Blank = auto-detect.
@@ -183,20 +197,41 @@ class JobConfig:
     def subfolder_for(self, job: str) -> str:
         return self.assay_subfolder if job == JOB_NETWORK else self.activity_subfolder
 
+    # Environment-derived; re-resolved every load, never written to disk.
+    ENV_FIELDS = ("driver", "python", "work_dir")
+
     @classmethod
     def load(cls, path: Path) -> "JobConfig":
+        """Load saved intent and re-resolve the environment fresh.
+
+        Anything in ENV_FIELDS found in an old file is discarded with a warning:
+        those paths belong to whichever machine and layout wrote them, and
+        honouring them is how a stale interpreter survives a reinstall.
+        """
         data = json.loads(Path(path).read_text())
+
+        stale = {k: data.pop(k) for k in cls.ENV_FIELDS if k in data}
+        if stale:
+            LOG.info("Ignoring machine-specific values in %s (re-resolved): %s",
+                     path.name, ", ".join(f"{k}={v}" for k, v in stale.items()))
+
         opts = default_options()
         opts.update(data.get("driver_options") or {})
         data["driver_options"] = opts
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in data.items() if k in known})
+        cfg = cls(**{k: v for k, v in data.items() if k in known})
+
+        # Re-resolve from this machine, now.
+        cfg.driver = _default_driver() or cfg.driver
+        return cfg
 
     def save(self, path: Path) -> None:
+        """Persist user intent only — never this machine's paths."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        data = {k: v for k, v in asdict(self).items() if k not in self.ENV_FIELDS}
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(self), indent=2))
+        tmp.write_text(json.dumps(data, indent=2))
         tmp.replace(path)
 
     def validate(self) -> list[str]:
@@ -207,7 +242,11 @@ class JobConfig:
             errs.append(f"Input path does not exist or is not a directory: {self.watch_dir}")
         if not self.enabled_jobs():
             errs.append("Enable at least one analysis (Network or Activity scan).")
-        if self.run_network and not Path(self.driver).exists():
+        if self.run_network and not self.driver:
+            errs.append(
+                "MEA-Analysis checkout not found. Set MEA_REPO in config.env, "
+                "pass --mea-repo, or place the repo beside this one.")
+        elif self.run_network and not Path(self.driver).exists():
             errs.append(
                 f"run_pipeline_driver.py not found at: {self.driver}. "
                 "Set MEA_REPO (or --mea-repo) to your MEA-Analysis checkout.")
@@ -414,6 +453,7 @@ class Watcher:
         }
         self._active: dict[str, int] = {JOB_NETWORK: 0, JOB_ACTIVITY: 0}
         self._preexisting: set[str] = set()
+        self._preflight: Optional[dict] = None
         self._active_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------- #
@@ -421,6 +461,9 @@ class Watcher:
         if self.is_running:
             return
         self._stop.clear()
+        self._preflight = None
+        if self.cfg.run_network and not self.cfg.dry_run:
+            self.preflight()
 
         # Snapshot what is already on disk. Only these folders may skip the
         # settle window — anything arriving later could still be copying.
@@ -460,6 +503,41 @@ class Watcher:
             self._stop.wait(self.cfg.poll_seconds)
 
     # -- scanning ----------------------------------------------------------- #
+    def preflight(self, force: bool = False) -> dict:
+        """Verify the interpreter can actually run the pipeline, once per start.
+
+        Without this a missing dependency surfaces inside the driver, where a
+        broad `except` turns "No module named 'scipy'" into
+        "No data files found" — an environment problem disguised as a data
+        problem. Checking here fails the job with the real reason instead.
+        """
+        if self._preflight is not None and not force:
+            return self._preflight
+
+        python = self.cfg.resolve_driver_python()
+        repo = Path(self.cfg.driver).parent if self.cfg.driver else None
+        mods = None
+        if repo and repo.is_dir():
+            try:
+                mods = tuple(required_imports(repo)) or None
+            except Exception:  # noqa: BLE001
+                mods = None
+        res = check_python(python, mods) if mods else check_python(python)
+        res["python"] = python
+        self._preflight = res
+
+        if res.get("ok"):
+            LOG.info("Pipeline interpreter OK: %s (%d dependencies present)",
+                     python, len(res.get("modules") or {}))
+        else:
+            LOG.error("Pipeline interpreter cannot run the analysis: %s", python)
+            if res.get("missing"):
+                LOG.error("  missing: %s", ", ".join(res["missing"]))
+                LOG.error("  install them there, or set the pipeline interpreter in the UI")
+            elif res.get("error"):
+                LOG.error("  %s", res["error"])
+        return res
+
     def jobs_for(self, run_dir: Path) -> list[str]:
         """Which enabled analyses actually have data in this folder."""
         jobs = []
@@ -627,6 +705,22 @@ class Watcher:
     def dispatch(self, run_dir: Path, job: str = JOB_NETWORK, detail: str = "") -> None:
         key = self.state_key(run_dir.resolve(), job)
         label = JOB_LABELS.get(job, job)
+
+        # Do not spend a dispatch on an interpreter that cannot import the
+        # pipeline — the driver would fail confusingly rather than clearly.
+        if job == JOB_NETWORK and not self.cfg.dry_run:
+            pre = self.preflight()
+            if not pre.get("ok"):
+                missing = ", ".join(pre.get("missing") or []) or pre.get("error", "unknown")
+                msg = (f"pipeline interpreter is missing: {missing} "
+                       f"({pre.get('python')})")
+                LOG.error("%s [%s] not started — %s", run_dir.name, label, msg)
+                self.state.update(key, status="failed", job=job, job_label=label,
+                                  run=run_dir.name, completed_at=_now(),
+                                  detail="environment problem, not a data problem",
+                                  error=msg)
+                self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
+                return
         cmd = self.build_command(run_dir, job)
         printable = " ".join(shlex.quote(c) for c in cmd)
         LOG.info("Dispatching %s [%s]:\n    %s", run_dir.name, label, printable)

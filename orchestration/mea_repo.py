@@ -32,9 +32,74 @@ LOG = logging.getLogger("mea.repo")
 DRIVER_NAME = "run_pipeline_driver.py"
 ROUTINE_NAME = "mea_analysis_routine.py"
 
-# What the pipeline needs that this orchestrator deliberately does not install.
-# Used to check an interpreter before it is used to launch the driver.
-DRIVER_IMPORTS = ("pandas", "h5py", "spikeinterface")
+# Fallback only — the real list is derived from the repo by required_imports().
+# Hand-maintained lists go stale: an early version of this check omitted scipy,
+# which helper_functions imports, and the driver reported the resulting
+# ImportError as "No data files found".
+DRIVER_IMPORTS = ("pandas", "h5py", "numpy", "scipy", "matplotlib", "spikeinterface")
+
+# Entry points whose dependency trees must be satisfied: the driver runs in the
+# parent process, the routine in the per-well subprocesses.
+ENTRY_MODULES = ("run_pipeline_driver.py", "mea_analysis_routine.py")
+
+
+def _stdlib_names() -> set[str]:
+    import sys as _sys
+    names = getattr(_sys, "stdlib_module_names", None)
+    if names:
+        return set(names)
+    return {  # pragma: no cover - only on <3.10
+        "argparse", "ast", "collections", "csv", "datetime", "enum", "fnmatch",
+        "functools", "glob", "json", "logging", "math", "os", "pathlib", "re",
+        "shlex", "shutil", "subprocess", "sys", "time", "traceback", "typing",
+        "warnings", "itertools", "random", "pickle", "threading", "copy", "io",
+    }
+
+
+def required_imports(repo: Path, max_depth: int = 2) -> list[str]:
+    """Third-party modules the pipeline imports, read from the repo's own source.
+
+    Walks the entry points and follows imports of sibling modules inside the
+    repo, so indirect dependencies are included — ``run_pipeline_driver`` imports
+    ``helper_functions``, which imports ``scipy``. Parsing rather than importing
+    means this works on a machine where those packages are missing, which is
+    exactly when the answer matters.
+    """
+    stdlib = _stdlib_names()
+    # Modules that live in the repo are not dependencies to install: top-level
+    # .py files, package directories, and the repo's own name (the pipeline
+    # imports itself under a couple of spellings in try/except fallbacks).
+    local = {p.stem for p in repo.glob("*.py")}
+    local |= {d.name for d in repo.iterdir() if d.is_dir() and not d.name.startswith(".")}
+    local |= {repo.name, repo.name.replace("-", "_"), "MEA_Analysis", "MEA-Analysis"}
+    third: set[str] = set()
+    seen: set[str] = set()
+
+    def walk(path: Path, depth: int) -> None:
+        if depth > max_depth or path.name in seen or not path.is_file():
+            return
+        seen.add(path.name)
+        try:
+            tree = ast.parse(path.read_text(errors="ignore"))
+        except (OSError, SyntaxError):
+            return
+        found: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                found |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                found.add(node.module.split(".")[0])
+        for mod in found:
+            if mod in stdlib or mod.startswith("_"):
+                continue
+            if mod in local:
+                walk(repo / f"{mod}.py", depth + 1)   # follow into the repo
+            else:
+                third.add(mod)
+
+    for entry in ENTRY_MODULES:
+        walk(repo / entry, 0)
+    return sorted(third)
 
 
 def _in_our_venv(python: str) -> bool:
@@ -77,7 +142,7 @@ def candidate_pythons(repo: Optional[Path]) -> list[str]:
     return uniq
 
 
-def check_python(python: str, modules: tuple[str, ...] = DRIVER_IMPORTS) -> dict[str, Any]:
+def check_python(python: str, modules=DRIVER_IMPORTS) -> dict[str, Any]:
     """Ask an interpreter which of the pipeline's dependencies it can import."""
     import subprocess
     code = ("import json,sys;m={};" +
@@ -106,17 +171,32 @@ def check_python(python: str, modules: tuple[str, ...] = DRIVER_IMPORTS) -> dict
 def find_driver_python(repo: Optional[Path], explicit: str = "") -> dict[str, Any]:
     """Pick an interpreter that can actually run the driver.
 
+    Checks against the dependency list derived from the repo, not a static one,
+    so a module the pipeline picked up indirectly is still caught here rather
+    than at run time.
+
     An explicit choice is reported as-is even when incomplete — the operator's
     setting is not silently replaced, but the problem is named.
     """
+    mods = DRIVER_IMPORTS
+    if repo:
+        try:
+            derived = required_imports(repo)
+            if derived:
+                mods = tuple(derived)
+        except Exception:  # noqa: BLE001
+            pass
+
     if explicit:
-        res = check_python(explicit)
+        res = check_python(explicit, mods)
         res["source"] = "configured"
+        res["checked"] = list(mods)
         return res
 
     tried = []
     for cand in candidate_pythons(repo):
-        res = check_python(cand)
+        res = check_python(cand, mods)
+        res["checked"] = list(mods)
         tried.append({"python": cand, "missing": res.get("missing"), "ok": res.get("ok")})
         if res.get("ok"):
             res["source"] = "auto-detected"
@@ -124,9 +204,10 @@ def find_driver_python(repo: Optional[Path], explicit: str = "") -> dict[str, An
             return res
 
     import sys as _sys
-    fallback = check_python(_sys.executable)
+    fallback = check_python(_sys.executable, mods)
     fallback["source"] = "fallback"
     fallback["tried"] = tried
+    fallback["checked"] = list(mods)
     return fallback
 
 
