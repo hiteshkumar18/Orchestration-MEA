@@ -131,7 +131,8 @@ PYTHON=$RUN_PY
 
 # Interpreter used to launch run_pipeline_driver.py. Blank = auto-detect.
 # In shared mode this is the same environment, so blank is correct.
-DRIVER_PYTHON=$([[ "$MODE" == "shared" ]] && echo "" || echo "# set me: the env MEA-Analysis runs in")
+# In separate mode, set this to the environment MEA-Analysis runs in.
+DRIVER_PYTHON=
 
 UI_PORT=8000
 WORK_DIR=$HERE/.mea-watcher

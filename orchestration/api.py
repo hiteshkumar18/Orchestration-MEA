@@ -118,6 +118,9 @@ def load_job_config() -> JobConfig:
         cfg = JobConfig()
 
     cfg.work_dir = str(WORK_DIR)
+    # config.env can name the pipeline's interpreter; the UI still overrides it.
+    if not cfg.driver_python and os.environ.get("MEA_DRIVER_PYTHON"):
+        cfg.driver_python = os.environ["MEA_DRIVER_PYTHON"]
     repo = find_mea_repo(os.environ.get("MEA_REPO"))
     if repo:
         driver = repo / "run_pipeline_driver.py"
