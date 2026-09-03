@@ -20,7 +20,10 @@ Guardrails
 * **Number validation** — every numeral in the returned text must match a value
   in the briefing (within rounding tolerance) or the narrative is rejected.
 * **Citation validation** — every well and metric a finding cites must exist.
-* ``temperature=0``, so re-running the same briefing gives near-identical prose.
+* ``temperature=0`` where the SDK still accepts it (dropped in anthropic 1.x),
+  so re-running the same briefing gives near-identical prose. This is a
+  convenience, not a safety property — ``validate`` is what makes the output
+  trustworthy.
 * The prompt states n per group and forbids significance language below n=3.
 * The briefing and the raw response are written next to the report.
 
@@ -30,6 +33,7 @@ stored, logged, or accepted over HTTP.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -589,11 +593,11 @@ def narrate(brief: dict, model: str = "", max_retries: int = 1) -> dict[str, Any
         resp = client.messages.create(
             model=model,
             max_tokens=MAX_TOKENS,
-            temperature=0,
             system=SYSTEM_PROMPT,
             tools=[tool],
             tool_choice={"type": "tool", "name": "report_sections"},
             messages=messages,
+            **_sampling_kwargs(client),
         )
 
         block = next((b for b in resp.content if getattr(b, "type", "") == "tool_use"), None)
@@ -622,6 +626,22 @@ def narrate(brief: dict, model: str = "", max_retries: int = 1) -> dict[str, Any
         last_problems = problems
 
     raise RuntimeError("The narrative failed validation: " + "; ".join(last_problems[:5]))
+
+
+def _sampling_kwargs(client) -> dict:
+    """`temperature=0` where the installed SDK still accepts it.
+
+    Anthropic SDK 1.x dropped `temperature` from `messages.create()`, and
+    passing it there raises TypeError. Older 0.x releases take it and it does
+    make repeated runs on the same briefing more alike, so it is used when
+    available rather than dropped outright. Determinism was never what makes
+    the output trustworthy — `validate()` is — so its absence costs little.
+    """
+    try:
+        params = inspect.signature(client.messages.create).parameters
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    return {"temperature": 0} if "temperature" in params else {}
 
 
 def write_audit(dest_dir: Path, brief: Optional[dict], narrative: Optional[dict],
