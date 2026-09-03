@@ -542,6 +542,7 @@ def status() -> dict[str, Any]:
         "key_present": key,
         "sdk_installed": sdk,
         "model": os.environ.get("MEA_AI_MODEL", DEFAULT_MODEL),
+        "workspace_id_set": bool(os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()),
         "ready": key and sdk,
         "reason": (None if key and sdk else
                    "Set ANTHROPIC_API_KEY in the shell that starts the server"
@@ -565,7 +566,13 @@ def narrate(brief: dict, model: str = "", max_retries: int = 1) -> dict[str, Any
         raise RuntimeError("ANTHROPIC_API_KEY is not set in this process's environment")
 
     model = model or os.environ.get("MEA_AI_MODEL", DEFAULT_MODEL)
-    client = anthropic.Anthropic()
+
+    # An identity-linked key scoped to the whole organization can act in more
+    # than one workspace, and the API will not guess which. A key scoped to a
+    # single workspace needs nothing extra, so this stays optional.
+    workspace = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+    headers = {"anthropic-workspace-id": workspace} if workspace else None
+    client = anthropic.Anthropic(default_headers=headers)
 
     tool = {
         "name": "report_sections",
@@ -590,15 +597,20 @@ def narrate(brief: dict, model: str = "", max_retries: int = 1) -> dict[str, Any
                                "the briefing."})
 
         LOG.info("Requesting narrative from %s (attempt %d)", model, attempt + 1)
-        resp = client.messages.create(
-            model=model,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": "report_sections"},
-            messages=messages,
-            **_sampling_kwargs(client),
-        )
+        try:
+            resp = client.messages.create(
+                model=model,
+                max_tokens=MAX_TOKENS,
+                system=SYSTEM_PROMPT,
+                tools=[tool],
+                tool_choice={"type": "tool", "name": "report_sections"},
+                messages=messages,
+                **_sampling_kwargs(client),
+            )
+        except Exception as exc:                                  # noqa: BLE001
+            # Surface the fix, not just the API's wording. These two arrive as
+            # opaque 400s that send people to a search engine.
+            raise RuntimeError(_explain(exc)) from exc
 
         block = next((b for b in resp.content if getattr(b, "type", "") == "tool_use"), None)
         if block is None:
@@ -626,6 +638,32 @@ def narrate(brief: dict, model: str = "", max_retries: int = 1) -> dict[str, Any
         last_problems = problems
 
     raise RuntimeError("The narrative failed validation: " + "; ".join(last_problems[:5]))
+
+
+def _explain(exc: Exception) -> str:
+    """Turn the API errors people actually hit into instructions."""
+    msg = str(exc)
+    low = msg.lower()
+    if "anthropic-workspace-id" in low or "workspace this request acts in" in low:
+        return (
+            "This API key is scoped to the whole organization, so the API needs "
+            "to be told which workspace to act in. Either set the workspace id "
+            "alongside the key and restart:\n"
+            "    export ANTHROPIC_WORKSPACE_ID=wrkspc_...\n"
+            "or create a key scoped to a single workspace, which needs nothing "
+            f"extra.\n\nOriginal error: {msg}")
+    if "authentication_error" in low or "invalid x-api-key" in low:
+        return ("The API key was rejected. Check ANTHROPIC_API_KEY in the shell "
+                f"that started the server.\n\nOriginal error: {msg}")
+    if "credit balance" in low or "billing" in low:
+        return ("The account has no available credit for the API. Reports still "
+                f"build without the summary.\n\nOriginal error: {msg}")
+    if "not_found_error" in low and "model" in low:
+        return ("That model id is not available to this account. Override it "
+                f"with MEA_AI_MODEL=<model-id>.\n\nOriginal error: {msg}")
+    if "rate_limit" in low:
+        return f"Rate limited by the API — try again shortly.\n\nOriginal error: {msg}"
+    return msg
 
 
 def _sampling_kwargs(client) -> dict:
