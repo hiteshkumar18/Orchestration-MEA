@@ -7,3 +7,11 @@
 # pinned scientific stack the pipeline depends on.
 fastapi>=0.110
 uvicorn[standard]>=0.27
+
+# Reports (slides). HTML reports need nothing extra.
+python-pptx>=0.6.23
+
+# Optional: the written summary in reports. Without it, and without
+# ANTHROPIC_API_KEY in the environment, reports are built from the measured
+# values alone and the UI explains why the summary is unavailable.
+anthropic>=0.40

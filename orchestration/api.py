@@ -26,6 +26,8 @@ import argparse
 import logging
 import os
 import sys
+import threading
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -534,6 +536,135 @@ def api_checkpoints(path: str = "", tail: int = 0):
 def api_logs(since: int = 0, limit: int = 500):
     """Live watcher activity — polled by the UI with the last seq it received."""
     return {"lines": LOG_RING.since(since, limit), "last_seq": LOG_RING.seq}
+
+
+# --------------------------------------------------------------------------- #
+# Reports
+# --------------------------------------------------------------------------- #
+# Report generation runs in a thread and is polled, rather than blocking the
+# request: collecting wells and rendering charts takes seconds, and the model
+# call takes longer still. One job at a time — these are IO- and CPU-heavy and
+# the UI only ever shows one.
+REPORT_JOB: dict = {"state": "idle"}
+REPORT_LOCK = threading.Lock()
+
+REPORT_KINDS = {"run", "condition", "qc", "longitudinal"}
+REPORT_FORMATS = {"html", "pptx"}
+
+
+class ReportPayload(BaseModel):
+    types: list[str] = ["run"]
+    formats: list[str] = ["html"]
+    use_ai: bool = False
+    output_dir: Optional[str] = None
+    report_dir: Optional[str] = None
+
+
+@app.get("/api/report/env")
+def api_report_env():
+    """Whether a written summary is available, and if not, precisely why.
+
+    The key is read from this process's environment and never returned — the UI
+    is told only that one is present.
+    """
+    try:
+        from narrate import status as narrate_status
+        st = narrate_status()
+    except Exception as exc:                                    # noqa: BLE001
+        st = {"key_present": False, "sdk_installed": False, "ready": False,
+              "model": None, "reason": f"Narration unavailable: {exc}"}
+
+    cfg = get_watcher().cfg
+    out = cfg.output_dir or cfg.driver_options.get("output_dir")
+    return {**st, "output_dir": out, "activity_output_dir": cfg.activity_output_dir}
+
+
+@app.post("/api/report/generate")
+def api_report_generate(payload: ReportPayload):
+    kinds = [k for k in payload.types if k in REPORT_KINDS]
+    formats = [f for f in payload.formats if f in REPORT_FORMATS]
+    if not kinds:
+        raise HTTPException(400, "Choose at least one report type.")
+    if not formats:
+        raise HTTPException(400, "Choose at least one format.")
+
+    cfg = get_watcher().cfg
+    out = payload.output_dir or cfg.output_dir or cfg.driver_options.get("output_dir")
+    if not out:
+        raise HTTPException(400, "No output directory is configured.")
+    out_path = Path(out).expanduser()
+    if not out_path.is_dir():
+        raise HTTPException(400, f"Output directory not found: {out_path}")
+
+    with REPORT_LOCK:
+        if REPORT_JOB.get("state") == "running":
+            raise HTTPException(409, "A report is already being generated.")
+        REPORT_JOB.clear()
+        REPORT_JOB.update({"state": "running", "progress": [], "files": [],
+                           "started": time.time(), "use_ai": payload.use_ai})
+
+    report_dir = Path(payload.report_dir).expanduser() if payload.report_dir else None
+    activity = cfg.activity_output_dir
+
+    def run() -> None:
+        try:
+            from reports import generate as generate_reports
+
+            def progress(msg: str) -> None:
+                with REPORT_LOCK:
+                    REPORT_JOB.setdefault("progress", []).append(msg)
+
+            res = generate_reports(
+                out_path, kinds, formats,
+                report_dir=report_dir,
+                activity_dir=Path(activity) if activity else None,
+                use_ai=payload.use_ai,
+                on_progress=progress)
+            with REPORT_LOCK:
+                REPORT_JOB.update(res)
+                REPORT_JOB["state"] = "error" if res.get("error") else "done"
+                # The narrative itself is large and already in the report; the
+                # UI only needs to know whether one was produced.
+                REPORT_JOB["has_narrative"] = bool(res.get("narrative"))
+                REPORT_JOB.pop("narrative", None)
+                REPORT_JOB.pop("summary", None)
+        except Exception as exc:                                # noqa: BLE001
+            LOG.exception("Report generation failed")
+            with REPORT_LOCK:
+                REPORT_JOB.update({"state": "error", "error": str(exc)})
+        finally:
+            with REPORT_LOCK:
+                REPORT_JOB["finished"] = time.time()
+
+    threading.Thread(target=run, name="mea-report", daemon=True).start()
+    return {"started": True}
+
+
+@app.get("/api/report/status")
+def api_report_status():
+    with REPORT_LOCK:
+        job = dict(REPORT_JOB)
+    # Show the file names rather than full paths; the folder is shown once.
+    job["file_names"] = [Path(f).name for f in job.get("files", [])]
+    return job
+
+
+@app.get("/api/report/file")
+def api_report_file(path: str):
+    """Serve a generated report, restricted to files this job actually wrote."""
+    with REPORT_LOCK:
+        allowed = {str(Path(f).resolve()) for f in REPORT_JOB.get("files", [])}
+    p = Path(path).expanduser()
+    try:
+        resolved = str(p.resolve())
+    except OSError:
+        raise HTTPException(400, "Bad path")
+    if resolved not in allowed:
+        LOG.warning("Refused report download outside the generated set: %s", p)
+        raise HTTPException(403, "Not a generated report")
+    if not p.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(p, filename=p.name)
 
 
 # --------------------------------------------------------------------------- #

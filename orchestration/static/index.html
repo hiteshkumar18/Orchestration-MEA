@@ -645,6 +645,164 @@ function RunBlock(props){
   );
 }
 
+/* ── Reports ───────────────────────────────────────────────────────────── */
+const R_TYPES=[
+  {k:"run",         t:"Run summary",   d:"One session: units, rates, bursts, per-well detail"},
+  {k:"condition",   t:"Condition",     d:"Wells grouped by genotype, with a comparison"},
+  {k:"qc",          t:"Quality control",d:"What passed, what failed, why units were rejected"},
+  {k:"longitudinal",t:"Longitudinal",  d:"The same metrics across sessions or DIV"},
+];
+
+function Reports({toast}){
+  const [env,setEnv]=useState(null);
+  const [types,setTypes]=useState(["run"]);
+  const [formats,setFormats]=useState(["html"]);
+  const [useAI,setUseAI]=useState(false);
+  const [job,setJob]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const timer=useRef(null);
+
+  const loadEnv=useCallback(async()=>{
+    try{ setEnv(await api("/api/report/env")); }catch(e){ setEnv({ready:false,reason:e.message}); }
+  },[]);
+  useEffect(()=>{loadEnv();},[loadEnv]);
+
+  // Poll only while a job is in flight, then stop — this panel is idle most
+  // of the time and should not add traffic to the 2s status loop.
+  const poll=useCallback(async()=>{
+    try{
+      const j=await api("/api/report/status");
+      setJob(j);
+      if(j.state!=="running"){
+        clearInterval(timer.current); timer.current=null; setBusy(false);
+        if(j.state==="done"){
+          toast("Reports ready",`${(j.file_names||[]).length} file(s) written`,"ok");
+        }else if(j.state==="error"){
+          toast("Report failed",j.error||"Unknown error","error");
+        }
+      }
+    }catch(e){ clearInterval(timer.current); timer.current=null; setBusy(false); }
+  },[toast]);
+  useEffect(()=>()=>clearInterval(timer.current),[]);
+
+  const toggle=(list,setList,k)=>setList(v=>v.includes(k)?v.filter(x=>x!==k):[...v,k]);
+
+  const start=async()=>{
+    if(!types.length||!formats.length) return;
+    setBusy(true); setJob({state:"running",progress:["Starting"]});
+    try{
+      await api("/api/report/generate",{method:"POST",
+        body:JSON.stringify({types,formats,use_ai:useAI})});
+      timer.current=setInterval(poll,1200); poll();
+    }catch(e){
+      setBusy(false); setJob(null); toast("Could not start",e.message,"error");
+    }
+  };
+
+  const running=job?.state==="running"||busy;
+  const outDir=env?.output_dir;
+  const step=(job?.progress||[]).slice(-1)[0];
+
+  return (
+    <div>
+      <div className="sec-h">
+        <div className="sec-t">Reports</div>
+        <div className="sec-d">Built from analysed output — figures and tables come from the data</div>
+      </div>
+      <div className="panel">
+        <div className="panel-b" style={{display:"flex",flexDirection:"column",gap:"var(--s5)"}}>
+
+          {!outDir&&
+            <div className="note n-w">
+              <span className="n-i"><Alert s={15}/></span>
+              <div>No output folder is configured yet. Set one below, or run an analysis first.</div>
+            </div>}
+
+          <div>
+            <div className="f-l" style={{marginBottom:8}}>Report type</div>
+            <div className="btns">
+              {R_TYPES.map(t=>
+                <button key={t.k} title={t.d}
+                  className={"btn btn-s"+(types.includes(t.k)?" btn-pri":"")}
+                  onClick={()=>toggle(types,setTypes,t.k)}>{t.t}</button>)}
+            </div>
+          </div>
+
+          <div>
+            <div className="f-l" style={{marginBottom:8}}>Format</div>
+            <div className="btns">
+              {[["html","HTML — one file to send"],["pptx","PowerPoint — slides"]].map(([k,d])=>
+                <button key={k} title={d}
+                  className={"btn btn-s"+(formats.includes(k)?" btn-pri":"")}
+                  onClick={()=>toggle(formats,setFormats,k)}>{k==="html"?"HTML":"PowerPoint"}</button>)}
+            </div>
+          </div>
+
+          {/* The written summary is opt-in and clearly separated: it is the
+              only part of the report that leaves this machine. */}
+          <div style={{borderTop:"1px solid var(--line)",paddingTop:"var(--s5)"}}>
+            <Switch id="use-ai" checked={useAI&&!!env?.ready} disabled={!env?.ready}
+                    onChange={setUseAI}
+                    label="Add a written summary from Claude"
+                    hint={env?.ready
+                      ? `The measured values are sent to ${env.model} and the summary it writes is checked back against them. Nothing else leaves this machine.`
+                      : (env?.reason||"Checking…")}/>
+            {!env?.ready&&
+              <div className="note n-a" style={{marginTop:"var(--s3)"}}>
+                <span className="n-i"><Info s={15}/></span>
+                <div>
+                  Set the key in the shell that starts the server, then restart it:
+                  <Code text={"export ANTHROPIC_API_KEY=sk-ant-...\n./run.sh"}/>
+                  <button className="btn btn-q btn-s" style={{marginTop:6}}
+                          onClick={loadEnv}>Check again</button>
+                </div>
+              </div>}
+          </div>
+
+          <div className="btns" style={{alignItems:"center"}}>
+            <button className="btn btn-pri" disabled={running||!outDir||!types.length||!formats.length}
+                    onClick={start}>
+              <Slide s={15}/>{running?"Generating…":"Generate report"}
+            </button>
+            {running&&step&&<span className="f-h">{step}</span>}
+            {outDir&&!running&&
+              <span className="f-h">into <span className="mono">{outDir}/reports</span></span>}
+          </div>
+
+          {job?.state==="done"&&(job.file_names||[]).length>0&&
+            <div>
+              <div className="f-l" style={{marginBottom:8}}>Generated</div>
+              <div className="btns">
+                {job.files.map((f,i)=>
+                  <a key={f} className="btn btn-s"
+                     href={`/api/report/file?path=${encodeURIComponent(f)}`}
+                     target="_blank" rel="noopener">{job.file_names[i]}</a>)}
+              </div>
+              {job.ai_error&&
+                <div className="note n-w" style={{marginTop:"var(--s4)"}}>
+                  <span className="n-i"><Alert s={15}/></span>
+                  <div>The measured report was written, but the summary was not:
+                    <br/><span className="mono">{job.ai_error}</span></div>
+                </div>}
+              {job.has_narrative&&
+                <div className="f-h" style={{marginTop:"var(--s3)"}}>
+                  Summary written by Claude; every figure it cites was checked against
+                  the measured values. The full prompt is saved beside the report.
+                </div>}
+              {(job.skipped||[]).map((s,i)=>
+                <div key={i} className="f-h" style={{marginTop:6}}>Skipped {s}</div>)}
+              {(job.warnings||[]).map((w,i)=>
+                <div key={i} className="f-h" style={{marginTop:6}}>{w}</div>)}
+            </div>}
+
+          {job?.state==="error"&&
+            <div className="note n-b"><span className="n-i"><Alert s={15}/></span><div>{job.error}</div></div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── App ───────────────────────────────────────────────────────────────── */
 function App(){
   const [schema,setSchema]=useState(null);
@@ -905,6 +1063,8 @@ function App(){
                             expanded={!!openWells[r.path]}/>)}</div>}
           </div>
         </div>
+
+        <Reports toast={toast}/>
 
         {log&&(
           <div>

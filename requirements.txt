@@ -16,3 +16,12 @@ matplotlib>=3.7
 # Optional: exact Mann-Whitney U in activity_trends.py (falls back to a normal
 # approximation when absent)
 # scipy>=1.10
+
+
+# Reports
+python-pptx>=0.6.23
+# Optional: the written summary. Needs ANTHROPIC_API_KEY in the environment;
+# reports build without it.
+anthropic>=0.40
+# cairosvg rasterises the pipeline's SVG rasters for slides (optional)
+# cairosvg>=2.7
