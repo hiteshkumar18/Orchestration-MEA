@@ -199,6 +199,11 @@ LEVEL_NAMES: dict[str, dict[str, str]] = {
         "burst_duration_s": "Superburst duration (s)",
         "burst_count": "Superbursts detected",
         "interburst_interval_s": "Inter-superburst interval (s)",
+        "spikes_per_burst": "Spikes per superburst",
+        "participation_fraction": "Units in superburst (fraction)",
+        "peak_participation": "Peak participation, superburst",
+        "peak_pop_rate_hz": "Peak population rate, superburst (Hz)",
+        "ifbi_s": "Inter-superburst-fragment interval (s)",
     },
 }
 
@@ -646,16 +651,40 @@ def assign_div(wells: list[Well], plating: Optional[dict] = None) -> str:
     return "none"
 
 
+# Reporting order, most-cited first. Network bursts lead because that is the
+# level most results are quoted at; fragments and superbursts follow.
+METRIC_ORDER = [
+    "units",
+    # network-burst level
+    "nb_burst_rate_hz", "nb_burst_duration_s", "nb_interburst_interval_s",
+    "nb_participation_fraction", "nb_spikes_per_burst", "nb_peak_pop_rate_hz",
+    "nb_peak_participation", "nb_burst_count",
+    # fragment level
+    "burst_rate_hz", "burst_duration_s", "ifbi_s", "participation_fraction",
+    "spikes_per_burst", "peak_pop_rate_hz", "peak_participation", "burst_count",
+    # superbursts
+    "sb_burst_rate_hz", "sb_burst_duration_s", "sb_interburst_interval_s",
+    "sb_participation_fraction", "sb_spikes_per_burst", "sb_peak_pop_rate_hz",
+    "sb_peak_participation", "sb_burst_count",
+    # per-unit quality metrics, when a curated metrics file is present
+    "firing_rate_hz", "amplitude_uv", "pct_spikes_in_bursts",
+    "network_burstiness", "synchrony", "presence_ratio", "isi_violations",
+    "snr", "num_spikes", "units_rejected",
+]
+
+
 def available_metrics(wells: list[Well]) -> list[str]:
-    """Canonical metrics actually present, in a sensible reporting order."""
-    order = ["units", "firing_rate_hz", "amplitude_uv", "burst_rate_hz",
-             "pct_spikes_in_bursts", "network_burstiness", "spikes_per_burst",
-             "burst_duration_s", "interburst_interval_s", "synchrony",
-             "presence_ratio", "isi_violations", "snr", "num_spikes",
-             "units_rejected"]
+    """Canonical metrics actually present, in a sensible reporting order.
+
+    Anything present but not in METRIC_ORDER is appended rather than dropped:
+    an earlier version filtered strictly against the list, so a newly
+    recognised metric was silently missing from every report.
+    """
     present = {k for w in wells for k in list(w.metrics) + ["units"] * (w.units is not None)}
-    present |= {"units_rejected"} if any(w.units_rejected is not None for w in wells) else set()
-    return [k for k in order if k in present]
+    if any(w.units_rejected is not None for w in wells):
+        present.add("units_rejected")
+    ordered = [k for k in METRIC_ORDER if k in present]
+    return ordered + sorted(present - set(ordered))
 
 
 def group_wells(wells: list[Well]) -> dict[str, list[Well]]:

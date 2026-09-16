@@ -530,6 +530,11 @@ def build_html(wells: list[Well], kind: str, out: Path,
         return (f'<div class="cell"><div class="cap">{e(label)}</div>'
                 f'<div class="panel">{inner}</div></div>')
 
+    def sec_scroll(label: str, inner: str) -> str:
+        """Like sec(), but lets a wide table scroll instead of being squeezed."""
+        return (f'<div class="cell wide"><div class="cap">{e(label)}</div>'
+                f'<div class="panel scroll">{inner}</div></div>')
+
     def table_html(rows: list[list[str]]) -> str:
         if not rows:
             return ""
@@ -711,9 +716,13 @@ h1{{margin:0;font-size:30px;font-weight:700;letter-spacing:-.02em}}
 .cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));
  gap:22px 26px;align-items:start;margin-bottom:22px}}
 .cell{{min-width:0}}
+.cell.wide{{grid-column:1 / -1}}
 .cap{{font-size:12.5px;font-weight:600;color:#{LABEL};margin:0 0 9px}}
 .panel{{background:#{PAPER};border:1px solid #{BORDER};border-radius:8px;padding:12px}}
 .panel.flush{{padding:0;overflow:hidden}}
+.panel.scroll{{overflow-x:auto}}
+.panel.scroll table{{min-width:100%;width:max-content}}
+.panel.scroll th,.panel.scroll td{{white-space:nowrap}}
 img{{max-width:100%;height:auto;display:block;border-radius:4px}}
 .tint{{background:#{ACCENT_BG};border:1px solid #{ACCENT_LINE};border-radius:8px;
  padding:20px 22px}}
@@ -775,7 +784,7 @@ footer{{font-size:11.5px;color:#{MUTED};margin-top:30px;
 <div class="tiles">{tiles}</div>
 <div class="cols">{charts}{stat_panel}</div>
 {f'<div class="cols">{extra}</div>' if extra else ""}
-<div class="cols">{sec("Per well", table_html(well_table(wells, metrics)))}</div>
+<div class="cols">{sec_scroll("Per well", table_html(well_table(wells, metrics)))}</div>
 {f'<div class="cols">{rasters}</div>' if rasters else ""}
 </div>
 {activity_block}
