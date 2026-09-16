@@ -718,6 +718,30 @@ function Reports({toast}){
               <div>No output folder is configured yet. Set one below, or run an analysis first.</div>
             </div>}
 
+          {/* What the report will actually read, shown before it is built —
+              a missing activity folder used to be invisible until the report
+              came out with no activity tab. */}
+          {outDir&&
+            <div className="srcs">
+              <div className="src">
+                <span className="src-l">Network analysis</span>
+                <span className="src-v mono">{outDir}</span>
+              </div>
+              <div className="src">
+                <span className="src-l">Activity scan</span>
+                {env?.activity_runs
+                  ? <span className="src-v">
+                      <span className="mono">{env.activity_dir}</span>
+                      <span className="src-n">{env.activity_runs} run{env.activity_runs>1?"s":""} ·
+                        {" "}{env.activity_wells} wells
+                        {env.activity_chips?.length?` · ${env.activity_chips.join(", ")}`:""}
+                        {env.activity_source!=="configured"?" · found automatically":""}</span>
+                    </span>
+                  : <span className="src-v src-off">Not set — the report will have no activity tab.
+                      Set the activity output folder under Analyses.</span>}
+              </div>
+            </div>}
+
           <div>
             <div className="f-l" style={{marginBottom:8}}>Report type</div>
             <div className="btns">

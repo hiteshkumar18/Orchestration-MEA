@@ -560,6 +560,43 @@ class ReportPayload(BaseModel):
     report_dir: Optional[str] = None
 
 
+def _resolve_activity(cfg) -> dict:
+    """Where the activity scan will be read from, and what is there.
+
+    The configured folder wins. If it is blank, look for an ActivityScan tree
+    beside or beneath the analysed output — that is where the scan usually
+    lands, and hunting for it by hand is the reason reports came out with no
+    activity tab. A guess is always reported as a guess, never applied silently.
+    """
+    out = cfg.output_dir or cfg.driver_options.get("output_dir") or ""
+    configured = (cfg.activity_output_dir or "").strip()
+    candidates: list[tuple[str, str]] = []
+    if configured:
+        candidates.append((configured, "configured"))
+    elif out:
+        base = Path(out).expanduser()
+        for guess in (base / "ActivityScan", base.parent / "ActivityScan",
+                      base / "activity_scan_output",
+                      base.parent / "activity_scan_output"):
+            if guess.is_dir():
+                candidates.append((str(guess), "found next to the output folder"))
+
+    for path, how in candidates:
+        try:
+            from report_data import collect_activity
+            runs = collect_activity(Path(path))
+        except Exception:                                    # noqa: BLE001
+            runs = []
+        if runs:
+            return {"activity_dir": path, "activity_source": how,
+                    "activity_runs": len(runs),
+                    "activity_wells": sum(len(r["wells"]) for r in runs),
+                    "activity_chips": sorted({r["chip_id"] for r in runs if r["chip_id"]})}
+    return {"activity_dir": configured or None,
+            "activity_source": "configured" if configured else "none",
+            "activity_runs": 0, "activity_wells": 0, "activity_chips": []}
+
+
 @app.get("/api/report/env")
 def api_report_env():
     """Whether a written summary is available, and if not, precisely why.
@@ -576,7 +613,9 @@ def api_report_env():
 
     cfg = get_watcher().cfg
     out = cfg.output_dir or cfg.driver_options.get("output_dir")
-    return {**st, "output_dir": out, "activity_output_dir": cfg.activity_output_dir}
+    return {**st, "output_dir": out,
+            "activity_output_dir": cfg.activity_output_dir,
+            **_resolve_activity(cfg)}
 
 
 @app.post("/api/report/generate")
@@ -604,7 +643,7 @@ def api_report_generate(payload: ReportPayload):
                            "started": time.time(), "use_ai": payload.use_ai})
 
     report_dir = Path(payload.report_dir).expanduser() if payload.report_dir else None
-    activity = cfg.activity_output_dir
+    activity = _resolve_activity(cfg)["activity_dir"]
 
     def run() -> None:
         try:
