@@ -52,16 +52,21 @@ from report_data import (  # noqa: E402
 
 LOG = logging.getLogger("mea.reports")
 
-# Palette: deep midnight with an electrode-teal accent — chosen for recordings
-# on a dark array rather than a generic corporate blue.
-INK = "171A3A"
-INK_SOFT = "3D4166"
-ACCENT = "2DD4BF"
-ACCENT_2 = "6366F1"
+# Palette follows the lab's existing figure sheets: near-black type, quiet grey
+# section labels, hairline-bordered panels, and a single muted green used for
+# the run badge and the tinted statistics panel.
+INK = "1F2328"
+INK_SOFT = "4A5560"
+ACCENT = "2F6F52"          # deep green — badges, links, emphasis
+ACCENT_BG = "E6F0EA"       # tinted panel fill
+ACCENT_LINE = "CFE3D8"
+ACCENT_2 = "4F9D7A"      # secondary green, for ungrouped bars
 PAPER = "FFFFFF"
-MUTED = "8A8FA8"
-OK, WARN, BAD = "1D8A4E", "B45309", "C8352B"
-SERIES = ["6366F1", "2DD4BF", "F59E0B", "EC4899", "10B981", "8B5CF6"]
+MUTED = "8A94A6"
+LABEL = "6B7684"           # the small grey section captions
+BORDER = "E3E7EC"
+OK, WARN, BAD = "2F6F52", "B45309", "C8352B"
+SERIES = ["2F6F52", "4F9D7A", "7FB3A0", "B45309", "5B7C99", "8B6F9E"]
 
 REPORT_TITLES = {
     "run": "Run summary",
@@ -361,13 +366,14 @@ def _narrative_html(narrative: dict, e) -> str:
         parts.append(f'<div class="side"><h4>Caveats</h4><ul>{items}</ul></div>')
 
     return (f'<section class="ai"><div class="aihead"><h2>Summary</h2>'
-            f'<span class="badge">{e(AI_LABEL)}</span></div>'
+            f'<span class="aibadge">{e(AI_LABEL)}</span></div>'
             f'{"".join(parts)}</section>')
 
 
 def build_html(wells: list[Well], kind: str, out: Path,
                activity_dir: Optional[Path] = None,
-               narrative: Optional[dict] = None) -> Path:
+               narrative: Optional[dict] = None,
+               time_kind: str = "none") -> Path:
     s = summarise(wells)
     metrics = s["metrics"]
     e = html_mod.escape
@@ -392,6 +398,11 @@ def build_html(wells: list[Well], kind: str, out: Path,
             if c:
                 figs.append((PRETTY.get(m, m), c))
 
+    def sec(label: str, inner: str) -> str:
+        """A grey caption above a hairline panel — the page's repeating unit."""
+        return (f'<div class="cell"><div class="cap">{e(label)}</div>'
+                f'<div class="panel">{inner}</div></div>')
+
     def table_html(rows: list[list[str]]) -> str:
         if not rows:
             return ""
@@ -405,8 +416,10 @@ def build_html(wells: list[Well], kind: str, out: Path,
         f'<div class="l">{e(l)}</div><div class="n">{e(n)}</div></div>'
         for v, l, n in headline_stats(wells, s))
 
+    # Each figure sits in its own hairline panel under a quiet grey caption.
     charts = "".join(
-        f'<section><h2>{e(t)}</h2><img src="{_b64(p)}" alt="{e(t)}"></section>'
+        f'<div class="cell"><div class="cap">{e(t)}</div>'
+        f'<div class="panel"><img src="{_b64(p)}" alt="{e(t)}"></div></div>'
         for t, p in figs)
 
     extra = ""
@@ -416,7 +429,7 @@ def build_html(wells: list[Well], kind: str, out: Path,
             items = "".join(
                 f"<li><b>{e(w.well)}</b> — {e((w.error or 'failed')[:300])}</li>"
                 for w in bad)
-            extra += f'<section><h2>Failures</h2><ul class="fail">{items}</ul></section>'
+            extra += sec("Failures", f'<ul class="fail">{items}</ul>')
         reasons: dict[str, int] = {}
         for w in wells:
             for r, n in w.rejection_reasons.items():
@@ -424,12 +437,12 @@ def build_html(wells: list[Well], kind: str, out: Path,
         if reasons:
             rows = [["Reason", "Units"]] + [[k, str(v)] for k, v in
                                             sorted(reasons.items(), key=lambda x: -x[1])]
-            extra += f"<section><h2>Why units were rejected</h2>{table_html(rows)}</section>"
+            extra += sec("Why units were rejected", table_html(rows))
 
     if kind == "condition":
         gt = group_table(wells, metrics)
         if gt:
-            extra += f"<section><h2>By group</h2>{table_html(gt)}</section>"
+            extra += sec("By group", table_html(gt))
 
     rasters = ""
     with_raster = [w for w in wells if w.figures.get("raster")][:8]
@@ -442,76 +455,137 @@ def build_html(wells: list[Well], kind: str, out: Path,
                              f'<figcaption>{e(w.well)}'
                              f'{" · " + e(w.group) if w.group else ""}</figcaption></figure>')
         if cards:
-            rasters = f'<section><h2>Rasters</h2><div class="grid">{"".join(cards)}</div></section>'
+            rasters = sec("Rasters", f'<div class="grid">{"".join(cards)}</div>')
 
-    scope = " · ".join(x for x in [
-        ", ".join(s["chips"][:4]) or "",
-        f"{len(s['runs'])} run(s)" if s["runs"] else "",
-        ", ".join(s["groups"]) if s["groups"] else "",
-    ] if x)
+    # ── Header, following the lab's figure sheets: the chip is the title, with
+    # the plate and the timepoint set to its right, the timepoint in a badge.
+    chips = s["chips"]
+    doc_title = chips[0] if len(chips) == 1 else (
+        ", ".join(chips[:3]) if chips else REPORT_TITLES.get(kind, kind))
+    meta_bits = []
+    if len(chips) > 1:
+        meta_bits.append(f"{len(chips)} chips")
+    if s["runs"]:
+        meta_bits.append(f"{len(s['runs'])} run{'s' if len(s['runs']) > 1 else ''}")
+    if s["groups"]:
+        meta_bits.append(", ".join(s["groups"]))
+    meta = " · ".join(meta_bits)
+
+    # Only call it DIV when a plating date was actually found. Without one the
+    # values are session order, and printing those as "DIV 0" would be a
+    # fabricated timepoint on the face of the report.
+    divs = sorted({w.div for w in wells if w.div is not None})
+    if divs and time_kind == "div":
+        badge = f"DIV {divs[0]}" if len(divs) == 1 else f"DIV {divs[0]}–{divs[-1]}"
+    elif len(divs) > 1:
+        badge = f"{len(divs)} sessions"
+    else:
+        badge = REPORT_TITLES.get(kind, kind)
+
+    # ── The tinted panel: one metric, per well, beside the figures.
+    stat_panel = ""
+    primary = metrics[0] if metrics else None
+    if primary:
+        rows_ = [(w, w.get(primary)) for w in wells]
+        rows_ = [(w, v) for w, v in rows_ if v is not None][:24]
+        if rows_:
+            items = "".join(
+                f'<div class="st"><span class="sw">{e(w.well.replace("well", "Well "))}'
+                f'</span><span class="sv">{e(fmt(v))}</span></div>'
+                for w, v in rows_)
+            shown, total = len(rows_), len([w for w in wells if w.get(primary) is not None])
+            note = (f"{PRETTY.get(primary, primary)} per well."
+                    + (f" Showing {shown} of {total}." if total > shown else ""))
+            stat_panel = (
+                f'<div class="tint"><h3>{e(PRETTY.get(primary, primary))} by well</h3>'
+                f'<div class="stats">{items}</div>'
+                f'<div class="tnote">{e(note)}</div></div>')
 
     doc = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<title>MEA {e(REPORT_TITLES.get(kind, kind))}</title><style>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{e(doc_title)} — MEA {e(REPORT_TITLES.get(kind, kind))}</title><style>
 *{{box-sizing:border-box}}
-body{{margin:0;background:#F7F8FB;color:#{INK};
- font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
- letter-spacing:-.011em}}
-.wrap{{max-width:1080px;margin:0 auto;padding:40px 28px 72px}}
-header{{background:#{INK};color:#fff;margin:-40px -28px 32px;padding:44px 28px 36px}}
-h1{{margin:0;font-size:30px;font-weight:600;letter-spacing:-.025em}}
-.sub{{margin-top:8px;font-size:14px;opacity:.75}}
-h2{{font-size:18px;font-weight:600;letter-spacing:-.02em;margin:0 0 14px}}
-section{{background:#fff;border:1px solid #E6E8F0;border-radius:14px;
- padding:22px 24px;margin-bottom:20px}}
-.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
- gap:14px;margin-bottom:22px}}
-.tile{{background:#fff;border:1px solid #E6E8F0;border-radius:14px;padding:18px 20px}}
-.tile .v{{font-size:31px;font-weight:600;letter-spacing:-.03em;line-height:1}}
-.tile .l{{font-size:13px;color:#{INK_SOFT};margin-top:7px;font-weight:500}}
-.tile .n{{font-size:11.5px;color:#{MUTED};margin-top:2px}}
-img{{max-width:100%;height:auto;border-radius:8px;display:block}}
-table{{width:100%;border-collapse:collapse;font-size:13.5px}}
-th{{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;
- color:#{INK_SOFT};font-weight:600;padding:8px 10px;border-bottom:2px solid #E6E8F0}}
-td{{padding:9px 10px;border-bottom:1px solid #F0F2F7;font-variant-numeric:tabular-nums}}
+body{{margin:0;background:#{PAPER};color:#{INK};
+ font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,sans-serif}}
+.wrap{{max-width:1180px;margin:0 auto;padding:34px 34px 64px}}
+header{{display:flex;align-items:flex-start;justify-content:space-between;
+ gap:24px;flex-wrap:wrap;margin-bottom:30px}}
+h1{{margin:0;font-size:30px;font-weight:700;letter-spacing:-.02em}}
+.hmeta{{display:flex;align-items:center;gap:14px;padding-top:9px}}
+.hmeta .m{{font-size:13.5px;color:#{MUTED}}}
+.badge{{font-size:12.5px;font-weight:700;color:#{ACCENT};background:#{ACCENT_BG};
+ border:1px solid #{ACCENT_LINE};border-radius:7px;padding:7px 15px;
+ letter-spacing:.02em;white-space:nowrap}}
+.cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));
+ gap:22px 26px;align-items:start;margin-bottom:22px}}
+.cell{{min-width:0}}
+.cap{{font-size:12.5px;font-weight:600;color:#{LABEL};margin:0 0 9px}}
+.panel{{background:#{PAPER};border:1px solid #{BORDER};border-radius:8px;padding:12px}}
+.panel.flush{{padding:0;overflow:hidden}}
+img{{max-width:100%;height:auto;display:block;border-radius:4px}}
+.tint{{background:#{ACCENT_BG};border:1px solid #{ACCENT_LINE};border-radius:8px;
+ padding:20px 22px}}
+.tint h3{{margin:0 0 15px;font-size:15px;font-weight:700;color:#{INK}}}
+.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+ gap:9px 26px}}
+.st{{display:flex;justify-content:space-between;gap:14px;font-size:13.5px}}
+.sw{{color:#{INK_SOFT}}}
+.sv{{font-weight:600;font-variant-numeric:tabular-nums}}
+.tnote{{margin-top:16px;font-size:11.5px;color:#{MUTED}}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th{{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+ color:#{LABEL};font-weight:600;padding:9px 11px;border-bottom:1px solid #{BORDER}}}
+td{{padding:8px 11px;border-bottom:1px solid #F1F3F5;font-variant-numeric:tabular-nums}}
 tr:last-child td{{border-bottom:none}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}}
 figure{{margin:0}}
-figcaption{{font-size:12px;color:#{INK_SOFT};margin-top:7px}}
-ul.fail{{margin:0;padding-left:20px;font-size:13.5px}}
-ul.fail li{{margin-bottom:8px}}
-.ai{{border-left:3px solid #{ACCENT}}}
+figcaption{{font-size:11.5px;color:#{LABEL};margin-top:6px}}
+ul.fail{{margin:0;padding-left:19px;font-size:13px}}
+ul.fail li{{margin-bottom:7px}}
+.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+ gap:14px;margin-bottom:26px}}
+.tile{{border:1px solid #{BORDER};border-radius:8px;padding:15px 17px}}
+.tile .v{{font-size:27px;font-weight:700;letter-spacing:-.025em;line-height:1.05}}
+.tile .l{{font-size:12.5px;color:#{INK_SOFT};margin-top:6px;font-weight:600}}
+.tile .n{{font-size:11px;color:#{MUTED};margin-top:2px}}
+.ai{{border:1px solid #{BORDER};border-radius:8px;padding:22px 24px;margin-bottom:26px}}
 .aihead{{display:flex;align-items:baseline;justify-content:space-between;
- gap:16px;flex-wrap:wrap;margin-bottom:16px}}
-.aihead h2{{margin:0}}
-.badge{{font-size:11px;color:#{INK_SOFT};background:#F2F4FA;border-radius:999px;
- padding:4px 11px;font-weight:500;white-space:nowrap}}
-.lede{{font-size:19px;line-height:1.45;letter-spacing:-.017em;margin:0 0 20px;
- font-weight:500}}
-.finding{{margin-bottom:18px}}
-.finding h3{{font-size:14.5px;font-weight:600;margin:0 0 5px}}
-.finding p{{margin:0;color:#{INK_SOFT};font-size:14px}}
-.finding.extra h3::after{{content:"beyond the standard sections";font-weight:400;
- font-size:11px;color:#{MUTED};margin-left:8px}}
-.cited{{font-size:11px;color:#{MUTED};margin-top:5px}}
-.side{{border-top:1px solid #F0F2F7;padding-top:14px;margin-top:16px}}
-.side h4{{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;
- color:#{INK_SOFT};margin:0 0 7px;font-weight:600}}
-.side ul{{margin:0;padding-left:18px;font-size:13px;color:#{INK_SOFT}}}
-.side li{{margin-bottom:5px}}
-footer{{font-size:12px;color:#{MUTED};margin-top:26px}}
+ gap:16px;flex-wrap:wrap;margin-bottom:15px}}
+.aihead h2{{margin:0;font-size:16px;font-weight:700}}
+.aibadge{{font-size:11px;color:#{ACCENT};background:#{ACCENT_BG};
+ border:1px solid #{ACCENT_LINE};border-radius:999px;padding:4px 11px;
+ font-weight:600;white-space:nowrap}}
+.lede{{font-size:17px;line-height:1.45;margin:0 0 18px;font-weight:600}}
+.finding{{margin-bottom:16px}}
+.finding h3{{font-size:13.5px;font-weight:700;margin:0 0 4px}}
+.finding p{{margin:0;color:#{INK_SOFT};font-size:13.5px}}
+.finding.extra h3::after{{content:" beyond the standard sections";font-weight:400;
+ font-size:11px;color:#{MUTED}}}
+.cited{{font-size:11px;color:#{MUTED};margin-top:4px}}
+.side{{border-top:1px solid #F1F3F5;padding-top:13px;margin-top:15px}}
+.side h4{{font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+ color:#{LABEL};margin:0 0 6px;font-weight:600}}
+.side ul{{margin:0;padding-left:17px;font-size:12.5px;color:#{INK_SOFT}}}
+.side li{{margin-bottom:4px}}
+footer{{font-size:11.5px;color:#{MUTED};margin-top:30px;
+ border-top:1px solid #{BORDER};padding-top:16px}}
+@media print{{.wrap{{max-width:none;padding:0}} .cell{{break-inside:avoid}}}}
 </style></head><body><div class="wrap">
-<header><h1>MEA {e(REPORT_TITLES.get(kind, kind))}</h1>
-<div class="sub">{e(scope) or "No scope detected"}</div></header>
-<div class="tiles">{tiles}</div>
+<header>
+  <h1>{e(doc_title)}</h1>
+  <div class="hmeta">{f'<span class="m">{e(meta)}</span>' if meta else ""}
+    <span class="badge">{e(badge)}</span></div>
+</header>
 {_narrative_html(narrative, e)}
-{charts}{extra}
-<section><h2>Per well</h2>{table_html(well_table(wells, metrics))}</section>
-{rasters}
-<footer>Generated {e(datetime.now().strftime("%Y-%m-%d %H:%M"))} ·
-Orchestration-MEA · metrics read from {e(", ".join(sorted({x for w in wells for x in w.sources})) or "pipeline output")}
+<div class="tiles">{tiles}</div>
+<div class="cols">{charts}{stat_panel}</div>
+{f'<div class="cols">{extra}</div>' if extra else ""}
+<div class="cols">{sec("Per well", table_html(well_table(wells, metrics)))}</div>
+{f'<div class="cols">{rasters}</div>' if rasters else ""}
+<footer>MEA {e(REPORT_TITLES.get(kind, kind))} · generated
+{e(datetime.now().strftime("%Y-%m-%d %H:%M"))} · Orchestration-MEA · read from
+{e(", ".join(sorted(set().union(*[w.sources for w in wells]) if wells else [])) or "pipeline output")}
 </footer></div></body></html>"""
-
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(doc, encoding="utf-8")
     LOG.info("Wrote %s", out)
@@ -578,16 +652,16 @@ def build_pptx(wells: list[Well], kind: str, out: Path,
     sl = prs.slides.add_slide(blank)
     bg = sl.background.fill
     bg.solid()
-    bg.fore_color.rgb = rgb(INK)
+    bg.fore_color.rgb = rgb(ACCENT)
     text(sl, "MEA " + REPORT_TITLES.get(kind, kind), Inches(.9), Inches(2.5),
          Inches(11.5), Inches(1.2), size=44, bold=True, colour="FFFFFF", font="Cambria")
     scope = " · ".join(x for x in [", ".join(s["chips"][:4]),
                                    f"{s['wells']} wells",
                                    ", ".join(s["groups"])] if x)
     text(sl, scope, Inches(.9), Inches(3.8), Inches(11.5), Inches(.6),
-         size=17, colour="C9CCE0")
+         size=17, colour="D8E8DF")
     text(sl, datetime.now().strftime("%d %B %Y"), Inches(.9), Inches(6.3),
-         Inches(6), Inches(.4), size=13, colour="8A8FA8")
+         Inches(6), Inches(.4), size=13, colour="AFCCBD")
     sl.notes_slide.notes_text_frame.text = (
         "Generated by Orchestration-MEA from the pipeline's analysed output.")
 
@@ -665,7 +739,7 @@ def build_pptx(wells: list[Well], kind: str, out: Path,
     tw, gap = Inches(2.85), Inches(.28)
     for i, (v, label, note) in enumerate(tiles):
         x = Inches(.7) + i * (tw + gap)
-        fill(sl, x, Inches(1.75), tw, Inches(1.9), "F2F4FA")
+        fill(sl, x, Inches(1.75), tw, Inches(1.9), ACCENT_BG)
         text(sl, v, x + Inches(.28), Inches(2.0), tw - Inches(.5), Inches(.8),
              size=40, bold=True, colour=INK)
         text(sl, label, x + Inches(.28), Inches(2.85), tw - Inches(.5), Inches(.35),
@@ -881,8 +955,8 @@ def generate(output_dir: Path,
         for f in formats:
             out = dest / f"mea_{kind}_{stamp}.{f}"
             say(f"Writing {out.name}")
-            r = (build_html(wells, kind, out, activity_dir, narrative) if f == "html"
-                 else build_pptx(wells, kind, out, narrative))
+            r = (build_html(wells, kind, out, activity_dir, narrative, time_kind)
+                 if f == "html" else build_pptx(wells, kind, out, narrative))
             if r:
                 result["files"].append(str(r))
             elif f == "pptx":
