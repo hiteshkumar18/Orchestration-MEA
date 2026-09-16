@@ -20,7 +20,7 @@ Usage
     python orchestration/reports.py /path/to/AnalyzedData --type condition --format pptx
     python orchestration/reports.py /path/to/AnalyzedData --type qc --format html pptx
     python orchestration/reports.py /path/to/AnalyzedData \
-        --activity-dir /path/to/ActivityScan     # adds genotype labels
+        --activity-dir /path/to/ActivityScan     # genotype labels + activity tab
 
 Notes
 -----
@@ -29,6 +29,11 @@ Notes
   cairosvg when it is available, and referenced by path when it is not.
 * Metric names are matched tolerantly (see ``report_data``), so a column named
   slightly differently still appears.
+* With ``--activity-dir``, the HTML gains a second tab showing the activity
+  scan: whole-array coverage, active area per well, and the scan's own figures.
+  The two are kept in separate views because they measure different things —
+  the scan looks at every electrode before sorting, the network analysis at
+  sorted units — and a shared table would invite reading across them.
 """
 
 from __future__ import annotations
@@ -46,8 +51,8 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_data import (  # noqa: E402
-    PRETTY, Well, assign_div, attach_activity, available_metrics, collect_wells,
-    group_wells, summarise,
+    ACTIVITY_METRICS, PRETTY, Well, activity_value, assign_div, attach_activity,
+    available_metrics, collect_activity, collect_wells, group_wells, summarise,
 )
 
 LOG = logging.getLogger("mea.reports")
@@ -370,6 +375,127 @@ def _narrative_html(narrative: dict, e) -> str:
             f'{"".join(parts)}</section>')
 
 
+# Plain DOM, no dependencies: the report has to work from a file:// URL years
+# from now, with no network. Printing shows every view, so a PDF export is not
+# silently missing the tab that happened to be hidden.
+_TAB_SCRIPT = """<script>
+(function () {
+  var tabs = [].slice.call(document.querySelectorAll('.tab'));
+  function show(id) {
+    tabs.forEach(function (t) {
+      var on = t.dataset.view === id;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      var v = document.getElementById(t.dataset.view);
+      if (v) { v.hidden = !on; }
+    });
+    if (history.replaceState) { history.replaceState(null, '', '#' + id); }
+  }
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () { show(t.dataset.view); });
+  });
+  if (location.hash && document.getElementById(location.hash.slice(1))) {
+    show(location.hash.slice(1));
+  }
+  window.addEventListener('beforeprint', function () {
+    document.querySelectorAll('.view').forEach(function (v) { v.hidden = false; });
+  });
+  window.addEventListener('afterprint', function () {
+    var sel = document.querySelector('.tab[aria-selected="true"]');
+    if (sel) { show(sel.dataset.view); }
+  });
+})();
+</script>"""
+
+
+def _png_b64(path: Path) -> Optional[str]:
+    try:
+        return _b64(path.read_bytes())
+    except OSError:
+        LOG.debug("Could not read figure %s", path, exc_info=True)
+        return None
+
+
+def _activity_html(runs: list[dict], e, sec, table_html) -> str:
+    """The activity-scan view: whole-array coverage, before any sorting.
+
+    Deliberately kept as its own tab rather than merged into the network
+    sections — the two measure different things on different electrodes, and
+    putting them in one table would invite reading across them.
+    """
+    if not runs:
+        return ""
+
+    out: list[str] = []
+    for run in runs:
+        head_bits = [b for b in (run["chip_id"], run["run_id"]) if b]
+        scan = run.get("scan_seconds")
+        sub = " · ".join(x for x in [
+            f"{len(run['wells'])} wells",
+            f"{scan:g}s scan" if isinstance(scan, (int, float)) else "",
+            run.get("recorded") or "",
+        ] if x)
+        out.append(f'<div class="runhead"><h2>{e(" · ".join(head_bits) or "Activity scan")}'
+                   f'</h2><span class="m">{e(sub)}</span></div>')
+
+        cells: list[str] = []
+        for label, path in run["figures"]:
+            src = _png_b64(path)
+            if src:
+                cells.append(sec(label, f'<img src="{src}" alt="{e(label)}">'))
+
+        # The tinted panel, mirroring the network view: one headline number
+        # per well, beside the figures.
+        rows_ = [(w, activity_value(w, "active_fraction")) for w in run["wells"]]
+        rows_ = [(w, v) for w, v in rows_ if v is not None]
+        if rows_:
+            items = "".join(
+                f'<div class="st"><span class="sw">'
+                f'{e(str(w.get("well_label") or w.get("well_id")))}</span>'
+                f'<span class="sv">{v:.2f}%</span></div>' for w, v in rows_)
+            cells.append(
+                '<div class="tint"><h3>Active area by well</h3>'
+                f'<div class="stats">{items}</div>'
+                '<div class="tnote">Share of scanned electrodes firing above '
+                'the activity threshold.</div></div>')
+        if cells:
+            out.append(f'<div class="cols">{"".join(cells)}</div>')
+
+        # Per-well metrics table.
+        present = [(k, lab, suf) for k, lab, suf in ACTIVITY_METRICS
+                   if any(activity_value(w, k) is not None for w in run["wells"])]
+        if present:
+            header = ["Well", "Group"] + [lab for _, lab, _ in present]
+            body = []
+            for w in run["wells"]:
+                row = [str(w.get("well_label") or w.get("well_id") or "—"),
+                       str(w.get("group") or "—")]
+                for k, _lab, suf in present:
+                    v = activity_value(w, k)
+                    row.append("—" if v is None else
+                               (f"{v:.2f}{suf}" if isinstance(v, float) else f"{v}{suf}"))
+                body.append(row)
+            out.append(f'<div class="cols">{sec("Per well", table_html([header] + body))}</div>')
+
+        # Per-well figures, capped — a 24-well plate would otherwise inline
+        # 72 images and make the file unusable to email.
+        figs: list[str] = []
+        for w in run["wells"]:
+            for label, path in (w.get("_figures") or [])[:1]:
+                src = _png_b64(path)
+                if src:
+                    name = e(str(w.get("well_label") or w.get("well_id")))
+                    figs.append(f'<figure><img src="{src}" alt="{e(label)} {name}">'
+                                f'<figcaption>{name}'
+                                f'{" · " + e(str(w.get("group"))) if w.get("group") else ""}'
+                                f'</figcaption></figure>')
+            if len(figs) >= 12:
+                break
+        if figs:
+            grid = '<div class="grid">' + "".join(figs) + "</div>"
+            out.append(f'<div class="cols">{sec("Activity maps", grid)}</div>')
+    return "".join(out)
+
+
 def build_html(wells: list[Well], kind: str, out: Path,
                activity_dir: Optional[Path] = None,
                narrative: Optional[dict] = None,
@@ -457,6 +583,26 @@ def build_html(wells: list[Well], kind: str, out: Path,
         if cards:
             rasters = sec("Rasters", f'<div class="grid">{"".join(cards)}</div>')
 
+    activity_runs = collect_activity(activity_dir)
+    activity_view = _activity_html(activity_runs, e, sec, table_html)
+
+    # The switcher only appears when there is something to switch to; with no
+    # activity scan the page stays exactly as it was.
+    if activity_view:
+        n_act = sum(len(r["wells"]) for r in activity_runs)
+        tabs_html = (
+            '<div class="tabs" role="tablist">'
+            '<button class="tab" role="tab" aria-selected="true" '
+            'aria-controls="v-network" data-view="v-network">Network analysis</button>'
+            '<button class="tab" role="tab" aria-selected="false" '
+            f'aria-controls="v-activity" data-view="v-activity">Activity scan '
+            f'<span class="tcount">{n_act}</span></button></div>')
+        activity_block = (f'<div class="view" id="v-activity" hidden>{activity_view}'
+                          '</div>' + _TAB_SCRIPT)
+    else:
+        tabs_html = ""
+        activity_block = ""
+
     # ── Header, following the lab's figure sheets: the chip is the title, with
     # the plate and the timepoint set to its right, the timepoint in a badge.
     chips = s["chips"]
@@ -516,6 +662,18 @@ h1{{margin:0;font-size:30px;font-weight:700;letter-spacing:-.02em}}
 .badge{{font-size:12.5px;font-weight:700;color:#{ACCENT};background:#{ACCENT_BG};
  border:1px solid #{ACCENT_LINE};border-radius:7px;padding:7px 15px;
  letter-spacing:.02em;white-space:nowrap}}
+.tabs{{display:flex;gap:4px;border-bottom:1px solid #{BORDER};margin-bottom:24px}}
+.tab{{appearance:none;background:none;border:0;border-bottom:2px solid transparent;
+ font:inherit;font-size:13.5px;font-weight:600;color:#{MUTED};cursor:pointer;
+ padding:9px 15px;margin-bottom:-1px}}
+.tab:hover{{color:#{INK}}}
+.tab[aria-selected="true"]{{color:#{ACCENT};border-bottom-color:#{ACCENT}}}
+.tcount{{font-size:11px;font-weight:700;color:#{ACCENT};background:#{ACCENT_BG};
+ border-radius:999px;padding:1px 7px;margin-left:5px}}
+.view[hidden]{{display:none}}
+.runhead{{display:flex;align-items:baseline;gap:13px;flex-wrap:wrap;margin:0 0 15px}}
+.runhead h2{{margin:0;font-size:17px;font-weight:700}}
+.runhead .m{{font-size:12.5px;color:#{MUTED}}}
 .cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));
  gap:22px 26px;align-items:start;margin-bottom:22px}}
 .cell{{min-width:0}}
@@ -576,12 +734,16 @@ footer{{font-size:11.5px;color:#{MUTED};margin-top:30px;
   <div class="hmeta">{f'<span class="m">{e(meta)}</span>' if meta else ""}
     <span class="badge">{e(badge)}</span></div>
 </header>
+{tabs_html}
+<div class="view" id="v-network">
 {_narrative_html(narrative, e)}
 <div class="tiles">{tiles}</div>
 <div class="cols">{charts}{stat_panel}</div>
 {f'<div class="cols">{extra}</div>' if extra else ""}
 <div class="cols">{sec("Per well", table_html(well_table(wells, metrics)))}</div>
 {f'<div class="cols">{rasters}</div>' if rasters else ""}
+</div>
+{activity_block}
 <footer>MEA {e(REPORT_TITLES.get(kind, kind))} · generated
 {e(datetime.now().strftime("%Y-%m-%d %H:%M"))} · Orchestration-MEA · read from
 {e(", ".join(sorted(set().union(*[w.sources for w in wells]) if wells else [])) or "pipeline output")}

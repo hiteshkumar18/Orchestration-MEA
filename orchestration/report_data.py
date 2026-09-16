@@ -355,6 +355,87 @@ def attach_activity(wells: list[Well], activity_dir: Optional[Path]) -> dict:
     return plating
 
 
+# Activity-scan metrics worth showing, in the order they read best. The scan
+# measures the whole array before any sorting, so it answers a different
+# question from the network analysis: where on the chip is there tissue, and is
+# it firing — rather than what did the sorted units do.
+ACTIVITY_METRICS = [
+    ("active_fraction", "Active area", "%"),
+    ("electrodes_active", "Active electrodes", ""),
+    ("rate_mean_hz", "Mean rate (Hz)", ""),
+    ("amplitude_mean_uv", "Mean amplitude (µV)", ""),
+    ("occupied_area_mm2", "Occupied area (mm²)", ""),
+    ("clustering_index", "Clustering", ""),
+    ("array_coverage_pct", "Array scanned (%)", ""),
+    ("total_spikes", "Spikes", ""),
+]
+
+ACTIVITY_FIGURES = [
+    ("plate_overview.png", "Plate overview"),
+    ("group_comparison.png", "By group"),
+]
+
+
+def collect_activity(activity_dir: Optional[Path]) -> list[dict]:
+    """Read the activity-scan output into one record per scanned run.
+
+    Returns [] when the folder is absent or holds nothing recognisable, so the
+    caller can simply omit the section rather than special-casing it.
+    """
+    if not activity_dir or not Path(activity_dir).is_dir():
+        return []
+
+    runs: list[dict] = []
+    for fp in sorted(Path(activity_dir).rglob("summary.json")):
+        try:
+            data = json.loads(fp.read_text())
+        except (OSError, json.JSONDecodeError):
+            LOG.warning("Could not read activity summary %s", fp)
+            continue
+        wells = data.get("wells") or []
+        if not wells:
+            continue
+
+        folder = fp.parent
+        figures = [(label, folder / name) for name, label in ACTIVITY_FIGURES
+                   if (folder / name).is_file()]
+        for w in wells:
+            wid = w.get("well_id")
+            if wid is None:
+                continue
+            w["_figures"] = [
+                (label, folder / f"well{int(wid):03d}_{suffix}.png")
+                for suffix, label in (("activity", "Activity map"),
+                                      ("network", "Network activity"),
+                                      ("functional", "Functional"))
+                if (folder / f"well{int(wid):03d}_{suffix}.png").is_file()
+            ]
+
+        runs.append({
+            "chip_id": str(data.get("chip_id", "")),
+            "run_id": str(data.get("run_id", "") or folder.name),
+            "recorded": data.get("recorded_at") or data.get("date") or "",
+            "scan_seconds": data.get("scan_seconds"),
+            "wells": wells,
+            "figures": figures,
+            "source": str(fp),
+        })
+    if runs:
+        LOG.info("Activity scan: %d run(s), %d well(s)",
+                 len(runs), sum(len(r["wells"]) for r in runs))
+    return runs
+
+
+def activity_value(well: dict, key: str) -> Optional[float]:
+    """One activity metric, with the fraction rendered as a percentage."""
+    v = well.get(key)
+    if v is None or isinstance(v, bool):
+        return None
+    if not isinstance(v, (int, float)):
+        return None
+    return round(v * 100, 2) if key == "active_fraction" else v
+
+
 def _parse_date(text: str):
     from datetime import datetime
     for fmt in ("%y%m%d", "%Y%m%d", "%d.%m.%Y", "%Y-%m-%d"):
