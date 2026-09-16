@@ -52,7 +52,8 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_data import (  # noqa: E402
     ACTIVITY_METRICS, PRETTY, Well, activity_value, assign_div, attach_activity,
-    available_metrics, collect_activity, collect_wells, group_wells, summarise,
+    available_metrics, collect_activity, collect_wells, group_wells,
+    is_parameter, summarise,
 )
 
 LOG = logging.getLogger("mea.reports")
@@ -1150,12 +1151,30 @@ def explain(output_dir: Path, activity_dir: Optional[Path] = None) -> None:
         for key in sorted(w.metrics):
             src = w.provenance.get(key, "?")
             print(f"    {PRETTY.get(key, key):<24} <- {src:<46} = {w.metrics[key]:,.4f}")
-        if w.extra:
-            print(f"\n  UNMAPPED ({len(w.extra)} fields kept but not shown in the report)")
-            for k in sorted(w.extra)[:30]:
-                print(f"    {k:<48} = {w.extra[k]:,.4f}")
-            if len(w.extra) > 30:
-                print(f"    ... and {len(w.extra) - 30} more")
+        if not w.metrics:
+            print("    (none — this well produced no recognised measurements)")
+
+        params = {k: v for k, v in w.extra.items() if is_parameter(k)}
+        other = {k: v for k, v in w.extra.items() if k not in params}
+        if params:
+            print(f"\n  REFUSED AS SETTINGS ({len(params)}) — analysis parameters, "
+                  "never reported as measurements")
+            for k in sorted(params)[:12]:
+                print(f"    {k:<48} = {params[k]:,.4f}")
+            if len(params) > 12:
+                print(f"    ... and {len(params) - 12} more")
+        if other:
+            print(f"\n  UNMAPPED ({len(other)} fields kept but not shown)")
+            for k in sorted(other)[:20]:
+                print(f"    {k:<48} = {other[k]:,.4f}")
+            if len(other) > 20:
+                print(f"    ... and {len(other) - 20} more")
+
+        # A per-well view of what each well actually yielded.
+        print("\n  METRICS PER WELL")
+        for ww in wells:
+            names = ", ".join(sorted(PRETTY.get(k, k) for k in ww.metrics)) or "none"
+            print(f"    {ww.well:<10} units={str(ww.units):<5} {names}")
         print("\n  If a metric above is fed by the wrong column, tell me the")
         print("  'file:column' line and I will correct the alias table.")
 

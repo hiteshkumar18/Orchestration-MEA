@@ -85,6 +85,36 @@ FIGURES = {
 }
 
 
+# Blocks of tuning parameters that sit alongside results in the pipeline's
+# JSON. Nothing inside these is a measurement — they are the settings the
+# analysis ran with. Mapping them onto metric names put a smoothing width
+# ("sigma_firing_rate_bins") into a report as a firing rate, so any field whose
+# path passes through one of these is kept as context and never mapped.
+PARAM_CONTAINERS = frozenset({
+    "diagnostics", "diagnostic", "params", "parameters", "config",
+    "configuration", "settings", "options", "meta", "metadata",
+    "thresholds", "hyperparams", "args",
+})
+
+# Leaf names that describe how the analysis was run rather than what it found.
+# Applied only when the name is not an exact canonical key, so a genuine
+# "firing_rate_hz" is unaffected.
+PARAM_HINTS = ("sigma", "threshold", "mergegap", "binsize", "bins", "window",
+               "cutoff", "minunits", "maxunits", "baseline", "adaptive",
+               "reference", "valid", "enabled", "seed", "version")
+
+
+def is_parameter(flat_key: str) -> bool:
+    """Whether a flattened JSON key names a setting rather than a result."""
+    parts = [_norm(p) for p in str(flat_key).split(".")]
+    if any(p in PARAM_CONTAINERS for p in parts[:-1]):
+        return True
+    leaf = parts[-1] if parts else ""
+    if leaf in {_norm(k) for k in ALIASES}:
+        return False
+    return any(h in leaf for h in PARAM_HINTS)
+
+
 def _norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
@@ -245,6 +275,9 @@ def load_network(well: Well, path: Path) -> None:
     UNIT_COUNT = ("nunits", "numunits", "unitcount", "nunitscurated", "ngoodunits")
     for flat_key, value in flatten(data).items():
         leaf = flat_key.split(".")[-1]
+        if is_parameter(flat_key):
+            well.extra[flat_key] = value        # kept, but never a metric
+            continue
         if well.units is None and _norm(leaf) in UNIT_COUNT:
             well.units = int(value)
             well.provenance["units"] = f"{path.name}:{flat_key}"
