@@ -408,6 +408,16 @@ _TAB_SCRIPT = """<script>
 </script>"""
 
 
+def _aspect(png: bytes) -> float:
+    """Width / height of a PNG, or 1.0 if it cannot be read."""
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(png)) as im:
+            return im.width / max(im.height, 1)
+    except Exception:                                        # noqa: BLE001
+        return 1.0
+
+
 def _png_b64(path: Path) -> Optional[str]:
     try:
         return _b64(path.read_bytes())
@@ -416,7 +426,7 @@ def _png_b64(path: Path) -> Optional[str]:
         return None
 
 
-def _activity_html(runs: list[dict], e, sec, table_html) -> str:
+def _activity_html(runs: list[dict], e, sec, sec_wide, sec_scroll, table_html) -> str:
     """The activity-scan view: whole-array coverage, before any sorting.
 
     Deliberately kept as its own tab rather than merged into the network
@@ -439,10 +449,19 @@ def _activity_html(runs: list[dict], e, sec, table_html) -> str:
                    f'</h2><span class="m">{e(sub)}</span></div>')
 
         cells: list[str] = []
+        wide_cells: list[str] = []
         for label, path in run["figures"]:
-            src = _png_b64(path)
-            if src:
-                cells.append(sec(label, f'<img src="{src}" alt="{e(label)}">'))
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                continue
+            img = f'<img src="{_b64(raw)}" alt="{e(label)}">'
+            # A multi-panel plate figure is unreadable in a half-width column;
+            # anything markedly wider than it is tall gets the full width.
+            if _aspect(raw) >= 1.9:
+                wide_cells.append(sec_wide(label, img))
+            else:
+                cells.append(sec(label, img))
 
         # The tinted panel, mirroring the network view: one headline number
         # per well, beside the figures.
@@ -458,6 +477,8 @@ def _activity_html(runs: list[dict], e, sec, table_html) -> str:
                 f'<div class="stats">{items}</div>'
                 '<div class="tnote">Share of scanned electrodes firing above '
                 'the activity threshold.</div></div>')
+        if wide_cells:
+            out.append(f'<div class="cols">{"".join(wide_cells)}</div>')
         if cells:
             out.append(f'<div class="cols">{"".join(cells)}</div>')
 
@@ -475,7 +496,9 @@ def _activity_html(runs: list[dict], e, sec, table_html) -> str:
                     row.append("—" if v is None else
                                (f"{v:.2f}{suf}" if isinstance(v, float) else f"{v}{suf}"))
                 body.append(row)
-            out.append(f'<div class="cols">{sec("Per well", table_html([header] + body))}</div>')
+            out.append('<div class="cols">'
+                       + sec_scroll("Per well", table_html([header] + body))
+                       + "</div>")
 
         # Per-well figures, capped — a 24-well plate would otherwise inline
         # 72 images and make the file unusable to email.
@@ -492,8 +515,10 @@ def _activity_html(runs: list[dict], e, sec, table_html) -> str:
             if len(figs) >= 12:
                 break
         if figs:
-            grid = '<div class="grid">' + "".join(figs) + "</div>"
-            out.append(f'<div class="cols">{sec("Activity maps", grid)}</div>')
+            out.append('<div class="cols">' +
+                       sec_wide("Activity maps",
+                                '<div class="stack">' + "".join(figs) + "</div>") +
+                       "</div>")
     return "".join(out)
 
 
@@ -528,6 +553,11 @@ def build_html(wells: list[Well], kind: str, out: Path,
     def sec(label: str, inner: str) -> str:
         """A grey caption above a hairline panel — the page's repeating unit."""
         return (f'<div class="cell"><div class="cap">{e(label)}</div>'
+                f'<div class="panel">{inner}</div></div>')
+
+    def sec_wide(label: str, inner: str) -> str:
+        """A section that spans the full grid width, for wide figures."""
+        return (f'<div class="cell wide"><div class="cap">{e(label)}</div>'
                 f'<div class="panel">{inner}</div></div>')
 
     def sec_scroll(label: str, inner: str) -> str:
@@ -615,7 +645,8 @@ def build_html(wells: list[Well], kind: str, out: Path,
             'see which field fed each number.</p></div>')
 
     activity_runs = collect_activity(activity_dir)
-    activity_view = _activity_html(activity_runs, e, sec, table_html)
+    activity_view = _activity_html(activity_runs, e, sec, sec_wide, sec_scroll,
+                                   table_html)
 
     # The switcher only appears when there is something to switch to; with no
     # activity scan the page stays exactly as it was.
@@ -739,6 +770,8 @@ th{{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em
 td{{padding:8px 11px;border-bottom:1px solid #F1F3F5;font-variant-numeric:tabular-nums}}
 tr:last-child td{{border-bottom:none}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}}
+.stack{{display:flex;flex-direction:column;gap:20px}}
+.stack figure img{{width:100%}}
 figure{{margin:0}}
 figcaption{{font-size:11.5px;color:#{LABEL};margin-top:6px}}
 ul.fail{{margin:0;padding-left:19px;font-size:13px}}
