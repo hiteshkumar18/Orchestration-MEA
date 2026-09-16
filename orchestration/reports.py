@@ -1127,6 +1127,61 @@ def generate(output_dir: Path,
     return result
 
 
+def explain(output_dir: Path, activity_dir: Optional[Path] = None) -> None:
+    """Print where every reported number came from.
+
+    A metric that looks wrong is almost always a name that matched the wrong
+    column — the alias table is tolerant by design, which is what makes it work
+    on output nobody has shown it before, and also what lets it go wrong
+    quietly. This prints the mapping so it can go wrong loudly instead.
+    """
+    wells = collect_wells(output_dir)
+    print(f"\nAnalysed output: {output_dir}")
+    print(f"Wells found: {len(wells)}")
+    if not wells:
+        print("  Nothing recognised here. Expected per-well folders containing")
+        print("  metrics_curated.xlsx, network_results.json or checkpoints/.")
+    else:
+        w = wells[0]
+        print(f"\nFirst well: {w.path}")
+        print(f"  files read: {', '.join(w.sources) or 'none'}")
+        print(f"  units: {w.units}   status: {w.status}")
+        print("\n  MAPPED  (canonical metric  <-  file:column  =  value)")
+        for key in sorted(w.metrics):
+            src = w.provenance.get(key, "?")
+            print(f"    {PRETTY.get(key, key):<24} <- {src:<46} = {w.metrics[key]:,.4f}")
+        if w.extra:
+            print(f"\n  UNMAPPED ({len(w.extra)} fields kept but not shown in the report)")
+            for k in sorted(w.extra)[:30]:
+                print(f"    {k:<48} = {w.extra[k]:,.4f}")
+            if len(w.extra) > 30:
+                print(f"    ... and {len(w.extra) - 30} more")
+        print("\n  If a metric above is fed by the wrong column, tell me the")
+        print("  'file:column' line and I will correct the alias table.")
+
+    print(f"\nActivity scan: {activity_dir or '(not given)'}")
+    if activity_dir:
+        root = Path(activity_dir)
+        if not root.is_dir():
+            print(f"  Folder does not exist: {root}")
+        else:
+            summaries = list(root.rglob("summary.json"))
+            print(f"  summary.json files found: {len(summaries)}")
+            for fp in summaries[:5]:
+                print(f"    {fp}")
+            if not summaries:
+                print("  Nothing to show in the activity tab. The scan writes")
+                print("  <output>/<chip>/<run>/summary.json — check that the")
+                print("  activity output folder points at that tree.")
+            runs = collect_activity(root)
+            print(f"  runs parsed: {len(runs)}, "
+                  f"wells: {sum(len(r['wells']) for r in runs)}")
+    else:
+        print("  Pass --activity-dir, or set the activity output folder in the UI,")
+        print("  to get the Activity scan tab.")
+    print()
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -1144,12 +1199,19 @@ def main(argv=None) -> None:
     p.add_argument("--ai", action="store_true",
                    help="Add a written summary from Claude (needs ANTHROPIC_API_KEY)")
     p.add_argument("--model", default=None, help="Override the model id")
+    p.add_argument("--explain", action="store_true",
+                   help="Show where every metric came from, then exit. Use this "
+                        "when a number in the report looks wrong.")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s",
                         datefmt="%H:%M:%S")
+
+    if a.explain:
+        explain(a.output_dir, a.activity_dir)
+        return
 
     res = generate(a.output_dir, a.type, a.format, a.report_dir, a.activity_dir,
                    use_ai=a.ai, model=a.model)

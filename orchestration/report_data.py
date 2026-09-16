@@ -163,6 +163,10 @@ class Well:
     status: str = "unknown"
     error: Optional[str] = None
     sources: list[str] = field(default_factory=list)
+    # canonical metric -> "file:original column". Recorded so a surprising
+    # number in a report can be traced back to the field it came from without
+    # re-reading the pipeline output by hand.
+    provenance: dict[str, str] = field(default_factory=dict)
 
     def get(self, key: str) -> Optional[float]:
         if key == "units":
@@ -204,7 +208,11 @@ def load_units(well: Well, path: Path) -> None:
             continue
         if mean != mean:                  # NaN
             continue
-        (well.metrics if key else well.extra)[key or f"units.{_norm(col)}"] = mean
+        if key:
+            well.metrics[key] = mean
+            well.provenance[key] = f"{path.name}:{col}"
+        else:
+            well.extra[f"units.{_norm(col)}"] = mean
 
 
 def load_rejections(well: Well, path: Path) -> None:
@@ -232,11 +240,19 @@ def load_network(well: Well, path: Path) -> None:
         LOG.warning("Could not read %s: %s", path, exc)
         return
     well.sources.append(path.name)
+    # A well whose only output is network_results.json still reports its unit
+    # count there; without this it showed as "no units" in the report.
+    UNIT_COUNT = ("nunits", "numunits", "unitcount", "nunitscurated", "ngoodunits")
     for flat_key, value in flatten(data).items():
         leaf = flat_key.split(".")[-1]
+        if well.units is None and _norm(leaf) in UNIT_COUNT:
+            well.units = int(value)
+            well.provenance["units"] = f"{path.name}:{flat_key}"
+            continue
         key = canonical(leaf) or canonical(flat_key)
         if key and key not in well.metrics:
             well.metrics[key] = value
+            well.provenance[key] = f"{path.name}:{flat_key}"
         else:
             well.extra[flat_key] = value
 
