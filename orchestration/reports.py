@@ -53,7 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_data import (  # noqa: E402
     ACTIVITY_METRICS, PRETTY, Well, activity_value, assign_div, attach_activity,
     available_metrics, collect_activity, collect_wells, group_wells,
-    is_parameter, summarise,
+    implausible, is_parameter, summarise,
 )
 
 LOG = logging.getLogger("mea.reports")
@@ -584,6 +584,31 @@ def build_html(wells: list[Well], kind: str, out: Path,
         if cards:
             rasters = sec("Rasters", f'<div class="grid">{"".join(cards)}</div>')
 
+    # A metric whose values cannot be right for its name is called out at the
+    # top of the report rather than left for a reader to notice. This is the
+    # one place the tool second-guesses the pipeline, and it only ever adds a
+    # warning — no value is altered or hidden.
+    suspect: list[str] = []
+    for m in metrics:
+        vals = [w.get(m) for w in wells if w.get(m) is not None]
+        if not vals:
+            continue
+        why = implausible(m, min(vals)) or implausible(m, max(vals))
+        if why:
+            src = next((w.provenance.get(m) for w in wells if w.provenance.get(m)), "")
+            suspect.append(
+                f"{PRETTY.get(m, m)}: {min(vals):,.3g} to {max(vals):,.3g} — {why}"
+                + (f" (read from {src})" if src else ""))
+    warn_html = ""
+    if suspect:
+        items = "".join(f"<li>{e(x)}</li>" for x in suspect)
+        warn_html = (
+            '<div class="warn"><h3>Check these values before using this report</h3>'
+            f'<ul>{items}</ul><p>Values this far outside the usual range for a '
+            'metric usually mean the report read the wrong field. Nothing has '
+            'been changed or removed — run <code>reports.py --explain</code> to '
+            'see which field fed each number.</p></div>')
+
     activity_runs = collect_activity(activity_dir)
     activity_view = _activity_html(activity_runs, e, sec, table_html)
 
@@ -663,6 +688,14 @@ h1{{margin:0;font-size:30px;font-weight:700;letter-spacing:-.02em}}
 .badge{{font-size:12.5px;font-weight:700;color:#{ACCENT};background:#{ACCENT_BG};
  border:1px solid #{ACCENT_LINE};border-radius:7px;padding:7px 15px;
  letter-spacing:.02em;white-space:nowrap}}
+.warn{{border:1px solid #F3C99B;background:#FDF5EC;border-radius:8px;
+ padding:18px 20px;margin-bottom:24px}}
+.warn h3{{margin:0 0 9px;font-size:14.5px;font-weight:700;color:#8A4B08}}
+.warn ul{{margin:0 0 9px;padding-left:19px;font-size:13px;color:#7A4A14}}
+.warn li{{margin-bottom:4px;font-variant-numeric:tabular-nums}}
+.warn p{{margin:0;font-size:12px;color:#8A6742}}
+.warn code{{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;
+ background:#F6E7D4;border-radius:4px;padding:1px 5px}}
 .tabs{{display:flex;gap:4px;border-bottom:1px solid #{BORDER};margin-bottom:24px}}
 .tab{{appearance:none;background:none;border:0;border-bottom:2px solid transparent;
  font:inherit;font-size:13.5px;font-weight:600;color:#{MUTED};cursor:pointer;
@@ -735,6 +768,7 @@ footer{{font-size:11.5px;color:#{MUTED};margin-top:30px;
   <div class="hmeta">{f'<span class="m">{e(meta)}</span>' if meta else ""}
     <span class="badge">{e(badge)}</span></div>
 </header>
+{warn_html}
 {tabs_html}
 <div class="view" id="v-network">
 {_narrative_html(narrative, e)}
@@ -1143,8 +1177,10 @@ def explain(output_dir: Path, activity_dir: Optional[Path] = None) -> None:
         print("  Nothing recognised here. Expected per-well folders containing")
         print("  metrics_curated.xlsx, network_results.json or checkpoints/.")
     else:
-        w = wells[0]
-        print(f"\nFirst well: {w.path}")
+        # Detail a well that actually produced metrics — the first well is
+        # often a degenerate one, which tells you nothing about the mapping.
+        w = next((x for x in wells if x.metrics), wells[0])
+        print(f"\nWell detailed: {w.path}")
         print(f"  files read: {', '.join(w.sources) or 'none'}")
         print(f"  units: {w.units}   status: {w.status}")
         print("\n  MAPPED  (canonical metric  <-  file:column  =  value)")
@@ -1175,6 +1211,30 @@ def explain(output_dir: Path, activity_dir: Optional[Path] = None) -> None:
         for ww in wells:
             names = ", ".join(sorted(PRETTY.get(k, k) for k in ww.metrics)) or "none"
             print(f"    {ww.well:<10} units={str(ww.units):<5} {names}")
+
+        # Range across wells, with a sanity check. A metric fed by the wrong
+        # field usually announces itself by magnitude.
+        keys = sorted({k for ww in wells for k in ww.metrics})
+        if keys:
+            print("\n  RANGE ACROSS WELLS   (value range  <-  source field)")
+            suspect = []
+            for k in keys:
+                vals = [ww.metrics[k] for ww in wells if k in ww.metrics]
+                src = next((ww.provenance.get(k) for ww in wells
+                            if ww.provenance.get(k)), "?")
+                lo, hi = min(vals), max(vals)
+                bad = implausible(k, lo) or implausible(k, hi)
+                mark = f"   <-- SUSPECT: {bad}" if bad else ""
+                if bad:
+                    suspect.append((k, src, bad))
+                print(f"    {PRETTY.get(k, k):<24} {lo:>12,.3f} – {hi:<12,.3f} "
+                      f"<- {src}{mark}")
+            if suspect:
+                print("\n  " + "!" * 66)
+                print("  These values are not plausible for their metric. The most")
+                print("  likely cause is the field above feeding the wrong metric.")
+                print("  Send me the 'source field' names and I will fix the mapping.")
+                print("  " + "!" * 66)
         print("\n  If a metric above is fed by the wrong column, tell me the")
         print("  'file:column' line and I will correct the alias table.")
 

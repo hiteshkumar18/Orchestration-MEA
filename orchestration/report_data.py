@@ -76,6 +76,33 @@ PRETTY = {
     "units_rejected": "Units rejected",
 }
 
+# Conservative sanity ranges for a per-well mean. These are not biology — they
+# are wide enough that any real culture sits inside them, and exist only to
+# catch a metric fed by the wrong field. A value outside the range is flagged,
+# never silently altered or dropped.
+PLAUSIBLE: dict[str, tuple[float, float]] = {
+    "firing_rate_hz":        (0.0, 100.0),    # per-unit mean spike rate
+    "amplitude_uv":          (0.0, 2000.0),
+    "presence_ratio":        (0.0, 1.0),
+    "pct_spikes_in_bursts":  (0.0, 100.0),
+    "burst_rate_hz":         (0.0, 20.0),
+    "burst_duration_s":      (0.0, 120.0),
+    "interburst_interval_s": (0.0, 3600.0),
+    "isi_violations":        (0.0, 100.0),
+    "network_burstiness":    (0.0, 100.0),
+}
+
+
+def implausible(key: str, value: Optional[float]) -> Optional[str]:
+    """Why a value looks wrong for its metric, or None if it looks fine."""
+    if value is None or key not in PLAUSIBLE:
+        return None
+    lo, hi = PLAUSIBLE[key]
+    if value < lo or value > hi:
+        return f"outside the expected range {lo:g}–{hi:g}"
+    return None
+
+
 FIGURES = {
     "raster": ("raster_burst_plot.svg", "raster_burst_plot.png"),
     "raster_30s": ("raster_burst_plot_30s.svg", "raster_burst_plot_30s.png"),
