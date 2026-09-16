@@ -41,16 +41,26 @@ LOG = logging.getLogger("mea.report_data")
 # lowercased, punctuation-stripped form, so "Firing Rate (Hz)", "firing_rate"
 # and "mean_firing_rate" all land on the same canonical key.
 ALIASES: dict[str, tuple[str, ...]] = {
+    # Longest matching fragment wins, so the specific names below beat the
+    # generic ones: "peak_population_firing_rate_hz" must not land on
+    # firing_rate_hz, because it is a population sum at a burst peak (thousands
+    # of Hz), not a per-neuron rate.
+    "peak_pop_rate_hz":      ("peakpopulationfiringrate", "peakpopulationrate"),
     "firing_rate_hz":        ("firingrate", "meanfiringrate", "ratehz"),
     "amplitude_uv":          ("amplitude", "amplitudemedian", "peakamplitude"),
     "presence_ratio":        ("presenceratio",),
     "isi_violations":        ("isiviolation", "isiviolations", "rpcontamination",
                               "refractoryperiodviolation"),
     "snr":                   ("snr", "signaltonoise"),
-    "num_spikes":            ("numspikes", "spikecount", "nspikes", "totalspikes"),
+    "num_spikes":            ("numspikes", "nspikes", "totalspikes"),
     "burst_rate_hz":         ("burstfrequency", "burstrate", "networkburstrate"),
     "burst_duration_s":      ("burstduration",),
-    "spikes_per_burst":      ("spikesperburst", "numberofspikesperburst"),
+    "spikes_per_burst":      ("spikesperburst", "numberofspikesperburst",
+                              "spikecountperburst"),
+    "burst_count":           ("burstcount", "nbursts"),
+    "participation_fraction": ("participationfraction",),
+    "peak_participation":    ("peakparticipationfraction",),
+    "ifbi_s":                ("ifbi",),
     "pct_spikes_in_bursts":  ("spikeswithinbursts", "percentspikesinbursts",
                               "pctspikesinbursts", "fractionspikesinbursts"),
     "interburst_interval_s": ("interburstinterval", "ibi"),
@@ -60,6 +70,11 @@ ALIASES: dict[str, tuple[str, ...]] = {
 
 PRETTY = {
     "units": "Units",
+    "peak_pop_rate_hz": "Peak population rate (Hz)",
+    "burst_count": "Bursts detected",
+    "participation_fraction": "Units in burst (fraction)",
+    "peak_participation": "Peak participation (fraction)",
+    "ifbi_s": "Inter-fragment interval (s)",
     "firing_rate_hz": "Firing rate (Hz)",
     "amplitude_uv": "Amplitude (µV)",
     "presence_ratio": "Presence ratio",
@@ -90,14 +105,21 @@ PLAUSIBLE: dict[str, tuple[float, float]] = {
     "interburst_interval_s": (0.0, 3600.0),
     "isi_violations":        (0.0, 100.0),
     "network_burstiness":    (0.0, 100.0),
+    "participation_fraction": (0.0, 1.0),
+    "peak_participation":    (0.0, 1.0),
 }
 
 
 def implausible(key: str, value: Optional[float]) -> Optional[str]:
     """Why a value looks wrong for its metric, or None if it looks fine."""
-    if value is None or key not in PLAUSIBLE:
+    base = key
+    for pre in LEVEL_LABEL:
+        if base.startswith(pre):
+            base = base[len(pre):]
+            break
+    if value is None or base not in PLAUSIBLE:
         return None
-    lo, hi = PLAUSIBLE[key]
+    lo, hi = PLAUSIBLE[base]
     if value < lo or value > hi:
         return f"outside the expected range {lo:g}–{hi:g}"
     return None
@@ -129,6 +151,65 @@ PARAM_CONTAINERS = frozenset({
 PARAM_HINTS = ("sigma", "threshold", "mergegap", "binsize", "bins", "window",
                "cutoff", "minunits", "maxunits", "baseline", "adaptive",
                "reference", "valid", "enabled", "seed", "version")
+
+
+# The pipeline reports bursts at two levels: short "fragments", and the
+# "network bursts" formed by merging them. They are different events with
+# different rates and durations, so they get separate metrics — showing a
+# fragment rate beside a network interburst interval, as one table of "burst"
+# numbers, invites reading a relationship that is not there.
+LEVEL_PREFIX = {"networkbursts": "nb_", "superbursts": "sb_"}
+LEVEL_LABEL = {"nb_": "Network burst", "sb_": "Superburst"}
+
+# Metrics that are level-specific. Anything else (amplitude, presence ratio)
+# is not a burst measure and is left unprefixed.
+LEVELLED = frozenset({
+    "burst_rate_hz", "burst_duration_s", "spikes_per_burst", "burst_count",
+    "interburst_interval_s", "participation_fraction", "peak_participation",
+    "peak_pop_rate_hz", "ifbi_s",
+})
+
+
+def level_of(flat_key: str) -> str:
+    """Prefix for the burst level a flattened key belongs to ('' if none)."""
+    for part in str(flat_key).split(".")[:-1]:
+        pre = LEVEL_PREFIX.get(_norm(part))
+        if pre:
+            return pre
+    return ""
+
+
+# Display names for the network-burst level. Spelled out rather than derived
+# from the fragment-level name, because splicing a prefix onto a label produced
+# things like "Network burst s detected".
+LEVEL_NAMES: dict[str, dict[str, str]] = {
+    "nb_": {
+        "burst_rate_hz": "Network burst rate (Hz)",
+        "burst_duration_s": "Network burst duration (s)",
+        "burst_count": "Network bursts detected",
+        "interburst_interval_s": "Network interburst interval (s)",
+        "spikes_per_burst": "Spikes per network burst",
+        "participation_fraction": "Units in network burst (fraction)",
+        "peak_participation": "Peak participation, network burst",
+        "peak_pop_rate_hz": "Peak population rate, network burst (Hz)",
+        "ifbi_s": "Inter-network-burst interval (s)",
+    },
+    "sb_": {
+        "burst_rate_hz": "Superburst rate (Hz)",
+        "burst_duration_s": "Superburst duration (s)",
+        "burst_count": "Superbursts detected",
+        "interburst_interval_s": "Inter-superburst interval (s)",
+    },
+}
+
+
+def pretty_name(key: str) -> str:
+    """Display name, including the burst level when the metric has one."""
+    for pre, names in LEVEL_NAMES.items():
+        if key.startswith(pre):
+            base = key[len(pre):]
+            return names.get(base, f"{LEVEL_LABEL[pre]}: {PRETTY.get(base, base)}")
+    return PRETTY.get(key, key)
 
 
 def is_parameter(flat_key: str) -> bool:
@@ -310,6 +391,8 @@ def load_network(well: Well, path: Path) -> None:
             well.provenance["units"] = f"{path.name}:{flat_key}"
             continue
         key = canonical(leaf) or canonical(flat_key)
+        if key in LEVELLED:
+            key = level_of(flat_key) + key
         if key and key not in well.metrics:
             well.metrics[key] = value
             well.provenance[key] = f"{path.name}:{flat_key}"

@@ -53,7 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_data import (  # noqa: E402
     ACTIVITY_METRICS, PRETTY, Well, activity_value, assign_div, attach_activity,
     available_metrics, collect_activity, collect_wells, group_wells,
-    implausible, is_parameter, summarise,
+    implausible, is_parameter, pretty_name, summarise,
 )
 
 LOG = logging.getLogger("mea.reports")
@@ -123,8 +123,8 @@ def chart_per_well(wells: list[Well], metric: str) -> Optional[bytes]:
            color=[colour_of.get(w.group, "#" + ACCENT_2) for w, _ in vals], width=.68)
     ax.set_xticks(range(len(vals)))
     ax.set_xticklabels(labels, rotation=45 if len(vals) > 10 else 0, ha="right" if len(vals) > 10 else "center")
-    ax.set_ylabel(PRETTY.get(metric, metric))
-    ax.set_title(PRETTY.get(metric, metric) + " by well")
+    ax.set_ylabel(pretty_name(metric))
+    ax.set_title(pretty_name(metric) + " by well")
     if groups:
         from matplotlib.patches import Patch
         ax.legend(handles=[Patch(facecolor=colour_of[g], label=g) for g in groups],
@@ -162,7 +162,7 @@ def chart_by_group(wells: list[Well], metrics: list[str]) -> Optional[bytes]:
                        edgecolors="white", linewidths=.7)
         ax.set_xticks(range(len(names)))
         ax.set_xticklabels(names, fontsize=8.5)
-        ax.set_title(PRETTY.get(metric, metric), fontsize=9.5)
+        ax.set_title(pretty_name(metric), fontsize=9.5)
         ax.margins(x=.28)
     fig.tight_layout()
     return _fig_png(fig)
@@ -197,8 +197,8 @@ def chart_longitudinal(wells: list[Well], metric: str) -> Optional[bytes]:
             ax.plot([x for x, _ in ok], [m for _, m in ok], "-o",
                     color=c, lw=1.8, ms=4.5, label=g or "all")
     ax.set_xlabel("DIV")
-    ax.set_ylabel(PRETTY.get(metric, metric))
-    ax.set_title(PRETTY.get(metric, metric) + " over time")
+    ax.set_ylabel(pretty_name(metric))
+    ax.set_title(pretty_name(metric) + " over time")
     if groups != [""]:
         ax.legend(fontsize=8, frameon=False)
     fig.tight_layout()
@@ -281,7 +281,7 @@ def headline_stats(wells: list[Well], summary: dict) -> list[tuple[str, str, str
             vals = [v for v in vals if v is not None]
             if vals:
                 out.append((fmt(statistics.fmean(vals)),
-                            PRETTY.get(key, key), "mean across wells"))
+                            pretty_name(key), "mean across wells"))
             break
     done = summary["status"].get("complete", 0)
     failed = summary["status"].get("failed", 0)
@@ -295,7 +295,7 @@ def group_table(wells: list[Well], metrics: list[str]) -> list[list[str]]:
     groups = {g: ws for g, ws in group_wells(wells).items() if g != "ungrouped"}
     if not groups:
         return []
-    head = ["Group", "n"] + [PRETTY.get(m, m) for m in metrics]
+    head = ["Group", "n"] + [pretty_name(m) for m in metrics]
     rows = [head]
     for g in sorted(groups):
         row = [g, str(len(groups[g]))]
@@ -308,7 +308,7 @@ def group_table(wells: list[Well], metrics: list[str]) -> list[list[str]]:
 
 
 def well_table(wells: list[Well], metrics: list[str]) -> list[list[str]]:
-    head = ["Well", "Group", "Status"] + [PRETTY.get(m, m) for m in metrics]
+    head = ["Well", "Group", "Status"] + [pretty_name(m) for m in metrics]
     rows = [head]
     for w in wells:
         rows.append([w.well, w.group or "—", w.status]
@@ -514,7 +514,7 @@ def build_html(wells: list[Well], kind: str, out: Path,
         for m in metrics[:4]:
             c = chart_longitudinal(wells, m)
             if c:
-                figs.append((PRETTY.get(m, m), c))
+                figs.append((pretty_name(m), c))
     elif kind == "qc":
         c = chart_qc(wells)
         if c:
@@ -523,7 +523,7 @@ def build_html(wells: list[Well], kind: str, out: Path,
         for m in metrics[:3]:
             c = chart_per_well(wells, m)
             if c:
-                figs.append((PRETTY.get(m, m), c))
+                figs.append((pretty_name(m), c))
 
     def sec(label: str, inner: str) -> str:
         """A grey caption above a hairline panel — the page's repeating unit."""
@@ -597,7 +597,7 @@ def build_html(wells: list[Well], kind: str, out: Path,
         if why:
             src = next((w.provenance.get(m) for w in wells if w.provenance.get(m)), "")
             suspect.append(
-                f"{PRETTY.get(m, m)}: {min(vals):,.3g} to {max(vals):,.3g} — {why}"
+                f"{pretty_name(m)}: {min(vals):,.3g} to {max(vals):,.3g} — {why}"
                 + (f" (read from {src})" if src else ""))
     warn_html = ""
     if suspect:
@@ -666,10 +666,10 @@ def build_html(wells: list[Well], kind: str, out: Path,
                 f'</span><span class="sv">{e(fmt(v))}</span></div>'
                 for w, v in rows_)
             shown, total = len(rows_), len([w for w in wells if w.get(primary) is not None])
-            note = (f"{PRETTY.get(primary, primary)} per well."
+            note = (f"{pretty_name(primary)} per well."
                     + (f" Showing {shown} of {total}." if total > shown else ""))
             stat_panel = (
-                f'<div class="tint"><h3>{e(PRETTY.get(primary, primary))} by well</h3>'
+                f'<div class="tint"><h3>{e(pretty_name(primary))} by well</h3>'
                 f'<div class="stats">{items}</div>'
                 f'<div class="tnote">{e(note)}</div></div>')
 
@@ -958,17 +958,17 @@ def build_pptx(wells: list[Well], kind: str, out: Path,
         for m in metrics[:6]:
             c = chart_per_well(wells, m)
             if c:
-                series.append((PRETTY.get(m, m) + " by well", c))
+                series.append((pretty_name(m) + " by well", c))
     elif kind == "longitudinal":
         for m in metrics[:6]:
             c = chart_longitudinal(wells, m)
             if c:
-                series.append((PRETTY.get(m, m), c))
+                series.append((pretty_name(m), c))
     else:
         for m in metrics[1:5]:
             c = chart_per_well(wells, m)
             if c:
-                series.append((PRETTY.get(m, m), c))
+                series.append((pretty_name(m), c))
 
     for title, png in series:
         sl = prs.slides.add_slide(blank)
@@ -1041,7 +1041,7 @@ def build_pptx(wells: list[Well], kind: str, out: Path,
             title = w.well + (f" · {w.group}" if w.group else "")
             text(sl, title, Inches(.7), Inches(.55), Inches(11), Inches(.7),
                  size=30, bold=True, font="Cambria")
-            bits = [f"{PRETTY.get(m, m)} {fmt(w.get(m))}" for m in metrics[:4]
+            bits = [f"{pretty_name(m)} {fmt(w.get(m))}" for m in metrics[:4]
                     if w.get(m) is not None]
             if bits:
                 text(sl, "   ·   ".join(bits), Inches(.7), Inches(1.25),
@@ -1186,7 +1186,7 @@ def explain(output_dir: Path, activity_dir: Optional[Path] = None) -> None:
         print("\n  MAPPED  (canonical metric  <-  file:column  =  value)")
         for key in sorted(w.metrics):
             src = w.provenance.get(key, "?")
-            print(f"    {PRETTY.get(key, key):<24} <- {src:<46} = {w.metrics[key]:,.4f}")
+            print(f"    {pretty_name(key):<24} <- {src:<46} = {w.metrics[key]:,.4f}")
         if not w.metrics:
             print("    (none — this well produced no recognised measurements)")
 
@@ -1209,7 +1209,7 @@ def explain(output_dir: Path, activity_dir: Optional[Path] = None) -> None:
         # A per-well view of what each well actually yielded.
         print("\n  METRICS PER WELL")
         for ww in wells:
-            names = ", ".join(sorted(PRETTY.get(k, k) for k in ww.metrics)) or "none"
+            names = ", ".join(sorted(pretty_name(k) for k in ww.metrics)) or "none"
             print(f"    {ww.well:<10} units={str(ww.units):<5} {names}")
 
         # Range across wells, with a sanity check. A metric fed by the wrong
@@ -1227,7 +1227,7 @@ def explain(output_dir: Path, activity_dir: Optional[Path] = None) -> None:
                 mark = f"   <-- SUSPECT: {bad}" if bad else ""
                 if bad:
                     suspect.append((k, src, bad))
-                print(f"    {PRETTY.get(k, k):<24} {lo:>12,.3f} – {hi:<12,.3f} "
+                print(f"    {pretty_name(k):<24} {lo:>12,.3f} – {hi:<12,.3f} "
                       f"<- {src}{mark}")
             if suspect:
                 print("\n  " + "!" * 66)

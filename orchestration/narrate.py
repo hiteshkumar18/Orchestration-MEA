@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from report_data import PRETTY, Well, group_wells, summarise  # noqa: E402
+from report_data import PRETTY, Well, group_wells, pretty_name, summarise  # noqa: E402
 
 LOG = logging.getLogger("mea.narrate")
 
@@ -103,7 +103,7 @@ def build_brief(wells: list[Well], kind: str, metrics: list[str],
             "total": s["total_units"],
             "mean_per_well": round(s["total_units"] / max(s["wells"], 1), 1),
         },
-        "metric_labels": {m: PRETTY.get(m, m) for m in metrics},
+        "metric_labels": {m: pretty_name(m) for m in metrics},
         # Cohort-wide statistics, across every well regardless of group. These
         # are the figures the report's own headline tiles show, so without them
         # the model is barred from describing its own first slide.
