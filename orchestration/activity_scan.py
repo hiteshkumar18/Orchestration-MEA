@@ -1032,6 +1032,16 @@ def write_per_electrode_csv(wells: dict[int, WellActivity], out: Path) -> Path:
     return out
 
 
+def _session_of(h5_path: Path) -> str:
+    """The session folder for a recording, from <session>/<chip>/<assay>/<run>/file.
+
+    Returns "" when the tree is shallower than that, so a flat layout keeps the
+    old chip/run path rather than inventing a level.
+    """
+    parts = h5_path.parts
+    return parts[-5] if len(parts) >= 5 else ""
+
+
 def process_file(h5_path: Path, out_dir: Path, *, figures: bool = True,
                  active_hz: float = 0.05, selection_from: Optional[Path] = None,
                  max_spikes_per_block: int = 0, analyze: bool = True,
@@ -1059,7 +1069,12 @@ def process_file(h5_path: Path, out_dir: Path, *, figures: bool = True,
     except Exception:  # noqa: BLE001
         pass
 
-    dest = out_dir / (chip_id or "unknown_chip") / run_id
+    # Include the session folder. Run ids restart per session, so the same chip
+    # scanned on two dates yields the same chip/run pair and the second scan
+    # silently overwrote the first.
+    session = _session_of(h5_path)
+    dest = out_dir / session / (chip_id or "unknown_chip") / run_id if session \
+        else out_dir / (chip_id or "unknown_chip") / run_id
     dest.mkdir(parents=True, exist_ok=True)
 
     metrics: dict[int, dict] = {}

@@ -770,6 +770,32 @@ class Watcher:
             name=f"mea-{job}-{run_dir.name}", daemon=True,
         ).start()
 
+    @staticmethod
+    def read_driver_verdict(log_path: Path) -> Optional[str]:
+        """Whether a zero exit code actually meant the wells were analysed.
+
+        ``run_pipeline_driver.py`` launches one subprocess per well and catches
+        CalledProcessError itself — it logs the failure and carries on, then
+        exits 0. So a run where every well died still looks successful from the
+        outside. Reading the driver's own log is the only way to tell, and
+        without it a whole batch reports "done" having produced nothing.
+        """
+        try:
+            text = log_path.read_text(errors="ignore")
+        except OSError:
+            return None
+        launched = text.count("[DRIVER] Launching:")
+        failed = text.count("Subprocess failed for")
+        if launched and failed >= launched:
+            return (f"the driver exited 0 but all {launched} well subprocess(es) "
+                    "failed — see the driver log")
+        if failed:
+            return (f"{failed} of {launched} well subprocess(es) failed "
+                    "— see the driver log")
+        if "No data files found" in text:
+            return "the driver found no recordings to analyse"
+        return None
+
     def _log_path_for(self, run_dir: Path, job: str) -> Path:
         """Where this run's log goes.
 
@@ -834,15 +860,42 @@ class Watcher:
             # Reduces CUDA fragmentation, which is what the allocator suggests
             # after an OOM. Harmless for the CPU-only activity scan.
             env.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
+            # run_pipeline_driver.py launches each well with a bare "python3",
+            # resolved from PATH — so choosing the right interpreter for the
+            # driver is not enough; its children would still get whichever
+            # python3 the service happens to see, and fail on the first import
+            # of spikeinterface. Put the chosen interpreter's directory first
+            # on PATH so "python3" means the same thing all the way down.
+            interpreter = cmd[0] if cmd else ""
+            bindir = str(Path(interpreter).resolve().parent) if interpreter else ""
+            if bindir and Path(bindir, "python3").exists():
+                env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+                # Make it a proper virtualenv activation when it is one, so
+                # anything else reading VIRTUAL_ENV agrees with PATH.
+                venv = Path(bindir).parent
+                if (venv / "pyvenv.cfg").is_file():
+                    env["VIRTUAL_ENV"] = str(venv)
+                    env.pop("PYTHONHOME", None)
             with open(log_path, "w") as fh:
                 proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
                                       check=False, env=env)
             ok = proc.returncode == 0
+            # A zero exit code is necessary but not sufficient: the driver
+            # reports success even when every well failed.
+            verdict = self.read_driver_verdict(log_path) if ok else None
+            all_failed = bool(verdict and verdict.startswith("the driver exited 0 but all"))
+            if verdict:
+                LOG.warning("%s [%s]: %s", run_dir.name, label, verdict)
+            if all_failed or (verdict and verdict.startswith("the driver found no")):
+                ok = False
             self.state.update(
                 key,
                 status="done" if ok else "failed",
                 completed_at=_now(),
                 returncode=proc.returncode,
+                error=verdict if verdict and not ok else None,
+                detail=verdict if verdict and ok else None,
                 duration_s=round(time.time() - started, 1),
             )
             (LOG.info if ok else LOG.error)(
