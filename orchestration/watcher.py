@@ -466,11 +466,36 @@ class Watcher:
         # Batches queued by hand from the UI. Each is a set of state keys; when
         # all of them reach a terminal status the batch is finished and its
         # on-completion hook runs exactly once.
+        self._reconcile_state()
+
         self._batches: dict[str, dict] = {}
         self._batch_lock = threading.Lock()
         self.on_batch_done: Optional[Callable[[dict], None]] = None
 
     # -- lifecycle ---------------------------------------------------------- #
+    IN_FLIGHT = ("detected", "dispatched", "queued", "running")
+
+    def _reconcile_state(self) -> None:
+        """Retire statuses left mid-flight by a previous process.
+
+        The state file outlives the process, but the threads that owned those
+        jobs do not. After a restart an entry still reading "running" holds no
+        slot and has no worker, yet it counts as claimed — so nothing is ever
+        dispatched for that folder again and the UI shows work that is not
+        happening. Mark them interrupted so they can simply be re-queued.
+        """
+        stale = [(k, e) for k, e in self.state.all().items()
+                 if e.get("status") in self.IN_FLIGHT]
+        for key, entry in stale:
+            self.state.update(
+                key, status="failed", completed_at=_now(), detail=None,
+                error="interrupted — the server restarted while this job was "
+                      "in flight; nothing was left running")
+        if stale:
+            LOG.warning("Retired %d job(s) left in flight by a previous run: %s",
+                        len(stale),
+                        ", ".join(sorted({e.get("run") or k for k, e in stale})))
+
     def start(self) -> None:
         if self.is_running:
             return
