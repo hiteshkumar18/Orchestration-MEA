@@ -43,6 +43,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -859,7 +860,12 @@ class Watcher:
             if not target.exists():
                 return None
 
-            shim_dir = self.work_dir / "pybin"
+            # One directory per interpreter. A single shared shim is unsafe:
+            # network jobs use the pipeline interpreter and activity jobs use
+            # this tool's own, so whichever dispatched last rewrote the file and
+            # the other job's subprocesses silently got the wrong environment.
+            tag = hashlib.sha1(str(target).encode()).hexdigest()[:12]
+            shim_dir = self.work_dir / "pybin" / tag
             shim_dir.mkdir(parents=True, exist_ok=True)
             wrapper = shim_dir / "python3"
             body = ("#!/bin/sh\n"
