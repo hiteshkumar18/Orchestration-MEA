@@ -645,6 +645,148 @@ function RunBlock(props){
   );
 }
 
+
+/* ── Queue ─────────────────────────────────────────────────────────────── */
+function QueuePanel({cfg,toast}){
+  const [dir,setDir]=useState(cfg?.watch_dir||"");
+  const [entries,setEntries]=useState(null);
+  const [sel,setSel]=useState({});          // path -> true
+  const [info,setInfo]=useState({});        // path -> inspect row
+  const [rerun,setRerun]=useState(false);
+  const [autoReport,setAutoReport]=useState(true);
+  const [busy,setBusy]=useState(false);
+  const [q,setQ]=useState(null);            // {batches, report}
+  const timer=useRef(null);
+
+  const load=useCallback(async path=>{
+    try{
+      const r=await api("/api/browse",{method:"POST",body:JSON.stringify({path})});
+      setDir(r.path);
+      const runs=(r.entries||[]).filter(x=>x.is_run);
+      setEntries(runs);
+      if(runs.length){
+        const ins=await api("/api/queue/inspect",{method:"POST",
+          body:JSON.stringify({folders:runs.map(x=>x.path)})});
+        const by={}; (ins.folders||[]).forEach(f=>{by[f.path]=f;});
+        setInfo(by);
+      } else setInfo({});
+    }catch(e){ setEntries([]); toast("Could not list folders",e.message,"error"); }
+  },[toast]);
+
+  useEffect(()=>{ if(cfg?.watch_dir) load(cfg.watch_dir); },[cfg?.watch_dir,load]);
+
+  const poll=useCallback(async()=>{
+    try{
+      const d=await api("/api/queue"); setQ(d);
+      const live=(d.batches||[]).some(b=>!b.finished);
+      if(!live&&d.report?.state!=="running"){
+        clearInterval(timer.current); timer.current=null;
+      }
+    }catch(e){ clearInterval(timer.current); timer.current=null; }
+  },[]);
+  useEffect(()=>()=>clearInterval(timer.current),[]);
+
+  const chosen=Object.keys(sel).filter(k=>sel[k]);
+  const doneCount=chosen.filter(p=>(info[p]?.jobs||[]).some(j=>j.already_done)).length;
+
+  const start=async()=>{
+    if(!chosen.length) return;
+    setBusy(true);
+    try{
+      const r=await api("/api/queue",{method:"POST",
+        body:JSON.stringify({folders:chosen,rerun,auto_report:autoReport,per:"date"})});
+      toast("Queued",`${r.queued.length} job(s) started`,"ok");
+      setSel({});
+      if(!timer.current) timer.current=setInterval(poll,2000);
+      poll();
+    }catch(e){ toast("Nothing queued",e.message,"error"); }
+    finally{ setBusy(false); }
+  };
+
+  const batch=(q?.batches||[]).slice(-1)[0];
+  const rep=q?.report;
+
+  return (
+    <div>
+      <div className="sec-h">
+        <div className="sec-t">Queue</div>
+        <div className="sec-d">Pick folders to analyse now — they run one at a time, in order</div>
+      </div>
+      <div className="panel"><div className="panel-b"
+           style={{display:"flex",flexDirection:"column",gap:"var(--s5)"}}>
+
+        <div className="btns" style={{alignItems:"center"}}>
+          <span className="f-h">In</span>
+          <code className="mono f-h" style={{wordBreak:"break-all"}}>{dir||"—"}</code>
+          <div className="grow"/>
+          <button className="btn btn-q btn-s" onClick={()=>load(dir)}>Refresh</button>
+        </div>
+
+        {entries===null
+          ? <div className="f-h">Loading…</div>
+          : entries.length===0
+            ? <div className="note n-w"><span className="n-i"><Alert s={15}/></span>
+                <div>No run folders with a recording were found here. Check the input
+                     folder under Folders.</div></div>
+            : <div className="qlist">
+                {entries.map(x=>{
+                  const row=info[x.path]||{};
+                  const jobs=row.jobs||[];
+                  const already=jobs.some(j=>j.already_done);
+                  const on=!!sel[x.path];
+                  return (
+                    <label key={x.path} className={"qrow"+(on?" on":"")}>
+                      <input type="checkbox" checked={on}
+                             onChange={()=>setSel(v=>({...v,[x.path]:!v[x.path]}))}/>
+                      <span className="qname">{x.name}</span>
+                      <span className="qmeta">
+                        {jobs.length
+                          ? jobs.map(j=>j.label).join(" + ")
+                          : (row.note||"no analysis applies")}
+                      </span>
+                      {already&&<span className="pill p-w">already analysed</span>}
+                      {x.finished===false&&<span className="pill p-w">still copying</span>}
+                    </label>
+                  );
+                })}
+              </div>}
+
+        <div style={{borderTop:"1px solid var(--line)",paddingTop:"var(--s4)",
+                     display:"flex",flexDirection:"column",gap:"var(--s3)"}}>
+          <Switch id="q-report" checked={autoReport} onChange={setAutoReport}
+                  label="Build a report when the queue finishes"
+                  hint="A run summary per session folder, written into each folder."/>
+          {doneCount>0&&
+            <Switch id="q-rerun" checked={rerun} onChange={setRerun}
+                    label={`Re-run ${doneCount} folder(s) already analysed`}
+                    hint="Off by default — a Network analysis is a long GPU job."/>}
+        </div>
+
+        <div className="btns" style={{alignItems:"center"}}>
+          <button className="btn btn-pri" disabled={busy||!chosen.length} onClick={start}>
+            <Play s={13}/>{busy?"Queueing…":`Queue ${chosen.length||""} folder${chosen.length===1?"":"s"}`}
+          </button>
+          {batch&&!batch.finished&&
+            <span className="f-h">Running — {batch.keys.length} job(s) in this batch</span>}
+          {batch&&batch.finished&&rep?.state==="running"&&
+            <span className="f-h">Analysis done — building the report…</span>}
+        </div>
+
+        {rep?.state==="done"&&(rep.files||[]).length>0&&
+          <div className="note n-a"><span className="n-i"><Check s={15}/></span>
+            <div>Report ready:{" "}
+              {rep.files.map((f,i)=>
+                <a key={f} href={`/api/report/file?path=${encodeURIComponent(f)}`}
+                   target="_blank" rel="noopener">{f.split("/").pop()}</a>)}
+            </div></div>}
+        {rep?.state==="error"&&
+          <div className="note n-b"><span className="n-i"><Alert s={15}/></span>
+            <div>The analysis finished, but the report failed: {rep.error}</div></div>}
+      </div></div>
+    </div>
+  );
+}
+
 /* ── Reports ───────────────────────────────────────────────────────────── */
 const R_TYPES=[
   {k:"run",         t:"Run summary",   d:"One session: units, rates, bursts, per-well detail"},
@@ -658,6 +800,7 @@ function Reports({toast}){
   const [types,setTypes]=useState(["run"]);
   const [formats,setFormats]=useState(["html"]);
   const [useAI,setUseAI]=useState(false);
+  const [per,setPer]=useState("date");
   const [job,setJob]=useState(null);
   const [busy,setBusy]=useState(false);
   const timer=useRef(null);
@@ -692,7 +835,7 @@ function Reports({toast}){
     setBusy(true); setJob({state:"running",progress:["Starting"]});
     try{
       await api("/api/report/generate",{method:"POST",
-        body:JSON.stringify({types,formats,use_ai:useAI})});
+        body:JSON.stringify({types,formats,use_ai:useAI,per})});
       timer.current=setInterval(poll,1200); poll();
     }catch(e){
       setBusy(false); setJob(null); toast("Could not start",e.message,"error");
@@ -753,6 +896,20 @@ function Reports({toast}){
           </div>
 
           <div>
+            <div className="f-l" style={{marginBottom:8}}>Scope</div>
+            <div className="btns">
+              {[["date","One per session folder"],["none","One for everything"]].map(([k,lab])=>
+                <button key={k} className={"btn btn-s"+(per===k?" btn-pri":"")}
+                        onClick={()=>setPer(k)}>{lab}</button>)}
+            </div>
+            <div className="f-h" style={{marginTop:6}}>
+              {per==="date"
+                ? "Each date folder gets its own report, written into that folder."
+                : "A single report covering every session under the output folder."}
+            </div>
+          </div>
+
+          <div>
             <div className="f-l" style={{marginBottom:8}}>Format</div>
             <div className="btns">
               {[["html","HTML — one file to send"],["pptx","PowerPoint — slides"]].map(([k,d])=>
@@ -796,12 +953,24 @@ function Reports({toast}){
           {job?.state==="done"&&(job.file_names||[]).length>0&&
             <div>
               <div className="f-l" style={{marginBottom:8}}>Generated</div>
-              <div className="btns">
-                {job.files.map((f,i)=>
-                  <a key={f} className="btn btn-s"
-                     href={`/api/report/file?path=${encodeURIComponent(f)}`}
-                     target="_blank" rel="noopener">{job.file_names[i]}</a>)}
-              </div>
+              {(job.groups||[]).length
+                ? <div className="qlist" style={{maxHeight:220}}>
+                    {job.groups.map(g=>
+                      <div key={g.name} className="qrow">
+                        <span className="qname">{g.name}</span>
+                        <span className="qmeta">{g.wells} well(s)</span>
+                        {(g.files||[]).map(f=>
+                          <a key={f} className="btn btn-q btn-s"
+                             href={`/api/report/file?path=${encodeURIComponent(f)}`}
+                             target="_blank" rel="noopener">{f.split("/").pop()}</a>)}
+                      </div>)}
+                  </div>
+                : <div className="btns">
+                    {job.files.map((f,i)=>
+                      <a key={f} className="btn btn-s"
+                         href={`/api/report/file?path=${encodeURIComponent(f)}`}
+                         target="_blank" rel="noopener">{job.file_names[i]}</a>)}
+                  </div>}
               {job.ai_error&&
                 <div className="note n-w" style={{marginTop:"var(--s4)"}}>
                   <span className="n-i"><Alert s={15}/></span>
@@ -1087,6 +1256,8 @@ function App(){
                             expanded={!!openWells[r.path]}/>)}</div>}
           </div>
         </div>
+
+        <QueuePanel cfg={cfg} toast={toast}/>
 
         <Reports toast={toast}/>
 

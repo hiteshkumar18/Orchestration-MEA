@@ -310,6 +310,8 @@ class Well:
     # number in a report can be traced back to the field it came from without
     # re-reading the pipeline output by hand.
     provenance: dict[str, str] = field(default_factory=dict)
+    # level name -> the folder that level refers to, for writing a report there
+    level_dirs: dict[str, Path] = field(default_factory=dict)
 
     def get(self, key: str) -> Optional[float]:
         if key == "units":
@@ -437,6 +439,45 @@ def load_figures(well: Well, folder: Path) -> None:
                 break
 
 
+# Path components the driver inserts that name the assay rather than the
+# experiment. They sit between the chip and the run, so counting back from the
+# well folder lands one level out and every label shifts: chip_id became
+# "Network", date became the chip, and project became the date.
+ASSAY_PARTS = frozenset({"network", "activityscan", "activity_scan",
+                         "activity", "networkscan"})
+
+
+def _label_from_path(well: Well, folder: Path, root: Path) -> None:
+    """Fill project/date/chip/run from the folder tree below the output root.
+
+    Read relative to the output directory rather than from the end of an
+    absolute path, so a deeper or shallower tree does not silently shift every
+    label by one. Assay components are dropped first, since they vary by
+    analysis and are not part of the experiment's identity.
+    """
+    try:
+        rel = folder.relative_to(root).parts
+    except ValueError:                       # not under root; fall back to tail
+        rel = folder.parts
+
+    # Everything above the well folder, with assay names removed. The remaining
+    # order is ...<project>/<date>/<chip>/<run>.
+    above = [part for part in rel[:-1] if _norm(part) not in ASSAY_PARTS]
+    for attr, depth in (("run_id", 1), ("chip_id", 2), ("date", 3), ("project", 4)):
+        if len(above) >= depth:
+            setattr(well, attr, getattr(well, attr) or above[-depth])
+
+    # The directory each label refers to, so a report can be written beside the
+    # data it describes.
+    ancestors = {p.name: p for p in folder.parents}
+    well.level_dirs = {
+        level: ancestors[name]
+        for level, name in (("project", well.project), ("date", well.date),
+                            ("chip", well.chip_id), ("run", well.run_id))
+        if name and name in ancestors
+    }
+
+
 def collect_wells(output_dir: Path) -> list[Well]:
     """Find every analysed well under an output directory."""
     root = Path(output_dir)
@@ -457,13 +498,7 @@ def collect_wells(output_dir: Path) -> list[Well]:
     wells: list[Well] = []
     for folder in sorted(folders):
         w = Well(path=folder, well=folder.name)
-        parts = folder.parts
-        # <project>/<date>/<chip>/<run>/<well>
-        if len(parts) >= 5:
-            w.run_id = w.run_id or parts[-2]
-            w.chip_id = w.chip_id or parts[-3]
-            w.date = w.date or parts[-4]
-            w.project = w.project or parts[-5]
+        _label_from_path(w, folder, root)
 
         load_checkpoint(w, folder)
         for name, fn in (("metrics_curated.xlsx", load_units),

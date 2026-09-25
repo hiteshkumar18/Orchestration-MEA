@@ -179,6 +179,13 @@ class RunKeyPayload(BaseModel):
     path: str
 
 
+class QueuePayload(BaseModel):
+    folders: list[str] = []
+    rerun: bool = False
+    auto_report: bool = True
+    per: str = "date"          # batches span sessions, so default to per-session
+
+
 # --------------------------------------------------------------------------- #
 # Routes — schema & config
 # --------------------------------------------------------------------------- #
@@ -532,6 +539,82 @@ def api_checkpoints(path: str = "", tail: int = 0):
             "searched": [str(r) for r in roots]}
 
 
+# --------------------------------------------------------------------------- #
+# Queue
+# --------------------------------------------------------------------------- #
+LAST_BATCH_REPORT: dict = {"state": "idle"}
+
+
+def _batch_report(batch: dict, per: str = "date") -> None:
+    """Build the report for a finished batch.
+
+    Runs on its own thread. A batch whose jobs all failed still gets a report —
+    the quality-control view is exactly where you look to find out why.
+    """
+    cfg = get_watcher().cfg
+    out = cfg.output_dir or cfg.driver_options.get("output_dir")
+    if not out:
+        LOG.warning("Batch %s finished but no output directory is configured; "
+                    "no report was built", batch["id"])
+        LAST_BATCH_REPORT.update({"state": "skipped", "batch": batch["id"],
+                                  "reason": "no output directory configured"})
+        return
+
+    LAST_BATCH_REPORT.update({"state": "running", "batch": batch["id"],
+                              "started": time.time(), "files": []})
+    try:
+        from reports import generate as generate_reports
+        res = generate_reports(
+            Path(out).expanduser(), ["run"], ["html"],
+            activity_dir=(lambda a: Path(a) if a else None)(
+                _resolve_activity(cfg)["activity_dir"]),
+            use_ai=False, group_by=per)
+        LAST_BATCH_REPORT.update({
+            "state": "error" if res.get("error") else "done",
+            "files": res.get("files", []),
+            "groups": res.get("groups", []),
+            "error": res.get("error"),
+            "finished": time.time(),
+        })
+        for f in res.get("files", []):
+            LOG.info("Batch %s report: %s", batch["id"], f)
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception("Batch %s: report generation failed", batch["id"])
+        LAST_BATCH_REPORT.update({"state": "error", "error": str(exc),
+                                  "finished": time.time()})
+
+
+@app.post("/api/queue/inspect")
+def api_queue_inspect(payload: QueuePayload):
+    """What queueing these folders would do, before anything is started."""
+    return {"folders": get_watcher().inspect_folders(payload.folders)}
+
+
+@app.post("/api/queue")
+def api_queue(payload: QueuePayload):
+    if not payload.folders:
+        raise HTTPException(400, "Select at least one folder.")
+    watcher = get_watcher()
+    errors = watcher.cfg.validate()
+    if errors:
+        raise HTTPException(400, {"errors": errors})
+
+    res = watcher.queue_folders(
+        payload.folders, rerun=payload.rerun,
+        on_complete=((lambda b: _batch_report(b, payload.per))
+                     if payload.auto_report else None))
+    if not res["queued"]:
+        # Nothing to do is a useful answer, not an error — but say why.
+        reasons = sorted({s.get("reason", "") for s in res["skipped"]})
+        raise HTTPException(409, "Nothing was queued: " + "; ".join(reasons))
+    return res
+
+
+@app.get("/api/queue")
+def api_queue_status():
+    return {"batches": get_watcher().batches(), "report": LAST_BATCH_REPORT}
+
+
 @app.get("/api/logs")
 def api_logs(since: int = 0, limit: int = 500):
     """Live watcher activity — polled by the UI with the last seq it received."""
@@ -558,6 +641,7 @@ class ReportPayload(BaseModel):
     use_ai: bool = False
     output_dir: Optional[str] = None
     report_dir: Optional[str] = None
+    per: str = "none"          # none | date | chip | run | project
 
 
 def _resolve_activity(cfg) -> dict:
@@ -624,6 +708,8 @@ def api_report_generate(payload: ReportPayload):
     formats = [f for f in payload.formats if f in REPORT_FORMATS]
     if not kinds:
         raise HTTPException(400, "Choose at least one report type.")
+    if payload.per not in ("none", "date", "chip", "run", "project"):
+        raise HTTPException(400, f"Unknown grouping: {payload.per}")
     if not formats:
         raise HTTPException(400, "Choose at least one format.")
 
@@ -658,6 +744,7 @@ def api_report_generate(payload: ReportPayload):
                 report_dir=report_dir,
                 activity_dir=Path(activity) if activity else None,
                 use_ai=payload.use_ai,
+                group_by=payload.per,
                 on_progress=progress)
             with REPORT_LOCK:
                 REPORT_JOB.update(res)

@@ -525,7 +525,8 @@ def _activity_html(runs: list[dict], e, sec, sec_wide, sec_scroll, table_html) -
 def build_html(wells: list[Well], kind: str, out: Path,
                activity_dir: Optional[Path] = None,
                narrative: Optional[dict] = None,
-               time_kind: str = "none") -> Path:
+               time_kind: str = "none",
+               activity_chips: Optional[set[str]] = None) -> Path:
     s = summarise(wells)
     metrics = s["metrics"]
     e = html_mod.escape
@@ -645,6 +646,13 @@ def build_html(wells: list[Well], kind: str, out: Path,
             'see which field fed each number.</p></div>')
 
     activity_runs = collect_activity(activity_dir)
+    if activity_chips:
+        # A per-session report must not show scans from other sessions.
+        kept = [r for r in activity_runs if r["chip_id"] in activity_chips]
+        if activity_runs and not kept:
+            LOG.info("No activity scan matches chip(s) %s — activity tab omitted",
+                     ", ".join(sorted(activity_chips)))
+        activity_runs = kept
     activity_view = _activity_html(activity_runs, e, sec, sec_wide, sec_scroll,
                                    table_html)
 
@@ -671,6 +679,12 @@ def build_html(wells: list[Well], kind: str, out: Path,
     doc_title = chips[0] if len(chips) == 1 else (
         ", ".join(chips[:3]) if chips else REPORT_TITLES.get(kind, kind))
     meta_bits = []
+    # With one report per session folder, the date is what tells them apart.
+    dates = sorted({w.date for w in wells if w.date})
+    if len(dates) == 1:
+        meta_bits.append(dates[0])
+    elif len(dates) > 1:
+        meta_bits.append(f"{dates[0]}–{dates[-1]}")
     if len(chips) > 1:
         meta_bits.append(f"{len(chips)} chips")
     if s["runs"]:
@@ -1099,6 +1113,64 @@ def build_pptx(wells: list[Well], kind: str, out: Path,
 # --------------------------------------------------------------------------- #
 # Entry point shared by the CLI and the web UI
 # --------------------------------------------------------------------------- #
+def _group_wells(wells: list[Well], level: str) -> list[tuple[str, Path, list[Well]]]:
+    """Split wells into reporting groups, with the folder each belongs to.
+
+    A tree of session folders is usually reported per session — one report for
+    260818, another for 260821 — rather than as one document spanning months.
+    """
+    buckets: dict[str, list[Well]] = {}
+    for w in wells:
+        name = {"date": w.date, "chip": w.chip_id, "run": w.run_id,
+                "project": w.project}.get(level) or ""
+        buckets.setdefault(name, []).append(w)
+
+    out: list[tuple[str, Path, list[Well]]] = []
+    for name, group in sorted(buckets.items()):
+        folder = next((w.level_dirs.get(level) for w in group
+                       if w.level_dirs.get(level)), None)
+        out.append((name or "ungrouped", folder, group))
+    return out
+
+
+def _build_set(wells: list[Well], kinds: list[str], formats: list[str],
+               dest: Path, stamp: str, narrative: Optional[dict],
+               activity_dir: Optional[Path], time_kind: str,
+               say, label: str = "") -> dict:
+    """Build every requested report for one set of wells, into one folder."""
+    out: dict = {"files": [], "skipped": [], "warnings": []}
+    s = summarise(wells)
+    chips = {w.chip_id for w in wells if w.chip_id}
+    prefix = f"{label}: " if label else ""
+
+    for kind in kinds:
+        if kind == "condition" and len(s["groups"]) < 2:
+            out["skipped"].append(
+                f"{prefix}condition — {len(s['groups'])} group(s) found; genotype "
+                "labels come from the activity-scan output.")
+            continue
+        if kind == "longitudinal" and len({w.div for w in wells if w.div is not None}) < 2:
+            out["skipped"].append(f"{prefix}longitudinal — fewer than 2 timepoints.")
+            continue
+        if kind == "longitudinal" and time_kind != "div":
+            out["warnings"].append(
+                f"{prefix}no plating date found — the longitudinal x-axis is "
+                f"{time_kind} order, not true DIV.")
+        for f in formats:
+            name = f"mea_{kind}_{stamp}.{f}"
+            target = dest / name
+            say(f"Writing {(label + '/') if label else ''}{name}")
+            r = (build_html(wells, kind, target, activity_dir, narrative,
+                            time_kind, chips or None)
+                 if f == "html" else build_pptx(wells, kind, target, narrative))
+            if r:
+                out["files"].append(str(r))
+            elif f == "pptx":
+                out["warnings"].append(
+                    f"{prefix}python-pptx is not installed — no PowerPoint was written.")
+    return out
+
+
 def generate(output_dir: Path,
              kinds: list[str],
              formats: list[str],
@@ -1106,6 +1178,7 @@ def generate(output_dir: Path,
              activity_dir: Optional[Path] = None,
              use_ai: bool = False,
              model: Optional[str] = None,
+             group_by: str = "none",
              on_progress=None) -> dict:
     """Build reports from analysed pipeline output.
 
@@ -1175,32 +1248,34 @@ def generate(output_dir: Path,
                     LOG.debug("Could not write the narrative audit log",
                               exc_info=True)
 
-    dest = report_dir or (output_dir / "reports")
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
 
-    for kind in kinds:
-        if kind == "condition" and len(s["groups"]) < 2:
-            result["skipped"].append(
-                f"condition — {len(s['groups'])} group(s) found; genotype labels "
-                "come from the activity-scan output.")
-            continue
-        if kind == "longitudinal" and len({w.div for w in wells if w.div is not None}) < 2:
-            result["skipped"].append("longitudinal — fewer than 2 timepoints.")
-            continue
-        if kind == "longitudinal" and time_kind != "div":
+    if group_by in ("date", "chip", "run", "project"):
+        groups = _group_wells(wells, group_by)
+        say(f"{len(groups)} {group_by} folder(s) to report on")
+        result["groups"] = []
+        for name, folder, members in groups:
+            # Write each report into the folder it describes, so 260818's report
+            # sits in 260818 rather than in one shared pile.
+            gdest = (report_dir / name) if report_dir else (folder or output_dir)
+            sub = _build_set(members, kinds, formats, gdest, stamp, narrative,
+                             activity_dir, time_kind, say, label=name)
+            result["files"].extend(sub["files"])
+            result["skipped"].extend(sub["skipped"])
+            result["warnings"].extend(sub["warnings"])
+            result["groups"].append({"name": name, "folder": str(gdest),
+                                     "wells": len(members), "files": sub["files"]})
+        if not result["files"]:
             result["warnings"].append(
-                f"No plating date found — the longitudinal x-axis is {time_kind} "
-                "order, not true DIV.")
-        for f in formats:
-            out = dest / f"mea_{kind}_{stamp}.{f}"
-            say(f"Writing {out.name}")
-            r = (build_html(wells, kind, out, activity_dir, narrative, time_kind)
-                 if f == "html" else build_pptx(wells, kind, out, narrative))
-            if r:
-                result["files"].append(str(r))
-            elif f == "pptx":
-                result["warnings"].append(
-                    "python-pptx is not installed — no PowerPoint was written.")
+                "No reports were written — every group was skipped.")
+        return result
+
+    dest = report_dir or (output_dir / "reports")
+    sub = _build_set(wells, kinds, formats, dest, stamp, narrative,
+                     activity_dir, time_kind, say)
+    result["files"].extend(sub["files"])
+    result["skipped"].extend(sub["skipped"])
+    result["warnings"].extend(sub["warnings"])
     return result
 
 
@@ -1320,6 +1395,11 @@ def main(argv=None) -> None:
     p.add_argument("--ai", action="store_true",
                    help="Add a written summary from Claude (needs ANTHROPIC_API_KEY)")
     p.add_argument("--model", default=None, help="Override the model id")
+    p.add_argument("--per", default="none",
+                   choices=["none", "date", "chip", "run", "project"],
+                   help="One report per session folder (date), chip, run or "
+                        "project, written into that folder. Default: one report "
+                        "for everything.")
     p.add_argument("--explain", action="store_true",
                    help="Show where every metric came from, then exit. Use this "
                         "when a number in the report looks wrong.")
@@ -1335,7 +1415,7 @@ def main(argv=None) -> None:
         return
 
     res = generate(a.output_dir, a.type, a.format, a.report_dir, a.activity_dir,
-                   use_ai=a.ai, model=a.model)
+                   use_ai=a.ai, model=a.model, group_by=a.per)
     if res.get("error"):
         raise SystemExit(res["error"])
     for w in res["warnings"]:

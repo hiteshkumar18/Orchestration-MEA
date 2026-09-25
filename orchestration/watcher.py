@@ -440,7 +440,12 @@ class Watcher:
         self.state = StateStore(self.work_dir / "watcher_state.json")
         self.on_event = on_event or (lambda *_: None)
 
+        # Two separate signals. `_stop` ends the scan loop; `_halt` ends the
+        # worker threads. Stopping the watcher should stop it looking for new
+        # folders, not abandon work already queued — a queued Kilosort job that
+        # is waiting for the GPU must survive someone pressing Stop.
         self._stop = threading.Event()
+        self._halt = threading.Event()
         self._thread: Optional[threading.Thread] = None
         # run_key -> (fingerprint, observed_at) from the previous poll
         self._prints: dict[str, tuple[tuple[int, int, float], float]] = {}
@@ -456,11 +461,19 @@ class Watcher:
         self._preflight: Optional[dict] = None
         self._active_lock = threading.Lock()
 
+        # Batches queued by hand from the UI. Each is a set of state keys; when
+        # all of them reach a terminal status the batch is finished and its
+        # on-completion hook runs exactly once.
+        self._batches: dict[str, dict] = {}
+        self._batch_lock = threading.Lock()
+        self.on_batch_done: Optional[Callable[[dict], None]] = None
+
     # -- lifecycle ---------------------------------------------------------- #
     def start(self) -> None:
         if self.is_running:
             return
         self._stop.clear()
+        self._halt.clear()
         self._preflight = None
         if self.cfg.run_network and not self.cfg.dry_run:
             self.preflight()
@@ -484,11 +497,22 @@ class Watcher:
         self.on_event("started", {"watch_dir": self.cfg.watch_dir})
 
     def stop(self, timeout: float = 5.0) -> None:
+        """Stop scanning for new folders. Queued and running jobs continue."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=timeout)
-        LOG.info("Watcher stopped")
+        LOG.info("Watcher stopped (queued jobs continue)")
         self.on_event("stopped", {})
+
+    def halt(self, timeout: float = 5.0) -> None:
+        """Stop scanning *and* release anything waiting for a slot.
+
+        For process shutdown only. A job already running is left alone — the
+        pipeline subprocess owns the GPU and killing it mid-sort would leave
+        partial output behind.
+        """
+        self._halt.set()
+        self.stop(timeout)
 
     @property
     def is_running(self) -> bool:
@@ -720,6 +744,7 @@ class Watcher:
                                   detail="environment problem, not a data problem",
                                   error=msg)
                 self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
+                self._batch_finished(key)
                 return
         cmd = self.build_command(run_dir, job)
         printable = " ".join(shlex.quote(c) for c in cmd)
@@ -732,6 +757,7 @@ class Watcher:
             self.state.update(key, status="detected", detected_at=_now(), **{
                 **common, "detail": f"dry run — {detail}" if detail else "dry run"})
             self.on_event("detected", {"run": run_dir.name, "job": job, "command": printable})
+            self._batch_finished(key)
             return
 
         log_path = self._log_path_for(run_dir, job)
@@ -783,12 +809,12 @@ class Watcher:
             self.state.update(key, detail=f"queued — waiting for a free {label.lower()} slot")
             self.on_event("queued", {"run": run_dir.name, "job": job})
             wait = max(1, self.cfg.queue_poll_seconds)
-            while not self._stop.is_set():
+            while not self._halt.is_set():
                 if slot.acquire(timeout=wait):
                     break
             else:
                 self.state.update(key, status="failed", completed_at=_now(),
-                                  error="watcher stopped before the job could start")
+                                  error="server shut down before the job could start")
                 return
 
             # Let the previous job's GPU memory actually be reclaimed.
@@ -796,7 +822,7 @@ class Watcher:
             if cool > 0:
                 LOG.info("%s [%s] waiting %ss for GPU memory to free", run_dir.name, label, cool)
                 self.state.update(key, detail=f"starting in {cool}s (GPU cooldown)")
-                self._stop.wait(cool)
+                self._halt.wait(cool)
 
         started = time.time()
         with self._active_lock:
@@ -834,6 +860,128 @@ class Watcher:
                 self._active[job] = max(0, self._active.get(job, 1) - 1)
             if slot is not None:
                 slot.release()
+            # Terminal either way — a failed job must still close its batch, or
+            # the batch would never finish and no report would ever be built.
+            self._batch_finished(key)
+
+    # -- queueing ------------------------------------------------------------ #
+    TERMINAL = {"done", "failed"}
+
+    def inspect_folders(self, paths: list[str]) -> list[dict]:
+        """What would happen to each folder if it were queued now.
+
+        Lets the UI show "already analysed" before anything is started, rather
+        than silently skipping folders after the fact.
+        """
+        out: list[dict] = []
+        for raw in paths:
+            d = Path(raw).expanduser()
+            row: dict[str, Any] = {"path": str(d), "name": d.name, "jobs": [],
+                                   "exists": d.is_dir()}
+            if not row["exists"]:
+                row["note"] = "folder not found"
+                out.append(row)
+                continue
+            jobs = self.jobs_for(d)
+            if not jobs:
+                row["note"] = "no recording found for the enabled analyses"
+                out.append(row)
+                continue
+            for job in jobs:
+                st = self.state.status(self.state_key(d.resolve(), job))
+                row["jobs"].append({"job": job, "label": JOB_LABELS.get(job, job),
+                                    "status": st or "new",
+                                    "already_done": st in self.TERMINAL})
+            out.append(row)
+        return out
+
+    def queue_folders(self, paths: list[str], rerun: bool = False,
+                      on_complete: Optional[Callable[[dict], None]] = None) -> dict:
+        """Queue folders for analysis, and track them as one batch.
+
+        Folders already analysed are skipped unless `rerun` is asked for: a
+        Network job is an hour of GPU time, so re-running one must be a choice
+        rather than a side effect of selecting a folder twice.
+        """
+        batch_id = f"batch-{int(time.time())}-{len(self._batches) + 1}"
+        queued: list[dict] = []
+        skipped: list[dict] = []
+
+        for raw in paths:
+            d = Path(raw).expanduser()
+            if not d.is_dir():
+                skipped.append({"path": str(d), "reason": "folder not found"})
+                continue
+            jobs = self.jobs_for(d)
+            if not jobs:
+                skipped.append({"path": str(d),
+                                "reason": "no recording for the enabled analyses"})
+                continue
+            for job in jobs:
+                key = self.state_key(d.resolve(), job)
+                status = self.state.status(key)
+                if status in self.TERMINAL and not rerun:
+                    skipped.append({"path": str(d), "job": job,
+                                    "reason": f"already {status}"})
+                    continue
+                if status in ("detected", "dispatched", "running", "queued"):
+                    skipped.append({"path": str(d), "job": job,
+                                    "reason": f"already {status}"})
+                    continue
+                if rerun and status is not None:
+                    self.state.reset(key)
+                queued.append({"path": str(d), "job": job, "key": key,
+                               "name": d.name})
+
+        if queued:
+            with self._batch_lock:
+                self._batches[batch_id] = {
+                    "id": batch_id,
+                    "keys": {q["key"] for q in queued},
+                    "pending": {q["key"] for q in queued},
+                    "created_at": _now(),
+                    "finished": False,
+                    "on_complete": on_complete or self.on_batch_done,
+                }
+            LOG.info("Queued %d job(s) as %s: %s", len(queued), batch_id,
+                     ", ".join(sorted({q["name"] for q in queued})))
+            for q in queued:
+                self.dispatch(Path(q["path"]), q["job"], detail="queued by hand")
+
+        return {"batch": batch_id if queued else None,
+                "queued": queued, "skipped": skipped}
+
+    def _batch_finished(self, key: str) -> None:
+        """Mark one job done within its batch; fire the hook on the last one."""
+        ready: list[dict] = []
+        with self._batch_lock:
+            for batch in self._batches.values():
+                if batch["finished"] or key not in batch["pending"]:
+                    continue
+                batch["pending"].discard(key)
+                if not batch["pending"]:
+                    batch["finished"] = True
+                    batch["completed_at"] = _now()
+                    ready.append(batch)
+        for batch in ready:
+            hook = batch.get("on_complete")
+            LOG.info("Batch %s complete (%d job(s))", batch["id"], len(batch["keys"]))
+            self.on_event("batch_done", {"batch": batch["id"],
+                                         "jobs": len(batch["keys"])})
+            if hook:
+                # Never let a reporting failure look like an analysis failure.
+                try:
+                    threading.Thread(target=hook, args=(batch,),
+                                     name=f"mea-{batch['id']}-report",
+                                     daemon=True).start()
+                except Exception:  # noqa: BLE001
+                    LOG.exception("Could not start the batch-completion hook")
+
+    def batches(self) -> list[dict]:
+        with self._batch_lock:
+            return [{k: (sorted(v) if isinstance(v, set) else v)
+                     for k, v in b.items() if k != "on_complete"}
+                    for b in self._batches.values()]
 
     # -- status for the UI --------------------------------------------------- #
     def snapshot(self) -> dict[str, Any]:
