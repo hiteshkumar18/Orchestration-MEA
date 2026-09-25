@@ -780,6 +780,27 @@ class Watcher:
             name=f"mea-{job}-{run_dir.name}", daemon=True,
         ).start()
 
+    def _env_banner(self, cmd: list[str], env: dict) -> list[str]:
+        """What will actually run, resolved — written at the top of each log."""
+        out = [f"# {_now()}  {JOB_LABELS.get('network', '')}".rstrip(),
+               f"# driver interpreter : {cmd[0] if cmd else '?'}"]
+        try:
+            which = subprocess.run(["bash", "-lc", "command -v python3"], env=env,
+                                   capture_output=True, text=True, timeout=30)
+            resolved = which.stdout.strip() or "(not found)"
+        except Exception:                                   # noqa: BLE001
+            resolved = "(could not resolve)"
+        out.append(f"# child 'python3'   : {resolved}")
+        try:
+            chk = subprocess.run(["python3", "-c", "import pandas;print(pandas.__version__)"],
+                                 env=env, capture_output=True, text=True, timeout=120)
+            out.append("# child pandas      : " + (chk.stdout.strip() if chk.returncode == 0
+                       else "MISSING — " + (chk.stderr.strip().splitlines() or ["?"])[-1]))
+        except Exception as exc:                            # noqa: BLE001
+            out.append(f"# child pandas      : could not check ({exc})")
+        out.append("# command           : " + " ".join(shlex.quote(c) for c in cmd))
+        return out
+
     def _check_child_python(self, interpreter: str,
                             mods: Optional[tuple] = None) -> Optional[dict]:
         """What a bare ``python3`` resolves to for the driver's subprocesses."""
@@ -944,6 +965,12 @@ class Watcher:
                     env.pop("PYTHONHOME", None)
 
             with open(log_path, "w") as fh:
+                # Header first: every failure so far has come down to which
+                # interpreter ran what, and that was invisible in every log.
+                for line in self._env_banner(cmd, env):
+                    fh.write(line + "\n")
+                fh.write("-" * 72 + "\n")
+                fh.flush()
                 proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
                                       check=False, env=env)
             ok = proc.returncode == 0
