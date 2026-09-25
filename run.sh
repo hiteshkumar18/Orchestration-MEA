@@ -31,8 +31,14 @@ if [[ -f "$HERE/config.env" ]]; then
     [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
     key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
     val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
-    # A value that starts with '#' is a leftover placeholder, not a setting.
-    [[ "$val" =~ ^# ]] && val=""
+    # A value that starts with '#' is a leftover placeholder from an older
+    # setup.sh, not a setting. Blanking it silently made a stale config look
+    # configured, which cost a long debugging session — so say so.
+    if [[ "$val" =~ ^# ]]; then
+      printf '\033[33mconfig.env: %s still holds the placeholder text, so it is being ignored.\033[0m\n' "$key" >&2
+      printf '  Set a real value or delete the line: %s=%s\n' "$key" "$val" >&2
+      val=""
+    fi
     case "$key" in
       MEA_REPO)      CFG_MEA_REPO="$val" ;;
       PYTHON)        CFG_PYTHON="$val" ;;
