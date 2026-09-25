@@ -548,6 +548,16 @@ class Watcher:
                 mods = None
         res = check_python(python, mods) if mods else check_python(python)
         res["python"] = python
+
+        # The driver launches every well with a bare "python3" from PATH, so
+        # checking the interpreter we pass is only half the story — the wells
+        # run under whatever "python3" resolves to. Test that resolution the
+        # same way the children will see it, or a whole batch fails one well at
+        # a time with ModuleNotFoundError while the driver still exits 0.
+        if res.get("ok"):
+            child = self._check_child_python(python, mods)
+            if child and not child.get("ok"):
+                res = {**res, **child, "ok": False, "python": python}
         self._preflight = res
 
         if res.get("ok"):
@@ -770,6 +780,61 @@ class Watcher:
             name=f"mea-{job}-{run_dir.name}", daemon=True,
         ).start()
 
+    def _check_child_python(self, interpreter: str,
+                            mods: Optional[tuple] = None) -> Optional[dict]:
+        """What a bare ``python3`` resolves to for the driver's subprocesses."""
+        shim = self._python3_shim(interpreter)
+        env = dict(os.environ)
+        if shim:
+            env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+        names = list(mods or ("pandas",))[:12]
+        code = "import " + ", ".join(names)
+        try:
+            proc = subprocess.run(["python3", "-c", code], env=env, timeout=120,
+                                  capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"ok": False, "error": f"could not run python3: {exc}"}
+        if proc.returncode == 0:
+            return {"ok": True}
+        which = subprocess.run(["bash", "-lc", "command -v python3"], env=env,
+                               capture_output=True, text=True).stdout.strip()
+        missing = [ln.rsplit("'", 2)[-2] for ln in proc.stderr.splitlines()
+                   if "ModuleNotFoundError" in ln and "'" in ln]
+        return {"ok": False,
+                "missing": missing or None,
+                "error": ("the wells would run under "
+                          f"{which or 'an unknown python3'}, which cannot import "
+                          + (", ".join(missing) if missing else "the analysis stack")
+                          + " — the driver launches each well with a bare 'python3'")}
+
+    def _python3_shim(self, interpreter: str) -> Optional[Path]:
+        """A directory whose ``python3`` is the interpreter we chose.
+
+        Created once under the work directory. Nothing is written near the
+        pipeline or the data — this only exists so a hardcoded "python3" in a
+        subprocess resolves to the environment that has the analysis stack.
+        """
+        if not interpreter:
+            return None
+        try:
+            target = Path(interpreter).resolve()
+            if not target.is_file():
+                return None
+            shim_dir = self.work_dir / "pybin"
+            shim_dir.mkdir(parents=True, exist_ok=True)
+            link = shim_dir / "python3"
+            if link.is_symlink() or link.exists():
+                if link.resolve() == target:
+                    return shim_dir
+                link.unlink()
+            link.symlink_to(target)
+            return shim_dir
+        except OSError:
+            LOG.warning("Could not create the python3 shim; the driver's "
+                        "subprocesses will use whatever python3 is on PATH",
+                        exc_info=True)
+            return None
+
     @staticmethod
     def read_driver_verdict(log_path: Path) -> Optional[str]:
         """Whether a zero exit code actually meant the wells were analysed.
@@ -861,22 +926,23 @@ class Watcher:
             # after an OOM. Harmless for the CPU-only activity scan.
             env.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
-            # run_pipeline_driver.py launches each well with a bare "python3",
-            # resolved from PATH — so choosing the right interpreter for the
-            # driver is not enough; its children would still get whichever
-            # python3 the service happens to see, and fail on the first import
-            # of spikeinterface. Put the chosen interpreter's directory first
-            # on PATH so "python3" means the same thing all the way down.
-            interpreter = cmd[0] if cmd else ""
-            bindir = str(Path(interpreter).resolve().parent) if interpreter else ""
-            if bindir and Path(bindir, "python3").exists():
-                env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
-                # Make it a proper virtualenv activation when it is one, so
-                # anything else reading VIRTUAL_ENV agrees with PATH.
-                venv = Path(bindir).parent
+            # run_pipeline_driver.py launches each well with a bare "python3"
+            # resolved from PATH, so choosing the interpreter for the driver is
+            # not enough — its children would still get whichever python3 the
+            # service happens to see and die on the first import.
+            #
+            # Prepending the interpreter's own bin directory is not reliable:
+            # a virtualenv may expose only "python" or "python3.11", and then
+            # "python3" still falls through to /usr/bin. So point a shim
+            # directory's "python3" at the exact interpreter and put that first.
+            shim = self._python3_shim(cmd[0] if cmd else "")
+            if shim:
+                env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+                venv = Path(cmd[0]).resolve().parent.parent
                 if (venv / "pyvenv.cfg").is_file():
                     env["VIRTUAL_ENV"] = str(venv)
                     env.pop("PYTHONHOME", None)
+
             with open(log_path, "w") as fh:
                 proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
                                       check=False, env=env)
