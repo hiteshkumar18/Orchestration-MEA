@@ -1016,6 +1016,7 @@ function App(){
   const [picker,setPicker]=useState(null);
   const [pyCheck,setPyCheck]=useState(null);
   const [busyNative,setBusyNative]=useState(false);
+  const [clearing,setClearing]=useState(false);
   const [wells,setWells]=useState({});      // run key -> checkpoint payload
   const [openWells,setOpenWells]=useState({});
   const tid=useRef(0), seq=useRef(0), openWellsRef=useRef({});
@@ -1118,6 +1119,7 @@ function App(){
   const setO=(k,v)=>setCfg(c=>({...c,driver_options:{...c.driver_options,[k]:v}}));
   const setT=(k,v)=>setCfg(c=>({...c,[k]:v}));
   const counts=status?.counts||{}, runs=status?.runs||[];
+  const failedCount=runs.filter(r=>r.status==="failed").length;
 
   const save   =()=>act_(async()=>{await api("/api/config",{method:"POST",body:JSON.stringify(payload())});},"Configuration saved");
   const start  =()=>act_(async()=>{
@@ -1130,6 +1132,25 @@ function App(){
                     "Run reset",`${r.run} will be processed again.`);
   const onLog  =r=>act_(async()=>{const d=await api(`/api/runs/log?path=${encodeURIComponent(r.log)}`);
                     setLog({run:r.run,lines:d.lines,path:r.log});});
+
+  // Clearing runs one at a time is unusable after a failed batch, so offer the
+  // two cases that actually come up: forget the failures, or start fresh.
+  const onClearAll=async which=>{
+    const all=(status?.runs)||[];
+    const n=which==="failed"?all.filter(r=>r.status==="failed").length:all.length;
+    if(which==="all"&&n>0&&!window.confirm(
+        `Forget all ${n} run(s)?\n\nAnalysed output on disk is not touched — the `
+        +`watcher will simply treat these folders as unseen.`)) return;
+    setClearing(true);
+    try{
+      const r=await api("/api/runs/reset-all",{method:"POST",
+        body:JSON.stringify({which})});
+      toast("Cleared",`${r.cleared} run(s) forgotten`
+        +(r.skipped?.length?` · ${r.skipped.length} still running, left alone`:""),"ok");
+      refresh();
+    }catch(e){ toast("Could not clear",e.message,"error"); }
+    finally{ setClearing(false); }
+  };
   const testPython=()=>act_(async()=>{
     setPyCheck(await api("/api/driver-python",{method:"POST",
       body:JSON.stringify({python:cfg.driver_python||""})}));
@@ -1236,6 +1257,17 @@ function App(){
               {running?"Scanning for completed recordings":"Watcher is stopped"}
               {status?.candidates?.length?` · ${status.candidates.length} folder${status.candidates.length>1?"s":""} in scope`:""}
             </div>
+            <div className="grow"/>
+            {failedCount>0&&
+              <button className="btn btn-q btn-s" disabled={clearing}
+                      onClick={()=>onClearAll("failed")}>
+                Clear {failedCount} failed
+              </button>}
+            {runs.length>0&&
+              <button className="btn btn-q btn-s" disabled={clearing}
+                      onClick={()=>onClearAll("all")}>
+                Clear all
+              </button>}
           </div>
           <div className="panel">
             {runs.length===0

@@ -179,6 +179,11 @@ class RunKeyPayload(BaseModel):
     path: str
 
 
+class ResetAllPayload(BaseModel):
+    # "failed" | "done" | "all" — what to forget in one go
+    which: str = "failed"
+
+
 class QueuePayload(BaseModel):
     folders: list[str] = []
     rerun: bool = False
@@ -485,6 +490,38 @@ def api_reset(payload: RunKeyPayload):
     watcher._prints.pop(folder, None)
     watcher._prints.pop(payload.path, None)   # tolerate a bare folder path
     return {"ok": True, "cleared_fingerprint_for": folder}
+
+
+@app.post("/api/runs/reset-all")
+def api_reset_all(payload: ResetAllPayload):
+    """Forget many runs at once, so a fresh start is one click.
+
+    Anything still in flight is left alone: clearing a running job would let the
+    watcher re-dispatch the same folder while the first process still holds the
+    GPU. Those are reported back rather than silently skipped.
+    """
+    if payload.which not in ("failed", "done", "all"):
+        raise HTTPException(400, f"Unknown selection: {payload.which}")
+
+    watcher = get_watcher()
+    in_flight = {"dispatched", "running", "queued", "detected"}
+    cleared, skipped = [], []
+    for key, entry in list(watcher.state.all().items()):
+        status = entry.get("status")
+        if status in in_flight:
+            skipped.append({"run": entry.get("run") or key, "status": status})
+            continue
+        if payload.which != "all" and status != payload.which:
+            continue
+        watcher.state.reset(key)
+        folder = key.split("::")[0]
+        watcher._prints.pop(folder, None)
+        cleared.append(entry.get("run") or key)
+
+    LOG.info("Cleared %d run(s) [%s]%s", len(cleared), payload.which,
+             f", {len(skipped)} still running" if skipped else "")
+    return {"ok": True, "cleared": len(cleared), "runs": sorted(set(cleared)),
+            "skipped": skipped}
 
 
 @app.get("/api/runs/log")
