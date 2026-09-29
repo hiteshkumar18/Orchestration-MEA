@@ -177,6 +177,8 @@ class ConfigPayload(BaseModel):
     skip_settle_for_existing: bool = False
     driver_python: str = ""
     logs_in_output: bool = True
+    stage_locally: bool = False
+    scratch_dir: str = ""
     dry_run: bool = False
 
 
@@ -265,6 +267,8 @@ def api_get_config():
         "skip_settle_for_existing": cfg.skip_settle_for_existing,
         "driver_python": cfg.driver_python,
         "logs_in_output": cfg.logs_in_output,
+        "stage_locally": cfg.stage_locally,
+        "scratch_dir": cfg.scratch_dir,
         "dry_run": cfg.dry_run,
         "work_dir": cfg.work_dir,
     }
@@ -304,6 +308,8 @@ def api_set_config(payload: ConfigPayload):
         skip_settle_for_existing=payload.skip_settle_for_existing,
         driver_python=payload.driver_python,
         logs_in_output=payload.logs_in_output,
+        stage_locally=payload.stage_locally,
+        scratch_dir=payload.scratch_dir,
         work_dir=str(WORK_DIR),
         dry_run=payload.dry_run,
     )

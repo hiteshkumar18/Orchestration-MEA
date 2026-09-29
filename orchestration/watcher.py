@@ -138,6 +138,24 @@ class JobConfig:
     # Ceiling for the adaptive scan back-off (see _next_poll_delay).
     max_poll_seconds: int = 600
 
+    # --- Local staging ------------------------------------------------------
+    # Run the analysis against local disk, then copy the results to the real
+    # output directory.
+    #
+    # The pipeline writes a float32 binary of the whole recording under the
+    # output directory, and Kilosort then reads it back many times. For a
+    # MaxTwo well that is roughly 1024 channels x 20 kHz x 4 bytes = 82 MB per
+    # second of recording, so a five-minute well is ~24 GB of scratch traffic —
+    # all of it over the network mount, and all of it deleted afterwards by
+    # --clean-up. Sending that to local disk leaves only the final results on
+    # the NAS, which are small.
+    #
+    # Off by default: it needs free local space, and on a fast local output
+    # directory it buys nothing.
+    stage_locally: bool = False
+    # Where to stage. Blank means <work_dir>/scratch.
+    scratch_dir: str = ""
+
     # --- Watchdog -----------------------------------------------------------
     # A driver that hangs rather than exits is worse than one that crashes: it
     # holds the GPU slot, so every job behind it waits too, and the run sits at
@@ -1406,6 +1424,79 @@ class Watcher:
                      "a previous run", run_dir.name, len(moved))
         return moved
 
+    def _mirror(self, src: Path, dst: Path) -> None:
+        """Copy a tree onto another, preferring rsync.
+
+        rsync restarts cleanly and skips files that are already identical,
+        which matters when the destination is a slow mount and the same run is
+        copied back more than once.
+        """
+        dst.mkdir(parents=True, exist_ok=True)
+        rsync = shutil.which("rsync")
+        if rsync:
+            proc = subprocess.run(
+                [rsync, "-a", "--partial", f"{src}{os.sep}", f"{dst}{os.sep}"],
+                capture_output=True, text=True)
+            if proc.returncode == 0:
+                return
+            LOG.warning("rsync failed (%s); falling back to a plain copy",
+                        (proc.stderr.strip().splitlines() or ["?"])[-1])
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+
+    def _scratch_root(self) -> Path:
+        return Path(self.cfg.scratch_dir or (Path(self.cfg.work_dir) / "scratch"))
+
+    def _stage_in(self, run_dir: Path) -> Optional[tuple[Path, list[str]]]:
+        """Prepare a local output directory, returning it and the patched flag.
+
+        Existing results for this run are copied down first, so the pipeline's
+        checkpoints still resume — otherwise staging would silently re-run
+        wells that had already finished.
+        """
+        local = self._scratch_root() / run_dir.name
+        try:
+            if local.exists():
+                shutil.rmtree(local, ignore_errors=True)
+            local.mkdir(parents=True, exist_ok=True)
+            # Reported, not enforced: the working set depends on how long the
+            # recordings are, which is not known here. A number in the log
+            # beats a threshold guessed in advance.
+            free = shutil.disk_usage(local).free / 2**30
+            LOG.info("%s: staging locally, %.0f GB free at %s",
+                     run_dir.name, free, self._scratch_root())
+            for existing in self._output_roots_for(run_dir):
+                # <output>/<project>/<date>  ->  <local>/<project>/<date>
+                rel = existing.relative_to(Path(self.cfg.output_dir))
+                LOG.info("%s: copying previous results down to %s",
+                         run_dir.name, local / rel)
+                self._mirror(existing, local / rel)
+        except OSError as exc:
+            LOG.warning("%s: could not prepare local staging (%s); running "
+                        "against the output directory directly", run_dir.name, exc)
+            return None
+        return local, []
+
+    def _stage_out(self, run_dir: Path, local: Path) -> None:
+        """Copy staged results to the real output directory and clean up.
+
+        Runs whether or not the job succeeded: a killed or failed run still
+        leaves checkpoints and finished wells worth keeping, and discarding
+        them would mean redoing that work.
+        """
+        dest = Path(self.cfg.output_dir)
+        try:
+            LOG.info("%s: copying results to %s", run_dir.name, dest)
+            started = time.time()
+            self._mirror(local, dest)
+            LOG.info("%s: results copied in %s", run_dir.name,
+                     _hms(time.time() - started))
+        except (OSError, shutil.Error) as exc:
+            LOG.error("%s: could not copy staged results to %s (%s). They are "
+                      "kept at %s — copy them across before re-running, or "
+                      "that work is repeated.", run_dir.name, dest, exc, local)
+            return
+        shutil.rmtree(local, ignore_errors=True)
+
     def _run_job(self, run_dir: Path, job: str, key: str,
                  cmd: list[str], log_path: Path) -> None:
         label = JOB_LABELS.get(job, job)
@@ -1462,6 +1553,27 @@ class Watcher:
             except Exception:                               # noqa: BLE001
                 LOG.exception("%s: clearing stale sorter output failed; "
                               "continuing to the run anyway", run_dir.name)
+
+        staged: Optional[Path] = None
+        if job == JOB_NETWORK and self.cfg.stage_locally and not self.cfg.dry_run:
+            prepared = self._stage_in(run_dir)
+            if prepared:
+                staged, _ = prepared
+                cmd = [str(staged) if c == str(self.cfg.output_dir) else c
+                       for c in cmd]
+                if str(staged) not in cmd:
+                    # The flag is built from driver_options, so the path should
+                    # appear verbatim. If it does not, staging would run the job
+                    # against the NAS while pretending otherwise — say so and
+                    # fall back rather than quietly doing the slow thing.
+                    LOG.warning("%s: could not point the driver at %s; running "
+                                "against the output directory instead",
+                                run_dir.name, staged)
+                    shutil.rmtree(staged, ignore_errors=True)
+                    staged = None
+                else:
+                    self.state.update(key, detail=f"staged on local disk: {staged}")
+                    LOG.info("%s [%s] staging output at %s", run_dir.name, label, staged)
 
         started = time.time()
         with self._active_lock:
@@ -1536,6 +1648,15 @@ class Watcher:
             LOG.exception("%s [%s]: dispatch raised", run_dir.name, label)
             self.on_event("failed", {"run": run_dir.name, "job": job, "error": str(exc)})
         finally:
+            # Before the slot is released: the copy is this run's own work, and
+            # letting the next Kilosort job start on top of it would put both
+            # on the mount at once.
+            if staged is not None:
+                try:
+                    self._stage_out(run_dir, staged)
+                except Exception:                           # noqa: BLE001
+                    LOG.exception("%s: copying staged results back failed; they "
+                                  "are still at %s", run_dir.name, staged)
             # Always release, so one crashed job cannot deadlock the queue.
             with self._active_lock:
                 self._active[job] = max(0, self._active.get(job, 1) - 1)
