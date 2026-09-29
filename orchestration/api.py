@@ -475,6 +475,17 @@ def api_status():
     return snap
 
 
+@app.get("/api/gpu")
+def api_gpu(refresh: bool = False):
+    """Whether spike sorting can actually run right now.
+
+    The answer is cached after the first call because the probe starts a
+    process and imports torch; pass ``?refresh=true`` after fixing the machine.
+    """
+    watcher = get_watcher()
+    return watcher.check_gpu(force=refresh)
+
+
 @app.post("/api/runs/reset")
 def api_reset(payload: RunKeyPayload):
     """Forget a run so it can be processed again.

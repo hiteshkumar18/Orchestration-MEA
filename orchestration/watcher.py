@@ -135,6 +135,21 @@ class JobConfig:
     # How often a queued job re-checks for a free slot.
     queue_poll_seconds: int = 2
 
+    # --- Watchdog -----------------------------------------------------------
+    # A driver that hangs rather than exits is worse than one that crashes: it
+    # holds the GPU slot, so every job behind it waits too, and the run sits at
+    # "Running" with nothing in the log for as long as the server is up. Both
+    # limits below are measured against the job's own log file, which the
+    # driver writes to continuously while it works.
+    #
+    # No output for this long means the job is stuck, not slow. Kilosort is
+    # quiet during long GPU stretches, so this is deliberately generous.
+    stall_minutes: int = 45
+    # An absolute ceiling, whatever the log says. 0 disables it.
+    max_runtime_hours: float = 12.0
+    # Seconds given to a killed process group to exit before SIGKILL.
+    kill_grace_seconds: int = 20
+
     settle_seconds: int = 600
     poll_seconds: int = 30
     require_finished_marker: bool = True
@@ -861,6 +876,78 @@ class Watcher:
                           + (", ".join(missing) if missing else "the analysis stack")
                           + " — the driver launches each well with a bare 'python3'")}
 
+    # A driver interpreter that can see a working GPU, remembered per path so
+    # the check costs one subprocess per server run rather than one per job.
+    _gpu_checked: dict = {}
+
+    def check_gpu(self, interpreter: str = "", force: bool = False) -> dict:
+        """Is the GPU usable by the interpreter the driver will run under?
+
+        Worth asking before dispatching rather than after. When the NVIDIA
+        kernel module and the userspace library fall out of step — which is
+        what a driver package upgrade does to a machine that has not been
+        rebooted — CUDA calls do not fail cleanly. They block. Kilosort then
+        sits on the GPU slot forever and the whole queue stops behind it, with
+        nothing in any log to say why. Asking first turns two silent hours into
+        one sentence.
+        """
+        interpreter = interpreter or self.cfg.driver_python or self.cfg.python
+        if not force and interpreter in self._gpu_checked:
+            return self._gpu_checked[interpreter]
+
+        probe = (
+            "import json, torch\n"
+            "out = {'torch': torch.__version__, 'built': torch.version.cuda}\n"
+            "try:\n"
+            "    out['available'] = bool(torch.cuda.is_available())\n"
+            "    if out['available']:\n"
+            "        out['name'] = torch.cuda.get_device_name(0)\n"
+            "        free, total = torch.cuda.mem_get_info(0)\n"
+            "        out['free_gb'] = round(free / 2**30, 1)\n"
+            "        out['total_gb'] = round(total / 2**30, 1)\n"
+            "        torch.zeros(64, device='cuda').sum().item()\n"
+            "        out['ok'] = True\n"
+            "    else:\n"
+            "        out['ok'] = False\n"
+            "        out['error'] = 'torch.cuda.is_available() is False'\n"
+            "except Exception as exc:\n"
+            "    out['ok'] = False\n"
+            "    out['error'] = f'{type(exc).__name__}: {exc}'\n"
+            "print(json.dumps(out))\n"
+        )
+        try:
+            # A hung CUDA call is the thing being tested for, so the probe must
+            # have its own deadline or it hangs exactly where the driver does.
+            proc = subprocess.run([interpreter, "-c", probe], timeout=90,
+                                  capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            res = {"ok": False, "error":
+                   "the GPU did not answer within 90s. The NVIDIA kernel module "
+                   "and the installed driver library are usually out of step "
+                   "after an upgrade; check `nvidia-smi` and reboot the machine.",
+                   "hung": True}
+        except (OSError, subprocess.SubprocessError) as exc:
+            res = {"ok": False, "error": f"could not run the GPU check: {exc}"}
+        else:
+            if proc.returncode == 0 and proc.stdout.strip():
+                try:
+                    res = json.loads(proc.stdout.strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    res = {"ok": False, "error": "the GPU check returned nothing usable"}
+            else:
+                tail = (proc.stderr.strip().splitlines() or ["no output"])[-1]
+                res = {"ok": False, "error": f"the GPU check failed: {tail}"}
+
+        res["interpreter"] = interpreter
+        res["checked_at"] = _now()
+        self._gpu_checked[interpreter] = res
+        if res.get("ok"):
+            LOG.info("GPU ready: %s, %.1f/%.1f GB free",
+                     res.get("name", "?"), res.get("free_gb", 0), res.get("total_gb", 0))
+        else:
+            LOG.error("GPU not usable — %s", res.get("error"))
+        return res
+
     def _python3_shim(self, interpreter: str) -> Optional[Path]:
         """A directory whose ``python3`` runs the interpreter we chose.
 
@@ -966,12 +1053,127 @@ class Watcher:
                     LOG.warning("Cannot write logs to %s (%s); using %s", base, exc, self.log_dir)
         return self.log_dir / name
 
+    def _kill_tree(self, proc: "subprocess.Popen") -> None:
+        """End the driver and every well it spawned.
+
+        The driver launches one child per well. Killing only the driver leaves
+        those children holding VRAM, which is exactly the state the cooldown
+        exists to avoid, so the whole process group goes — TERM first, so a
+        child can close its HDF5 file, then KILL for whatever ignored it.
+        """
+        import signal
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError, AttributeError):
+            pgid = None
+
+        def send(sig):
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, sig)
+                    return
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                proc.send_signal(sig)
+            except (ProcessLookupError, OSError):
+                pass
+
+        send(signal.SIGTERM)
+        try:
+            proc.wait(timeout=max(1, self.cfg.kill_grace_seconds))
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        send(signal.SIGKILL)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            LOG.error("pid %s did not die even after SIGKILL", proc.pid)
+
+    def _supervise(self, cmd: list[str], env: dict, fh, log_path: Path,
+                   run_name: str, label: str, key: str) -> tuple[int, Optional[str]]:
+        """Run the driver, watching for a hang. Returns (returncode, stall reason).
+
+        A crash is easy: the process exits and the log says why. A hang says
+        nothing at all — the run sits at "Running" for hours, and because the
+        GPU slot is only released when the job ends, every queued job behind it
+        waits too. So progress is judged by whether the log is still growing,
+        and a job that has gone quiet is killed and reported rather than left.
+        """
+        stall_s = max(0, self.cfg.stall_minutes) * 60
+        cap_s = max(0.0, self.cfg.max_runtime_hours) * 3600
+        started = time.time()
+
+        proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                                env=env, start_new_session=True)
+        LOG.info("%s [%s] pid %s started", run_name, label, proc.pid)
+
+        last_size, last_change = -1, time.time()
+        note_at = 0.0
+        while True:
+            try:
+                rc = proc.wait(timeout=30)
+                return rc, None
+            except subprocess.TimeoutExpired:
+                pass
+
+            if self._halt.is_set():
+                LOG.warning("%s [%s] shutting down — ending pid %s",
+                            run_name, label, proc.pid)
+                self._kill_tree(proc)
+                return -1, "the server was stopped while this job was running"
+
+            now = time.time()
+            try:
+                size = log_path.stat().st_size
+            except OSError:
+                size = last_size
+            if size != last_size:
+                last_size, last_change = size, now
+
+            quiet = now - last_change
+            elapsed = now - started
+
+            # Keep the UI honest about a long, legitimately quiet run.
+            if now - note_at >= 60:
+                note_at = now
+                self.state.update(key, detail=(
+                    f"running {_hms(elapsed)} · last log output "
+                    f"{_hms(quiet)} ago"))
+
+            if stall_s and quiet > stall_s:
+                self._kill_tree(proc)
+                return proc.returncode or -1, (
+                    f"no output for {_hms(quiet)} — the job was stopped as stuck. "
+                    f"It had been running {_hms(elapsed)}. See {log_path.name}; "
+                    "a GPU that is not responding is the usual cause.")
+            if cap_s and elapsed > cap_s:
+                self._kill_tree(proc)
+                return proc.returncode or -1, (
+                    f"still running after {_hms(elapsed)}, past the "
+                    f"{self.cfg.max_runtime_hours:g}h limit — stopped.")
+
     def _run_job(self, run_dir: Path, job: str, key: str,
                  cmd: list[str], log_path: Path) -> None:
         label = JOB_LABELS.get(job, job)
         slot = self._slots.get(job)
         limit = (self.cfg.max_concurrent_network if job == JOB_NETWORK
                  else self.cfg.max_concurrent_activity)
+
+        # Check the GPU before taking the slot, not after. A job that fails
+        # here has not blocked anything; one that hangs after taking the slot
+        # blocks every job behind it.
+        if job == JOB_NETWORK and not self.cfg.dry_run:
+            gpu = self.check_gpu(cmd[0] if cmd else "")
+            if not gpu.get("ok"):
+                msg = ("the GPU is not usable, so spike sorting was not started — "
+                       + str(gpu.get("error", "unknown reason")))
+                self.state.update(key, status="failed", completed_at=_now(), error=msg)
+                LOG.error("%s [%s] %s", run_dir.name, label, msg)
+                self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
+                self._batch_finished(key)
+                return
 
         # Wait for a slot before starting. Kilosort4 reserves many GB of VRAM,
         # so two concurrent Network jobs OOM on a single GPU. The run stays
@@ -1034,9 +1236,17 @@ class Watcher:
                     fh.write(line + "\n")
                 fh.write("-" * 72 + "\n")
                 fh.flush()
-                proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
-                                      check=False, env=env)
-            ok = proc.returncode == 0
+                rc, stall = self._supervise(cmd, env, fh, log_path,
+                                            run_dir.name, label, key)
+            if stall:
+                self.state.update(key, status="failed", completed_at=_now(),
+                                  returncode=rc, error=stall,
+                                  duration_s=round(time.time() - started, 1))
+                LOG.error("%s [%s] %s (log: %s)", run_dir.name, label, stall, log_path)
+                self.on_event("failed", {"run": run_dir.name, "job": job,
+                                         "error": stall})
+                return
+            ok = rc == 0
             # A zero exit code is necessary but not sufficient: the driver
             # reports success even when every well failed.
             verdict = self.read_driver_verdict(log_path) if ok else None
@@ -1049,16 +1259,16 @@ class Watcher:
                 key,
                 status="done" if ok else "failed",
                 completed_at=_now(),
-                returncode=proc.returncode,
+                returncode=rc,
                 error=verdict if verdict and not ok else None,
                 detail=verdict if verdict and ok else None,
                 duration_s=round(time.time() - started, 1),
             )
             (LOG.info if ok else LOG.error)(
                 "%s [%s] finished with code %s (log: %s)",
-                run_dir.name, label, proc.returncode, log_path)
+                run_dir.name, label, rc, log_path)
             self.on_event("done" if ok else "failed",
-                          {"run": run_dir.name, "job": job, "returncode": proc.returncode})
+                          {"run": run_dir.name, "job": job, "returncode": rc})
         except Exception as exc:  # noqa: BLE001
             self.state.update(key, status="failed", completed_at=_now(), error=str(exc))
             LOG.exception("%s [%s]: dispatch raised", run_dir.name, label)
@@ -1230,6 +1440,19 @@ class Watcher:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _hms(seconds: float) -> str:
+    """A duration a person can read at a glance: 9m, 1h 12m, 2h."""
+    s = int(max(0, seconds))
+    h, m = s // 3600, (s % 3600) // 60
+    if h and m:
+        return f"{h}h {m}m"
+    if h:
+        return f"{h}h"
+    if m:
+        return f"{m}m"
+    return f"{s}s"
 
 
 # --------------------------------------------------------------------------- #
