@@ -342,9 +342,21 @@ class StateStore:
             self._flush()
 
     def _flush(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True))
-        tmp.replace(self.path)
+        # A temp name unique to this writer. The shared "watcher_state.tmp"
+        # was safe only while exactly one StateStore existed; when a second
+        # watcher appeared, both wrote that one path and whichever replaced()
+        # second found the file already gone — FileNotFoundError, taking the
+        # whole scan cycle down with it and losing the update. The duplicate
+        # watcher is fixed at its source, but a state file is the wrong place
+        # to rely on that holding.
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}."
+                                  f"{threading.get_ident():x}.tmp")
+        try:
+            tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True))
+            tmp.replace(self.path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 # --------------------------------------------------------------------------- #
@@ -488,6 +500,7 @@ class Watcher:
         self._cand_cache: Optional[tuple[float, list]] = None
         self._cand_lock = threading.Lock()
         self._cand_refreshing = False
+        self._walk_lock = threading.Lock()
 
         self._batches: dict[str, dict] = {}
         self._batch_lock = threading.Lock()
@@ -672,6 +685,18 @@ class Watcher:
             if cached and ttl and (time.time() - cached[0]) < ttl:
                 return list(cached[1])
 
+        # One walk at a time. This takes five minutes on the lab's NAS, and two
+        # of them running together — the scan loop's forced walk and a
+        # background refresh — only made each slower. The second caller waits
+        # for the first and takes its result.
+        with self._walk_lock:
+            with self._cand_lock:
+                cached = self._cand_cache
+            if cached and ttl and (time.time() - cached[0]) < ttl:
+                return list(cached[1])
+            return self._walk_now()
+
+    def _walk_now(self) -> list[tuple[Path, list[str]]]:
         root = Path(self.cfg.watch_dir)
         if not root.is_dir():
             found: list[tuple[Path, list[str]]] = []

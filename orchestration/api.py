@@ -132,10 +132,24 @@ def load_job_config() -> JobConfig:
     return cfg
 
 
+_watcher_lock = threading.Lock()
+
+
 def get_watcher() -> Watcher:
+    """The one Watcher for this process.
+
+    The lock is not ceremony. FastAPI runs sync endpoints in a thread pool and
+    the UI fires several requests the moment the page loads, so an unguarded
+    "if None: create" let two threads each build a Watcher. Two watchers means
+    two scan loops walking the same directory, two StateStores writing the same
+    watcher_state.tmp — which raced and lost entries, so runs vanished from the
+    UI — and every log line printed twice. Double-checked under the lock.
+    """
     global _watcher
     if _watcher is None:
-        _watcher = Watcher(load_job_config(), on_event=_record_event)
+        with _watcher_lock:
+            if _watcher is None:
+                _watcher = Watcher(load_job_config(), on_event=_record_event)
     return _watcher
 
 
@@ -299,7 +313,20 @@ def api_set_config(payload: ConfigPayload):
 
     cfg.save(CONFIG_PATH)
     global _watcher
-    _watcher = Watcher(cfg, on_event=_record_event)
+    with _watcher_lock:
+        # Stop the old one first. Replacing the reference does not stop its
+        # scan loop: that thread keeps walking the watch directory and keeps
+        # its own StateStore, so the process ends up with two watchers writing
+        # the same state file. Saving config from the UI is the ordinary way to
+        # reach this line, which made it the ordinary way to get two.
+        #
+        # stop() ends the scan loop but deliberately leaves running jobs alone
+        # — a Kilosort run mid-flight should survive a settings change.
+        old, _watcher = _watcher, None
+        if old is not None and old.is_running:
+            LOG.info("Configuration changed — stopping the previous watcher")
+            old.stop()
+        _watcher = Watcher(cfg, on_event=_record_event)
 
     # "detected" is only ever produced by a dry run, and it counts as claimed —
     # so a run marked that way would never be analyzed for real. Clear those
