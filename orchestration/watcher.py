@@ -487,6 +487,7 @@ class Watcher:
         # does, so the result is shared between the scan loop and the UI.
         self._cand_cache: Optional[tuple[float, list]] = None
         self._cand_lock = threading.Lock()
+        self._cand_refreshing = False
 
         self._batches: dict[str, dict] = {}
         self._batch_lock = threading.Lock()
@@ -626,10 +627,23 @@ class Watcher:
         return res
 
     def jobs_for(self, run_dir: Path) -> list[str]:
-        """Which enabled analyses actually have data in this folder."""
+        """Which enabled analyses actually have data in this folder.
+
+        One walk, not one per job. Each recording folder holds gigabytes over a
+        network mount, and asking find_recordings() per job walked the same
+        tree twice to answer two questions that a single listing answers — 116
+        recursive walks for a 58-folder input directory, when 58 will do.
+        """
+        enabled = list(self.cfg.enabled_jobs())
+        if not enabled:
+            return []
+        found = sorted(Path(run_dir).rglob(self.cfg.h5_glob))
+        if not found:
+            return []
         jobs = []
-        for job in self.cfg.enabled_jobs():
-            if find_recordings(run_dir, self.cfg.h5_glob, self.cfg.subfolder_for(job)):
+        for job in enabled:
+            sub = self.cfg.subfolder_for(job)
+            if not sub or any(sub in p.parts for p in found):
                 jobs.append(job)
         return jobs
 
@@ -679,18 +693,41 @@ class Watcher:
             self._cand_cache = (time.time(), list(found))
         return found
 
-    def candidate_runs(self) -> list[Path]:
-        """Folders the watcher would consider. Informational, so never walks
-        the tree if a cached answer exists.
+    def candidate_runs(self) -> Optional[list[Path]]:
+        """Folders the watcher would consider, or None while unknown.
 
-        While the watcher runs, its scan loop refreshes the cache every
-        ``poll_seconds`` with a forced walk, so this can serve whatever it left
-        and stay current for free. Stopped, there is nothing refreshing it, so
-        it falls back to a short time-to-live. Either way /api/status returns
-        immediately instead of waiting on a network mount.
+        This is called by /api/status, which the UI polls every two seconds, so
+        it never walks the tree itself. Walking a 58-folder input directory on
+        a network mount takes over a minute; doing that inside the request
+        handler meant each poll started a walk that outlived the poll interval,
+        the server's thread pool filled with them, and the UI stopped updating
+        entirely — which looks exactly like a hung back end.
+
+        So: serve what the scan loop last cached, and if nothing is cached yet,
+        refresh once in the background and answer None. None means "still
+        looking", which the UI can say honestly; an empty list would claim
+        there is nothing there.
         """
-        ttl = float("inf") if self.is_running else 30
-        return [d for d, _ in self.scan_candidates(max_age=ttl)]
+        with self._cand_lock:
+            cached = self._cand_cache
+            starting = self._cand_refreshing
+            if cached is None and not starting:
+                self._cand_refreshing = True
+        if cached is not None:
+            return [d for d, _ in cached[1]]
+        if not starting:
+            threading.Thread(target=self._refresh_candidates,
+                             name="candidate-scan", daemon=True).start()
+        return None
+
+    def _refresh_candidates(self) -> None:
+        try:
+            self.scan_candidates(max_age=0)
+        except Exception:                                   # noqa: BLE001
+            LOG.exception("Background scan of %s failed", self.cfg.watch_dir)
+        finally:
+            with self._cand_lock:
+                self._cand_refreshing = False
 
     @staticmethod
     def state_key(run_dir: Path, job: str) -> str:

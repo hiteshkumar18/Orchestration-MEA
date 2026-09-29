@@ -471,7 +471,12 @@ def api_status():
     watcher = get_watcher()
     snap = watcher.snapshot()
     snap["events"] = _events[-25:]
-    snap["candidates"] = [c.name for c in watcher.candidate_runs()]
+    # None while the first directory scan is still running. Kept distinct from
+    # [] so the UI can say "scanning" rather than "nothing found" — on a slow
+    # network mount that first walk takes a minute or more.
+    found = watcher.candidate_runs()
+    snap["candidates"] = None if found is None else [c.name for c in found]
+    snap["scanning"] = found is None
     return snap
 
 

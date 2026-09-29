@@ -1261,7 +1261,9 @@ function App(){
             <div className="sec-t">Runs</div>
             <div className="sec-d">
               {running?"Scanning for completed recordings":"Watcher is stopped"}
-              {status?.candidates?.length?` · ${status.candidates.length} folder${status.candidates.length>1?"s":""} in scope`:""}
+              {status?.scanning
+                ? " · reading the input folder…"
+                : (status?.candidates?.length?` · ${status.candidates.length} folder${status.candidates.length>1?"s":""} in scope`:"")}
             </div>
             <div className="grow"/>
             {failedCount>0&&
