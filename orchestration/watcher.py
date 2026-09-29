@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import checkpoints  # noqa: E402
 from driver_schema import build_driver_args, default_options  # noqa: E402
 from mea_repo import find_mea_repo, find_driver_python, check_python, required_imports  # noqa: E402
 
@@ -1322,6 +1323,89 @@ class Watcher:
                     f"still running after {_hms(elapsed)}, past the "
                     f"{self.cfg.max_runtime_hours:g}h limit — stopped.")
 
+    # mea_checkpoint.ProcessingStage.SORTING_COMPLETE. Below this the pipeline
+    # re-runs the sorter; at or above it, it reads sorter_output back to resume.
+    SORTING_COMPLETE = 4
+
+    def _output_roots_for(self, run_dir: Path) -> list[Path]:
+        """The output folders belonging to one input run folder.
+
+        The driver writes to <output>/<project>/<date>/..., so this narrows to
+        the matching date folder instead of reading the whole output tree —
+        which on this NAS is the difference between a glob and several minutes.
+        """
+        base = self.cfg.output_dir
+        if not base:
+            return []
+        root = Path(base)
+        found = [p for p in root.glob(f"*/{run_dir.name}") if p.is_dir()]
+        direct = root / run_dir.name
+        if direct.is_dir():
+            found.append(direct)
+        return found
+
+    def clear_stale_sorter_output(self, run_dir: Path) -> list[str]:
+        """Move aside sorter_output folders that would break the next run.
+
+        SpikeInterface is called with remove_existing_folder=True, so before
+        sorting a well it does shutil.rmtree(sorter_output) with no error
+        handling. On this network mount that raises
+
+            OSError: [Errno 39] Directory not empty: 'sorter_output'
+
+        and the well exits 1. Because the pipeline resumes from its checkpoint,
+        it reaches that same line within seconds on every retry — so a well
+        that hits this once fails identically forever. That is what cost 8 of
+        21 wells on 260818 and 5 of 27 on 260821.
+
+        Renaming is the fix rather than a better rmtree: a rename does not need
+        the directory to be empty, so it succeeds whatever is holding those
+        entries — an open handle, an NFS silly-rename leftover, or a directory
+        listing the client has not caught up with. Deleting the renamed folder
+        is then best-effort, because by that point nothing depends on it.
+
+        Only folders whose checkpoint says sorting did NOT complete are moved.
+        At or past SORTING_COMPLETE the pipeline reads sorter_output back to
+        resume, and removing it would throw away hours of finished GPU work.
+        """
+        roots = self._output_roots_for(run_dir)
+        if not roots:
+            return []
+        try:
+            rows = checkpoints.read_checkpoints(roots, run_dir=run_dir)
+        except Exception:                                   # noqa: BLE001
+            LOG.exception("Could not read checkpoints under %s", roots)
+            return []
+
+        moved: list[str] = []
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        for rec in rows:
+            if int(rec.get("stage") or 0) >= self.SORTING_COMPLETE:
+                continue
+            out = rec.get("output_dir")
+            if not out:
+                continue
+            folder = Path(out) / "sorter_output"
+            if not folder.is_dir():
+                continue
+            aside = folder.with_name(f"sorter_output.stale-{stamp}")
+            try:
+                folder.rename(aside)
+            except OSError as exc:
+                LOG.warning("Could not move aside %s (%s); the well may fail "
+                            "when the sorter tries to clear it", folder, exc)
+                continue
+            moved.append(str(folder))
+            try:
+                shutil.rmtree(aside)
+            except OSError as exc:
+                LOG.info("Moved %s aside but could not delete it (%s); it is "
+                         "out of the way and safe to remove later", aside, exc)
+        if moved:
+            LOG.info("%s: cleared %d unfinished sorter_output folder(s) left by "
+                     "a previous run", run_dir.name, len(moved))
+        return moved
+
     def _run_job(self, run_dir: Path, job: str, key: str,
                  cmd: list[str], log_path: Path) -> None:
         label = JOB_LABELS.get(job, job)
@@ -1368,6 +1452,16 @@ class Watcher:
                 LOG.info("%s [%s] waiting %ss for GPU memory to free", run_dir.name, label, cool)
                 self.state.update(key, detail=f"starting in {cool}s (GPU cooldown)")
                 self._halt.wait(cool)
+
+        # After the slot is held, so nothing else is writing into this run's
+        # output while folders are moved, and before the driver starts, since
+        # it hits the sorter within seconds when resuming from a checkpoint.
+        if job == JOB_NETWORK and not self.cfg.dry_run:
+            try:
+                self.clear_stale_sorter_output(run_dir)
+            except Exception:                               # noqa: BLE001
+                LOG.exception("%s: clearing stale sorter output failed; "
+                              "continuing to the run anyway", run_dir.name)
 
         started = time.time()
         with self._active_lock:
