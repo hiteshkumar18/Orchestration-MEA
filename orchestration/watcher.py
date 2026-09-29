@@ -483,6 +483,11 @@ class Watcher:
         # on-completion hook runs exactly once.
         self._reconcile_state()
 
+        # Walking the watch directory is the most expensive thing this class
+        # does, so the result is shared between the scan loop and the UI.
+        self._cand_cache: Optional[tuple[float, list]] = None
+        self._cand_lock = threading.Lock()
+
         self._batches: dict[str, dict] = {}
         self._batch_lock = threading.Lock()
         self.on_batch_done: Optional[Callable[[dict], None]] = None
@@ -628,27 +633,64 @@ class Watcher:
                 jobs.append(job)
         return jobs
 
-    def scan_candidates(self) -> list[tuple[Path, list[str]]]:
+    def scan_candidates(self, max_age: Optional[float] = None
+                        ) -> list[tuple[Path, list[str]]]:
         """Run folders with the analyses that apply to each.
 
         Returns the job list alongside the folder so callers do not have to call
         ``jobs_for`` again — each call walks the tree with ``rglob``, which is
         expensive on multi-GB folders and was previously done twice per poll.
+
+        The result is cached, because this walks the entire dataset. The UI
+        polls /api/status every two seconds, and that endpoint asked for the
+        candidate list on each poll: a full recursive walk of every recording
+        folder on a network mount, every two seconds, which is why the UI fell
+        behind the data it was displaying. Nothing here changes faster than a
+        folder being copied in, so serving a slightly stale list costs nothing
+        and the scan loop refreshes it anyway.
+
+        ``max_age=0`` forces a fresh walk — the scan loop uses that, since it
+        is what decides whether to dispatch.
         """
+        ttl = self.cfg.poll_seconds if max_age is None else max_age
+        with self._cand_lock:
+            cached = self._cand_cache
+            if cached and ttl and (time.time() - cached[0]) < ttl:
+                return list(cached[1])
+
         root = Path(self.cfg.watch_dir)
         if not root.is_dir():
-            return []
-        out: list[tuple[Path, list[str]]] = []
-        for child in sorted(root.iterdir()):
-            if not child.is_dir():
-                continue
-            jobs = self.jobs_for(child)
-            if jobs:
-                out.append((child, jobs))
-        return out
+            found: list[tuple[Path, list[str]]] = []
+        else:
+            started = time.time()
+            found = []
+            for child in sorted(root.iterdir()):
+                if not child.is_dir():
+                    continue
+                jobs = self.jobs_for(child)
+                if jobs:
+                    found.append((child, jobs))
+            elapsed = time.time() - started
+            if elapsed > 5:
+                LOG.warning("Scanning %s took %.1fs for %d folder(s) — the watch "
+                            "directory is slow to walk", root, elapsed, len(found))
+
+        with self._cand_lock:
+            self._cand_cache = (time.time(), list(found))
+        return found
 
     def candidate_runs(self) -> list[Path]:
-        return [d for d, _ in self.scan_candidates()]
+        """Folders the watcher would consider. Informational, so never walks
+        the tree if a cached answer exists.
+
+        While the watcher runs, its scan loop refreshes the cache every
+        ``poll_seconds`` with a forced walk, so this can serve whatever it left
+        and stay current for free. Stopped, there is nothing refreshing it, so
+        it falls back to a short time-to-live. Either way /api/status returns
+        immediately instead of waiting on a network mount.
+        """
+        ttl = float("inf") if self.is_running else 30
+        return [d for d, _ in self.scan_candidates(max_age=ttl)]
 
     @staticmethod
     def state_key(run_dir: Path, job: str) -> str:
@@ -656,7 +698,9 @@ class Watcher:
         return f"{run_dir}::{job}"
 
     def scan_once(self) -> None:
-        for run_dir, jobs in self.scan_candidates():
+        # Forced fresh: this is the call that decides whether to dispatch, so
+        # it must see the directory as it is now, not as it was a poll ago.
+        for run_dir, jobs in self.scan_candidates(max_age=0):
             resolved = run_dir.resolve()
             pending = [j for j in jobs
                        if not self.state.is_claimed(self.state_key(resolved, j))]
