@@ -134,6 +134,8 @@ class JobConfig:
     gpu_cooldown_seconds: int = 5
     # How often a queued job re-checks for a free slot.
     queue_poll_seconds: int = 2
+    # Ceiling for the adaptive scan back-off (see _next_poll_delay).
+    max_poll_seconds: int = 600
 
     # --- Watchdog -----------------------------------------------------------
     # A driver that hangs rather than exits is worse than one that crashes: it
@@ -143,8 +145,12 @@ class JobConfig:
     # driver writes to continuously while it works.
     #
     # No output for this long means the job is stuck, not slow. Kilosort is
-    # quiet during long GPU stretches, so this is deliberately generous.
-    stall_minutes: int = 45
+    # quiet during long GPU stretches, and a job reading from a busy network
+    # mount can be starved for a long time while perfectly healthy — two runs
+    # were killed at 45 minutes that were most likely only waiting on I/O. A
+    # false kill costs hours of GPU work, a late kill costs a queue slot, so
+    # this errs long.
+    stall_minutes: int = 120
     # An absolute ceiling, whatever the log says. 0 disables it.
     max_runtime_hours: float = 12.0
     # Seconds given to a killed process group to exit before SIGKILL.
@@ -501,6 +507,9 @@ class Watcher:
         self._cand_lock = threading.Lock()
         self._cand_refreshing = False
         self._walk_lock = threading.Lock()
+        # folder -> the jobs it offers. Kept so a folder whose work is already
+        # claimed is never deep-read again; cleared when state is reset.
+        self._jobs_cache: dict[str, list[str]] = {}
 
         self._batches: dict[str, dict] = {}
         self._batch_lock = threading.Lock()
@@ -601,7 +610,12 @@ class Watcher:
         unaffected, since there the scan finishes well inside poll_seconds.
         """
         floor = max(1, self.cfg.poll_seconds)
-        delay = max(floor, last_scan_seconds)
+        # Capped, because a slow scan is often a symptom rather than a cause: a
+        # walk that takes 46 minutes is measuring contention with the analysis
+        # jobs reading the same mount, not the size of the directory. Backing
+        # off by that much would leave new folders unnoticed for the best part
+        # of an hour on the strength of one bad measurement.
+        delay = min(max(floor, last_scan_seconds), max(floor, self.cfg.max_poll_seconds))
         if delay > floor:
             LOG.info("Scan took %s; next scan in %s (the watch directory is "
                      "slow, so scanning backs off to leave it free)",
@@ -717,23 +731,49 @@ class Watcher:
                 return list(cached[1])
             return self._walk_now()
 
+    def _settled_jobs(self, child: Path) -> Optional[list[str]]:
+        """A folder's job list, if we can answer without walking it again.
+
+        Once every job a folder offers has been claimed, walking it again
+        discovers nothing — the recordings it holds are the ones we already
+        dispatched. That matters here because the deep walk competes with the
+        analysis for the same network mount: overnight, a scan of 12 folders
+        went from 8 seconds while idle to 46 minutes while Kilosort was reading,
+        and the scanning starved the very jobs it was scanning for.
+
+        Returns None when the folder must be walked — unknown, or still has
+        unclaimed work, so a recording that finished copying can be picked up.
+        """
+        known = self._jobs_cache.get(str(child))
+        if known is None:
+            return None
+        resolved = child.resolve()
+        if all(self.state.is_claimed(self.state_key(resolved, j)) for j in known):
+            return known
+        return None
+
     def _walk_now(self) -> list[tuple[Path, list[str]]]:
         root = Path(self.cfg.watch_dir)
         if not root.is_dir():
             found: list[tuple[Path, list[str]]] = []
         else:
             started = time.time()
-            found = []
+            found, walked = [], 0
             for child in sorted(root.iterdir()):
                 if not child.is_dir():
                     continue
-                jobs = self.jobs_for(child)
+                jobs = self._settled_jobs(child)
+                if jobs is None:
+                    jobs = self.jobs_for(child)
+                    self._jobs_cache[str(child)] = jobs
+                    walked += 1
                 if jobs:
                     found.append((child, jobs))
             elapsed = time.time() - started
             if elapsed > 5:
-                LOG.warning("Scanning %s took %.1fs for %d folder(s) — the watch "
-                            "directory is slow to walk", root, elapsed, len(found))
+                LOG.warning("Scanning %s took %s — %d of %d folder(s) needed a "
+                            "full read; the watch directory is slow",
+                            root, _hms(elapsed), walked, len(found))
 
         with self._cand_lock:
             self._cand_cache = (time.time(), list(found))
@@ -1272,9 +1312,10 @@ class Watcher:
             if stall_s and quiet > stall_s:
                 self._kill_tree(proc)
                 return proc.returncode or -1, (
-                    f"no output for {_hms(quiet)} — the job was stopped as stuck. "
-                    f"It had been running {_hms(elapsed)}. See {log_path.name}; "
-                    "a GPU that is not responding is the usual cause.")
+                    f"no output for {_hms(quiet)} — the job was stopped as stuck "
+                    f"after running {_hms(elapsed)}. Check {log_path.name} for "
+                    "where it stopped: an unresponsive GPU and a saturated "
+                    "input mount both look like this from here.")
             if cap_s and elapsed > cap_s:
                 self._kill_tree(proc)
                 return proc.returncode or -1, (
