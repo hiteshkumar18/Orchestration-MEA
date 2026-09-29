@@ -581,11 +581,32 @@ class Watcher:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            started = time.time()
             try:
                 self.scan_once()
             except Exception:  # noqa: BLE001 — a bad scan must not kill the daemon
                 LOG.exception("scan cycle failed; continuing")
-            self._stop.wait(self.cfg.poll_seconds)
+            self._stop.wait(self._next_poll_delay(time.time() - started))
+
+    def _next_poll_delay(self, last_scan_seconds: float) -> float:
+        """How long to wait before scanning again.
+
+        poll_seconds is a floor, not a promise. On the lab's NAS a full scan
+        takes minutes; sleeping the configured 30s between runs meant the
+        watcher spent most of its life walking the mount, which slowed the
+        mount for everything else including the analysis reading from it.
+
+        So a scan that takes longer than the poll interval earns a proportional
+        rest: never more than half the time walking. A fast local disk is
+        unaffected, since there the scan finishes well inside poll_seconds.
+        """
+        floor = max(1, self.cfg.poll_seconds)
+        delay = max(floor, last_scan_seconds)
+        if delay > floor:
+            LOG.info("Scan took %s; next scan in %s (the watch directory is "
+                     "slow, so scanning backs off to leave it free)",
+                     _hms(last_scan_seconds), _hms(delay))
+        return delay
 
     # -- scanning ----------------------------------------------------------- #
     def preflight(self, force: bool = False) -> dict:
