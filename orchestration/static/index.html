@@ -215,6 +215,10 @@ button,input,select{font:inherit;color:inherit}
 .row-mid{min-width:0;display:flex;flex-direction:column;gap:7px}
 .row-note{font-size:12.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap}
+/* A failure needs its reason on the row. Truncating it to one line is what
+   sent every past diagnosis to the log files, so this one wraps. */
+.row-why{font-size:12.5px;color:var(--bad);line-height:1.45;white-space:pre-wrap;
+  word-break:break-word}
 .row-time{text-align:right;min-width:78px}
 .row-dur{font-size:13px;font-weight:500}
 .row-ago{font-size:11.5px;color:var(--ink-3)}
@@ -596,8 +600,10 @@ function Row({run,onLog,onReset,wells,onWells,expanded}){
           <span className={"pill "+m.c}>
             {busy?<span className="spin"/>:<span className={"dot"+(run.status==="waiting"?" dot-l":"")}/>}
             {m.l}</span>
-          <span className="row-note">{run.detail||(run.returncode!=null?`exit code ${run.returncode}`:"")}</span>
+          <span className="row-note" title={run.detail||""}>
+            {run.detail||(run.returncode!=null?`exit code ${run.returncode}`:"")}</span>
         </div>
+        {bad&&run.error&&<div className="row-why">{run.error}</div>}
         {busy&&<div className="bar-t"><div className="bar-i"/></div>}
         {left!=null&&run.status==="waiting"&&
           <div className="bar-t"><div className="bar-f" style={{width:`${Math.max(4,100-Math.min(100,left))}%`}}/></div>}
