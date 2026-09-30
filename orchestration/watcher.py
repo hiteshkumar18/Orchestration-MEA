@@ -155,6 +155,14 @@ class JobConfig:
     stage_locally: bool = False
     # Where to stage. Blank means <work_dir>/scratch.
     scratch_dir: str = ""
+    # Refuse to stage unless this much space is free, and stop staging if a run
+    # would take the volume below it.
+    #
+    # Measured on this dataset: one well of a ~16-minute recording produced an
+    # 81 GB binary. The scratch volume here is a shared 19 TB disk sitting at
+    # 99% full, so staging must be able to decline. Running someone else's
+    # volume to zero would be a worse failure than a slow analysis.
+    stage_min_free_gb: int = 200
 
     # --- Watchdog -----------------------------------------------------------
     # A driver that hangs rather than exits is worse than one that crashes: it
@@ -1453,6 +1461,28 @@ class Watcher:
     def _scratch_root(self) -> Path:
         return Path(self.cfg.scratch_dir or (Path(self.cfg.work_dir) / "scratch"))
 
+    # A well's float32 binary against its share of the raw recording. The raw
+    # file holds every well and is int16, so one well's binary is roughly
+    # (raw / wells) x 2. Rounded up hard: this decides whether it is safe to
+    # write to a volume at 99%, and being wrong low there is expensive.
+    BINARY_VS_RAW = 3.0
+
+    def _staging_estimate_gb(self, run_dir: Path) -> float:
+        """Roughly how much scratch one well of this run needs.
+
+        Only one well's working set exists at a time — --clean-up removes the
+        binary and sorter_output as each well finishes — so the peak is set by
+        the largest single recording, not by the run as a whole.
+        """
+        try:
+            recs = find_recordings(run_dir, self.cfg.h5_glob,
+                                   self.cfg.subfolder_for(JOB_NETWORK))
+            biggest = max((p.stat().st_size for p in recs), default=0)
+        except OSError:
+            return float("inf")            # unknown size: decline to stage
+        wells = 6                          # a MaxTwo plate row; conservative
+        return (biggest / wells) * self.BINARY_VS_RAW / 2**30
+
     def _stage_in(self, run_dir: Path) -> Optional[tuple[Path, list[str]]]:
         """Prepare a local output directory, returning it and the patched flag.
 
@@ -1465,12 +1495,20 @@ class Watcher:
             if local.exists():
                 shutil.rmtree(local, ignore_errors=True)
             local.mkdir(parents=True, exist_ok=True)
-            # Reported, not enforced: the working set depends on how long the
-            # recordings are, which is not known here. A number in the log
-            # beats a threshold guessed in advance.
-            free = shutil.disk_usage(local).free / 2**30
-            LOG.info("%s: staging locally, %.0f GB free at %s",
-                     run_dir.name, free, self._scratch_root())
+            free_gb = shutil.disk_usage(local).free / 2**30
+            need_gb = self._staging_estimate_gb(run_dir)
+            floor = max(0, self.cfg.stage_min_free_gb)
+            if free_gb - need_gb < floor:
+                LOG.warning(
+                    "%s: not staging — %.0f GB free at %s, this run needs about "
+                    "%.0f GB, and %d GB must stay free. Running against the "
+                    "output directory instead (slower, but it cannot fill the "
+                    "disk).", run_dir.name, free_gb, self._scratch_root(),
+                    need_gb, floor)
+                shutil.rmtree(local, ignore_errors=True)
+                return None
+            LOG.info("%s: staging locally — %.0f GB free, about %.0f GB needed",
+                     run_dir.name, free_gb, need_gb)
             for existing in self._output_roots_for(run_dir):
                 # <output>/<project>/<date>  ->  <local>/<project>/<date>
                 rel = existing.relative_to(Path(self.cfg.output_dir))
