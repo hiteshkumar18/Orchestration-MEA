@@ -617,8 +617,13 @@ def api_checkpoints(path: str = "", tail: int = 0):
     hit an OOM and the rest are fine". The checkpoints can.
     """
     watcher = get_watcher()
+    # The scratch root is searched too. While a run is staged on local disk its
+    # checkpoints are written there, not to the output directory, so leaving it
+    # out would blank the per-well view for exactly the run you are watching.
     roots = [Path(p) for p in (watcher.cfg.output_dir,
-                               watcher.cfg.driver_options.get("checkpoint_dir")) if p]
+                               watcher.cfg.driver_options.get("checkpoint_dir"),
+                               str(watcher._scratch_root())
+                               if watcher.cfg.stage_locally else None) if p]
     if not roots:
         return {"summary": {"wells": 0}, "wells": [], "note": "No output directory configured"}
 
