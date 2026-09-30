@@ -1083,6 +1083,8 @@ function App(){
     require_finished_marker:!!cfg.require_finished_marker,
     skip_settle_for_existing:!!cfg.skip_settle_for_existing,
     driver_python:cfg.driver_python||"", logs_in_output:cfg.logs_in_output!==false,
+    stage_locally:!!cfg.stage_locally, scratch_dir:cfg.scratch_dir||"",
+    stage_min_free_gb:Number(cfg.stage_min_free_gb)||200,
     dry_run:!!cfg.dry_run,
   }),[cfg]);
 
@@ -1532,6 +1534,38 @@ function App(){
                       onChange={v=>setT("logs_in_output",v)}
                       label="Write logs beside the results"
                       hint="Per-run logs go to <output>/orchestration_logs/ as well, so the log lives with the output it describes. Falls back to the work directory if that is not writable."/>
+              <div className="sep"/>
+              <Switch id="stg" checked={!!cfg.stage_locally}
+                      onChange={v=>setT("stage_locally",v)}
+                      label="Run against local disk, then copy results"
+                      hint="Spike sorting writes a float32 copy of each recording and reads it back many times — tens of GB per well. On a network output directory that traffic, not the GPU, decides how long a run takes. Input and final output paths are unchanged; only the working files move."/>
+              {cfg.stage_locally&&<>
+                <div className="grid2" style={{marginTop:"var(--s3)"}}>
+                  <div className="f">
+                    <label className="f-l" htmlFor="scr">Scratch directory</label>
+                    <input id="scr" className="inp" type="text" spellCheck="false"
+                           placeholder="<work dir>/scratch"
+                           value={cfg.scratch_dir||""}
+                           onChange={e=>setT("scratch_dir",e.target.value)}/>
+                    <span className="f-h">A local disk with room to spare. Leave blank to use the
+                      work directory — check that it is not the same volume you are short of space on.</span>
+                  </div>
+                  <div className="f">
+                    <label className="f-l" htmlFor="smf">Keep free (GB)</label>
+                    <input id="smf" className="inp tnum" type="number" min="0" max="10000"
+                           value={cfg.stage_min_free_gb??200}
+                           onChange={e=>setT("stage_min_free_gb",e.target.value)}/>
+                    <span className="f-h">Staging is skipped, and the job runs against the output
+                      directory instead, if it would take the volume below this. Never fills a disk
+                      to run faster.</span>
+                  </div>
+                </div>
+                <div className="note n-b" style={{marginTop:"var(--s3)"}}>
+                  <span className="n-i"><Alert s={15}/></span>
+                  <div>Results for a folder appear in the output directory when that folder
+                    finishes, rather than well by well. Per-well progress and logs are unaffected.</div>
+                </div>
+              </>}
               {!cfg.run_network&&!cfg.run_activity&&
                 <div className="note n-b" style={{marginTop:"var(--s3)"}}>
                   <span className="n-i"><Alert s={15}/></span>
