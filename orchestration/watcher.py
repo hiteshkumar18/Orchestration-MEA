@@ -1461,11 +1461,19 @@ class Watcher:
     def _scratch_root(self) -> Path:
         return Path(self.cfg.scratch_dir or (Path(self.cfg.work_dir) / "scratch"))
 
-    # A well's float32 binary against its share of the raw recording. The raw
-    # file holds every well and is int16, so one well's binary is roughly
-    # (raw / wells) x 2. Rounded up hard: this decides whether it is safe to
-    # write to a volume at 99%, and being wrong low there is expensive.
-    BINARY_VS_RAW = 3.0
+    # One well's float32 binary against the size of the whole .h5 it came from.
+    #
+    # Measured, not derived: 260903/M07037/Network/000095 is 26 GB on disk and
+    # produced an 81 GB binary for a single well — a ratio of 3.1 against the
+    # *entire* file, not against one well's share of it. The MaxWell .h5 is
+    # compressed, so its size on disk says very little about the uncompressed
+    # working set, and dividing by the well count (the obvious thing, which I
+    # did first) underestimates by roughly six times.
+    #
+    # Rounded up from 3.1, because this decides whether it is safe to write to
+    # a shared volume at 99% full, and the cost of guessing low there falls on
+    # other people.
+    BINARY_VS_RAW = 3.5
 
     def _staging_estimate_gb(self, run_dir: Path) -> float:
         """Roughly how much scratch one well of this run needs.
@@ -1480,8 +1488,7 @@ class Watcher:
             biggest = max((p.stat().st_size for p in recs), default=0)
         except OSError:
             return float("inf")            # unknown size: decline to stage
-        wells = 6                          # a MaxTwo plate row; conservative
-        return (biggest / wells) * self.BINARY_VS_RAW / 2**30
+        return biggest * self.BINARY_VS_RAW / 2**30
 
     def _stage_in(self, run_dir: Path) -> Optional[tuple[Path, list[str]]]:
         """Prepare a local output directory, returning it and the patched flag.
