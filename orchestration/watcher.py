@@ -789,10 +789,17 @@ class Watcher:
                 if jobs:
                     found.append((child, jobs))
             elapsed = time.time() - started
-            if elapsed > 5:
+            # A scan that deep-read nothing is the healthy steady state, and
+            # calling five seconds of it "slow" at WARNING level buried the
+            # real problems in the log. Warn only when the scan actually went
+            # to the filesystem and took long enough to matter.
+            if walked and elapsed > 30:
                 LOG.warning("Scanning %s took %s — %d of %d folder(s) needed a "
                             "full read; the watch directory is slow",
                             root, _hms(elapsed), walked, len(found))
+            elif elapsed > 5:
+                LOG.debug("Scanned %s in %s (%d of %d folder(s) read)",
+                          root, _hms(elapsed), walked, len(found))
 
         with self._cand_lock:
             self._cand_cache = (time.time(), list(found))
