@@ -392,6 +392,8 @@ const ST={
   waiting:{l:"Waiting",c:"p-n",i:0}, detected:{l:"Detected",c:"p-a",i:1},
   dispatched:{l:"Queued",c:"p-a",i:2}, running:{l:"Analyzing",c:"p-a",i:2},
   done:{l:"Complete",c:"p-o",i:3}, failed:{l:"Failed",c:"p-b",i:3},
+  /* Cut short by a restart, not a failure: re-queued automatically. */
+  interrupted:{l:"Interrupted",c:"p-n",i:1},
 };
 const STAGES=["Detected","Settled","Analyzing","Complete"];
 const settleLeft=d=>{const m=/settling \((\d+)s remaining\)/.exec(d||"");return m?+m[1]:null;};

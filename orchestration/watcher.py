@@ -557,10 +557,18 @@ class Watcher:
         stale = [(k, e) for k, e in self.state.all().items()
                  if e.get("status") in self.IN_FLIGHT]
         for key, entry in stale:
+            # "interrupted", not "failed". A failed job is one the pipeline
+            # rejected and re-running it unchanged would fail again, so failure
+            # counts as claimed and the scan loop leaves it alone. This job was
+            # simply cut short by a restart — the right thing is to run it
+            # again, and the pipeline's own checkpoints mean finished wells are
+            # skipped, so doing so is cheap. Marking these failed meant every
+            # restart silently stalled the queue until someone noticed and
+            # cleared them by hand.
             self.state.update(
-                key, status="failed", completed_at=_now(), detail=None,
+                key, status="interrupted", completed_at=_now(), detail=None,
                 error="interrupted — the server restarted while this job was "
-                      "in flight; nothing was left running")
+                      "in flight; it will be picked up again on the next scan")
         if stale:
             LOG.warning("Retired %d job(s) left in flight by a previous run: %s",
                         len(stale),
