@@ -533,6 +533,8 @@ class Watcher:
         self._cand_cache: Optional[tuple[float, list]] = None
         self._cand_lock = threading.Lock()
         self._cand_refreshing = False
+        # pids this server started, so processes it did not can be spotted.
+        self._own_pids: set[int] = set()
         self._walk_lock = threading.Lock()
         # folder -> the jobs it offers. Kept so a folder whose work is already
         # claimed is never deep-read again; cleared when state is reset.
@@ -574,9 +576,109 @@ class Watcher:
                         len(stale),
                         ", ".join(sorted({e.get("run") or k for k, e in stale})))
 
+    # Commands that mean "the pipeline is running", whoever started it.
+    PIPELINE_MARKERS = ("run_pipeline_driver.py", "mea_analysis_routine.py")
+
+    def find_foreign_pipelines(self) -> list[dict]:
+        """Pipeline processes this server did not start.
+
+        A driver outlives its server: killing the parent leaves the per-well
+        subprocesses running, reparented to init. They keep writing into the
+        output tree, so when a fresh server queues the same folder, two
+        processes create and delete the same sorter_output — which is how 13
+        wells were lost before. State reconciliation retires the *records* of
+        those jobs; it cannot see the processes.
+
+        Reported, never killed: a long sort is expensive to throw away, and a
+        process matching these names might belong to a colleague running the
+        pipeline by hand. The operator decides.
+        """
+        try:
+            proc = subprocess.run(["ps", "-eo", "pid,ppid,etime,args"],
+                                  capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOG.debug("Could not list processes (%s)", exc)
+            return []
+
+        # Ancestry, not just the direct parent. Preprocessing runs with
+        # n_jobs=16, so one well shows as seventeen processes whose parent is
+        # the well, whose parent is the driver, which is the only pid we
+        # recorded. Comparing parents alone reported sixteen healthy workers as
+        # strays and told the operator to kill them.
+        parents: dict[int, int] = {}
+        rows: list[tuple[int, int, str, str]] = []
+        for line in proc.stdout.splitlines()[1:]:
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            try:
+                parents[int(parts[0])] = int(parts[1])
+            except ValueError:
+                continue
+
+        with self._active_lock:
+            mine = {os.getpid(), *self._own_pids}
+
+        def descends_from_us(pid: int) -> bool:
+            seen = set()
+            while pid and pid not in seen:
+                if pid in mine:
+                    return True
+                seen.add(pid)
+                pid = parents.get(pid, 0)
+            return False
+
+        out: list[dict] = []
+        for line in proc.stdout.splitlines()[1:]:
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            pid, ppid, etime, args = parts
+            # A Python interpreter actually running one of these scripts —
+            # not merely a command line that mentions one. Matching on the
+            # text alone flagged "grep run_pipeline_driver.py", an editor with
+            # the file open, and a shell whose arguments quoted the path. Each
+            # would have told the operator to kill the wrong process, which is
+            # worse than missing a stray.
+            tokens = args.split()
+            if not tokens or "python" not in tokens[0].rsplit("/", 1)[-1]:
+                continue
+            if not any(tok == m or tok.endswith("/" + m)
+                       for tok in tokens[1:] for m in self.PIPELINE_MARKERS):
+                continue
+            try:
+                pid_i, ppid_i = int(pid), int(ppid)
+            except ValueError:
+                continue
+            if descends_from_us(pid_i):
+                continue
+            out.append({"pid": pid_i, "ppid": ppid_i, "elapsed": etime,
+                        "cmd": args[:300]})
+        return out
+
+    def warn_about_foreign_pipelines(self) -> list[dict]:
+        found = self.find_foreign_pipelines()
+        if found:
+            LOG.warning("=" * 70)
+            LOG.warning("%d pipeline process(es) are running that this server did "
+                        "not start:", len(found))
+            for p in found:
+                LOG.warning("  pid %s (running %s)", p["pid"], p["elapsed"])
+                LOG.warning("    %s", p["cmd"])
+            LOG.warning("These are usually left over from a previous server. They "
+                        "keep writing to the output folder, so if this server "
+                        "queues the same recording, both will write to the same "
+                        "well and the run will fail.")
+            LOG.warning("Check them, and if they are leftovers:  kill %s",
+                        " ".join(str(p["pid"]) for p in found))
+            LOG.warning("=" * 70)
+        return found
+
     def start(self) -> None:
         if self.is_running:
             return
+        # Before anything is dispatched, while there is still time to act.
+        self.warn_about_foreign_pipelines()
         self._stop.clear()
         self._halt.clear()
         self._preflight = None
@@ -1316,6 +1418,8 @@ class Watcher:
 
         proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
                                 env=env, start_new_session=True)
+        with self._active_lock:
+            self._own_pids.add(proc.pid)
         LOG.info("%s [%s] pid %s started", run_name, label, proc.pid)
 
         last_size, last_change = -1, time.time()
