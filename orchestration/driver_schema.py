@@ -54,6 +54,14 @@ SCHEMA: dict[str, list[dict[str, Any]]] = {
          "help": "Export results to Phy format"},
         {"key": "clean_up", "flag": "--clean-up", "type": "flag", "default": False,
          "help": "Remove intermediate files after processing"},
+        # Left unset by default on purpose: an older MEA-Analysis has no
+        # --n-jobs flag and its argparse is strict, so sending one would fail
+        # the run outright. Nothing is passed unless a value is chosen.
+        {"key": "n_jobs", "flag": "--n-jobs", "type": "int", "default": None,
+         "help": "Worker processes for the analyzer stage (waveforms, quality "
+                 "metrics). Unset means SpikeInterface's default of 1, which on "
+                 "this data spends ~20 min per well on a single core. Needs an "
+                 "MEA-Analysis that accepts --n-jobs."},
     ],
 
     "Filtering": [
