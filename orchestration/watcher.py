@@ -659,11 +659,24 @@ class Watcher:
     def warn_about_foreign_pipelines(self) -> list[dict]:
         found = self.find_foreign_pipelines()
         if found:
+            # One well runs sixteen preprocessing workers with identical
+            # command lines. Listing all seventeen buries the one line that
+            # says which recording is affected, so workers are counted under
+            # the process that owns them.
+            pids = {p["pid"] for p in found}
+            roots = [p for p in found if p["ppid"] not in pids]
+            kids: dict[int, int] = {}
+            for p in found:
+                if p["ppid"] in pids:
+                    kids[p["ppid"]] = kids.get(p["ppid"], 0) + 1
+
             LOG.warning("=" * 70)
             LOG.warning("%d pipeline process(es) are running that this server did "
-                        "not start:", len(found))
-            for p in found:
-                LOG.warning("  pid %s (running %s)", p["pid"], p["elapsed"])
+                        "not start, in %d job(s):", len(found), len(roots))
+            for p in roots:
+                extra = kids.get(p["pid"], 0)
+                LOG.warning("  pid %s (running %s)%s", p["pid"], p["elapsed"],
+                            f" + {extra} worker(s)" if extra else "")
                 LOG.warning("    %s", p["cmd"])
             LOG.warning("These are usually left over from a previous server. They "
                         "keep writing to the output folder, so if this server "
