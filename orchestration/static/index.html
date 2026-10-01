@@ -1504,8 +1504,12 @@ function App(){
                   <input id="cn" className="inp tnum" type="number" min="1" max="8"
                          value={cfg.max_concurrent_network??1}
                          onChange={e=>setT("max_concurrent_network",e.target.value)}/>
-                  <span className="f-h">Kilosort4 reserves several GB of VRAM — two at once will
-                    exhaust a single GPU. Extra jobs queue. Raise only with multiple GPUs.</span>
+                  <span className="f-h">Extra jobs queue rather than starting. Whether more than
+                    one fits depends on the card: measure peak VRAM during the sorting phase with
+                    <code> nvidia-smi</code> and allow that much per job. Sorting also leaves the GPU
+                    idle much of the time while it waits on data, so a second job often fills those
+                    gaps rather than competing — and overlaps its own CPU-only analyzer stage with
+                    the first job's GPU work.</span>
                 </div>
                 <div className="f">
                   <label className="f-l" htmlFor="ca">Concurrent Activity jobs</label>
