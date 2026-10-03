@@ -1126,17 +1126,44 @@ function App(){
     </div></div></div>);
 
   const running=!!status?.running;
+  /* Never leave the operator stopped with no way back to setup: the only
+     control that reveals it is itself hidden while running, so a panel
+     collapsed before a run became unreachable after one. */
+  React.useEffect(()=>{if(!running)setShowCfg(true);},[running]);
   const setO=(k,v)=>setCfg(c=>({...c,driver_options:{...c.driver_options,[k]:v}}));
   const setT=(k,v)=>setCfg(c=>({...c,[k]:v}));
   const counts=status?.counts||{}, runs=status?.runs||[];
   const failedCount=runs.filter(r=>r.status==="failed").length;
 
   const save   =()=>act_(async()=>{await api("/api/config",{method:"POST",body:JSON.stringify(payload())});},"Configuration saved");
-  const start  =()=>act_(async()=>{
-                    await api("/api/config",{method:"POST",body:JSON.stringify(payload())});
-                    await api("/api/watcher/start",{method:"POST"});},
-                    "Watcher started",cfg.dry_run?"Dry run — nothing will be launched.":"Completed runs will be analyzed automatically.");
-  const stop   =()=>act_(async()=>{await api("/api/watcher/stop",{method:"POST"});},"Watcher stopped");
+  /* A start resumes jobs a previous run left unfinished. Doing that
+     silently made the whole previous queue reappear with no explanation,
+     so it is stated and can be declined. */
+  const start  =()=>{
+    const n=status?.resumable||0;
+    if(n&&!window.confirm(`${n} job(s) from a previous run were left unfinished `
+      +"and will be picked up again.\n\nFinished wells are skipped, so this repeats "
+      +"only unfinished work. Clear them first if you want a fresh start.")) return;
+    act_(async()=>{
+      await api("/api/config",{method:"POST",body:JSON.stringify(payload())});
+      await api("/api/watcher/start",{method:"POST"});},
+      "Watcher started",cfg.dry_run?"Dry run — nothing will be launched.":
+        n?`Resuming ${n} unfinished job(s); new folders will be analyzed too.`
+         :"Completed runs will be analyzed automatically.");
+  };
+  const stop   =()=>act_(async()=>{await api("/api/watcher/stop",{method:"POST"});},
+                    "Stopped scanning","Jobs already running carry on. Use Stop &amp; cancel to end them.");
+  /* Stop on its own leaves drivers running for hours, which left the
+     terminal as the only way to actually stop work — and killing a
+     driver by hand orphans its per-well subprocesses. */
+  const cancel =()=>{
+    const n=(status?.counts?.running||0)+(status?.counts?.dispatched||0);
+    if(!window.confirm(`Stop scanning and cancel ${n} job(s) in flight?\n\n`
+      +"Wells already finished keep their checkpoints, so re-running repeats "
+      +"only the well that was in progress.")) return;
+    act_(async()=>{await api("/api/watcher/stop?cancel_running=true",{method:"POST"});},
+         "Stopped","Running jobs were cancelled.");
+  };
   const doPrev =()=>act_(async()=>{setPreview(await api("/api/preview",{method:"POST",body:JSON.stringify(payload())}));});
   const onReset=r=>act_(async()=>{await api("/api/runs/reset",{method:"POST",body:JSON.stringify({path:r.path})});},
                     "Run reset",`${r.run} will be processed again.`);
@@ -1216,7 +1243,8 @@ function App(){
         <button className="btn btn-q btn-i" onClick={()=>setTheme(t=>t==="dark"?"light":"dark")}
                 aria-label="Toggle theme">{theme==="dark"?<Sun s={15}/>:<Moon s={15}/>}</button>
         {running
-          ? <button className="btn btn-dan" onClick={stop} disabled={busy}><Stop s={12}/> Stop</button>
+          ? <><button className="btn" onClick={stop} disabled={busy}><Stop s={12}/> Stop scanning</button>
+            <button className="btn btn-dan" onClick={cancel} disabled={busy}><Stop s={12}/> Stop &amp; cancel</button></>
           : <button className="btn btn-pri" onClick={start} disabled={busy}><Play s={12}/> Start watching</button>}
       </div></div>
 

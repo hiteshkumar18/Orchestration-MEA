@@ -178,8 +178,13 @@ class JobConfig:
     # false kill costs hours of GPU work, a late kill costs a queue slot, so
     # this errs long.
     stall_minutes: int = 120
-    # An absolute ceiling, whatever the log says. 0 disables it.
-    max_runtime_hours: float = 12.0
+    # An absolute ceiling, whatever the log says. 0 disables it, and 0 is the
+    # default: a folder of 18 wells at roughly an hour each is a 17-hour job
+    # that is working perfectly. A 12-hour cap killed five of them. Whether a
+    # job is stuck is answered by stall_minutes above — it watches for the job
+    # going quiet, which is evidence. Elapsed time is not evidence of anything
+    # except that the work is large.
+    max_runtime_hours: float = 0.0
     # Seconds given to a killed process group to exit before SIGKILL.
     kill_grace_seconds: int = 20
 
@@ -725,14 +730,36 @@ class Watcher:
         self.on_event("stopped", {})
 
     def halt(self, timeout: float = 5.0) -> None:
-        """Stop scanning *and* release anything waiting for a slot.
+        """Stop everything: scanning, queued jobs, and jobs already running.
 
-        For process shutdown only. A job already running is left alone — the
-        pipeline subprocess owns the GPU and killing it mid-sort would leave
-        partial output behind.
+        Each running job's supervisor checks ``_halt`` and kills its process
+        group, so this cancels work in flight — the docstring here used to
+        promise the opposite, which was true before the supervisor existed.
+
+        Finished wells keep their checkpoints, so cancelling costs the well in
+        flight and nothing more.
         """
         self._halt.set()
         self.stop(timeout)
+
+    def cancel_all(self) -> dict:
+        """Stop and cancel, for an operator who wants the machine quiet.
+
+        Stop on its own only ends the scan loop; drivers carry on for hours
+        afterwards. With no way to say "stop, and I mean it", the only
+        remaining option was killing processes by hand from a terminal, which
+        is how strays were created in the first place.
+        """
+        in_flight = [k for k, e in self.state.all().items()
+                     if e.get("status") in self.IN_FLIGHT]
+        LOG.warning("Cancelling: %d job(s) in flight will be stopped", len(in_flight))
+        self.halt()
+        return {"cancelled": len(in_flight), "runs": in_flight}
+
+    def resumable(self) -> list[str]:
+        """Jobs a start would pick up again, so the UI can say so first."""
+        return [k for k, e in self.state.all().items()
+                if e.get("status") == "interrupted"]
 
     @property
     def is_running(self) -> bool:
@@ -1448,7 +1475,9 @@ class Watcher:
                 LOG.warning("%s [%s] shutting down — ending pid %s",
                             run_name, label, proc.pid)
                 self._kill_tree(proc)
-                return -1, "the server was stopped while this job was running"
+                return -1, ("cancelled — the watcher was stopped while this job "
+                            "was running. Finished wells kept their checkpoints, "
+                            "so re-running repeats only the well in flight.")
 
             now = time.time()
             try:

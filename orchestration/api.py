@@ -496,10 +496,21 @@ def api_start():
 
 
 @app.post("/api/watcher/stop")
-def api_stop():
+def api_stop(cancel_running: bool = False):
+    """Stop scanning, and optionally cancel work already in flight.
+
+    Plain stop leaves running drivers alone, which is right when settings are
+    being changed mid-run. It is wrong when the operator wants the machine
+    quiet: the jobs carry on for hours and the only recourse was killing
+    processes from a terminal — which orphans the per-well subprocesses and
+    causes the stray-process problem.
+    """
     watcher = get_watcher()
+    if cancel_running:
+        result = watcher.cancel_all()
+        return {"ok": True, "running": watcher.is_running, **result}
     watcher.stop()
-    return {"ok": True, "running": watcher.is_running}
+    return {"ok": True, "running": watcher.is_running, "cancelled": 0}
 
 
 @app.get("/api/status")
@@ -513,6 +524,9 @@ def api_status():
     found = watcher.candidate_runs()
     snap["candidates"] = None if found is None else [c.name for c in found]
     snap["scanning"] = found is None
+    # How many jobs a Start would resume, so the UI can say so beforehand
+    # rather than the operator watching the whole previous queue reappear.
+    snap["resumable"] = len(watcher.resumable())
     return snap
 
 
