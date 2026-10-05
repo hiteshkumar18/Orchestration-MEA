@@ -1021,6 +1021,16 @@ function App(){
   const [act,setAct]=useState([]);
   const [follow,setFollow]=useState(true);
   const [showCfg,setShowCfg]=useState(true);
+  /* Never leave the operator stopped with no way back to setup: the only
+     control that reveals it is hidden while running, so a panel collapsed
+     before a run could not be reopened after one.
+
+     Must sit with the other hooks, above App's early returns. Placing it
+     lower meant the first render (no config yet) bailed out before it and
+     later renders ran it — "rendered more hooks than during the previous
+     render", which blanks the page. Reads status directly because the
+     `running` const is declared further down. */
+  useEffect(()=>{if(!status?.running)setShowCfg(true);},[status?.running]);
   const [picker,setPicker]=useState(null);
   const [pyCheck,setPyCheck]=useState(null);
   const [busyNative,setBusyNative]=useState(false);
@@ -1126,10 +1136,6 @@ function App(){
     </div></div></div>);
 
   const running=!!status?.running;
-  /* Never leave the operator stopped with no way back to setup: the only
-     control that reveals it is itself hidden while running, so a panel
-     collapsed before a run became unreachable after one. */
-  React.useEffect(()=>{if(!running)setShowCfg(true);},[running]);
   const setO=(k,v)=>setCfg(c=>({...c,driver_options:{...c.driver_options,[k]:v}}));
   const setT=(k,v)=>setCfg(c=>({...c,[k]:v}));
   const counts=status?.counts||{}, runs=status?.runs||[];
