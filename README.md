@@ -7,6 +7,12 @@ ActivityScan extraction that the pipeline itself does not perform.
 Drives [`MEA-Analysis`](https://github.com/hiteshkumar18/MEA-Analysis) without
 modifying it.
 
+**Running this on real data?** Read
+[docs/FIELD-NOTES.md](docs/FIELD-NOTES.md) first. It covers where the time
+actually goes, the failure modes seen in production and why each fix is shaped
+the way it is, a debugging playbook, and the handful of things that look like
+bugs but are not.
+
 ---
 
 ## Relationship to MEA-Analysis
@@ -140,10 +146,15 @@ still get the full window.
 They are enabled separately, tracked separately, and fail independently. Each
 appears as its own row in the UI.
 
-**Concurrency is per analysis type.** Kilosort4 reserves several GB of VRAM, so
-two Network jobs on one GPU will OOM. The default limit is 1; extra jobs queue
-and show as **Queued**. A configurable GPU cooldown covers the case where CUDA
-has not released memory by the time the next job starts.
+**Concurrency is per analysis type.** Extra jobs queue and show as **Queued**,
+and a configurable GPU cooldown covers CUDA not having released memory by the
+time the next job starts.
+
+How many Network jobs fit at once depends on the card, so measure rather than
+assume. On an RTX 5090 this dataset peaks at 7.7 GB of 31.4 and leaves the GPU
+idle about two thirds of the time while it waits on data, so two jobs fit
+comfortably and the second largely fills the first one's gaps — see
+[docs/FIELD-NOTES.md](docs/FIELD-NOTES.md#2-concurrency).
 
 ### ActivityScan analysis
 
@@ -188,6 +199,55 @@ per-well trajectories, and per-timepoint comparisons. Scans are a better basis
 for this than Network recordings, which use a different electrode selection each
 session and so compare different samples of the array.
 
+### Reports
+
+After a batch finishes, a report is built per date folder and written beside the
+results: one scrollable HTML file with per-well figures, cohort tables, and an
+ActivityScan tab. PowerPoint output is available too.
+
+An optional written summary is generated from `ANTHROPIC_API_KEY` if it is set in
+the environment. **The model is never the source of a number**: every figure in
+the prose is validated against the computed values and anything that does not
+match is dropped. Without a key, reports are built from the measured values alone
+and the UI says why the summary is missing.
+
+### Queue
+
+Folders can be queued explicitly rather than waiting for detection — select
+them, and the report is generated automatically when the batch completes.
+Already-analysed folders are reported as such before anything starts rather than
+silently skipped.
+
+### Output location matters more than anything else
+
+The pipeline uses `--output-dir` as **scratch**, not just as a results
+destination: it writes an uncompressed float32 copy of each recording there and
+reads it back repeatedly. Measured on this dataset, one well of a 26 GB
+recording produces an **81 GB** working file.
+
+Put the output directory on a **local disk**. With it on a network mount, the
+GPU sat at 0% while the machine pushed ~324 GB per well over CIFS, and heavy
+folders took ~90 min/well instead of ~57.
+
+If the output genuinely has to live on a network path, turn on **local staging**
+(Configuration → Execution): the job runs against local scratch and the results
+are copied back when the folder finishes. It declines rather than filling a
+volume below `stage_min_free_gb`.
+
+### Stopping
+
+Two controls, because they do different things:
+
+* **Stop scanning** — ends detection and dispatch. Jobs already running carry
+  on. Right when changing settings mid-run.
+* **Stop & cancel** — also ends jobs in flight, killing whole process groups.
+  Finished wells keep their checkpoints, so this costs the well in progress and
+  nothing else.
+
+Never `pkill -f run_pipeline_driver` on its own: it leaves every per-well
+subprocess running and orphaned, which is how two processes end up writing the
+same output folder.
+
 ---
 
 ## Command line
@@ -217,7 +277,7 @@ setup.sh             one-time: virtualenv, dependencies, config
 run.sh               start the UI
 config.env           per-machine settings (not committed)
 orchestration/
-  watcher.py         completion detection and dispatch
+  watcher.py         completion detection, dispatch, queue, staging, watchdog
   api.py             FastAPI backend
   static/index.html  single-file UI, no build step
   driver_schema.py   mirror of the driver's CLI options
@@ -225,6 +285,26 @@ orchestration/
   checkpoints.py     per-well status from pipeline checkpoints
   activity_scan.py   whole-array ActivityScan analysis
   activity_trends.py cross-session aggregation
+  reports.py         HTML and PowerPoint reports
+  report_data.py     collects measured values; refuses to report settings
+  narrate.py         optional written summary, validated against the numbers
+  tabular.py         finds tables inside lab-notebook spreadsheets
+  explore.py         those tables to figures and an HTML report
+tests/
+  render_ui.js       renders index.html headlessly; fails if the page is blank
+  click_ui.js        opens the Wells and Log panels and checks the same
+docs/
+  FIELD-NOTES.md     performance findings, failure modes, debugging playbook
+```
+
+### Before changing the UI
+
+`index.html` is one Babel-transformed script served as a static file, so a
+runtime error blanks the entire page with nothing in the server log. Parsing it
+is not enough — both failures so far parsed perfectly.
+
+```bash
+cd tests && npm install && npm test
 ```
 
 ## Requirements
@@ -244,7 +324,11 @@ uncompressed spike data.
 ## Known limitations
 
 * The UI has no authentication — reach it over an SSH tunnel.
-* Report/slide generation from pipeline output is not implemented yet.
+* The analyzer stage (~37% of per-well time) runs on a single core, because no
+  CLI flag reaches SpikeInterface's `n_jobs`. Fixing it needs a change in
+  MEA-Analysis, which is deliberately not modified — see
+  [docs/FIELD-NOTES.md](docs/FIELD-NOTES.md#6-known-measured-not-fixed).
+* Delivery to OneDrive is discussed but not implemented.
 * ActivityScan metrics are electrode-level, not sorted units; correlation and
   synchrony are computed within a recording block only, since electrodes in
   different blocks were never recorded simultaneously.
