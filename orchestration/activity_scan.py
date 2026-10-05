@@ -1196,6 +1196,13 @@ def main(argv=None) -> None:
         level=logging.DEBUG if a.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 
+    # The recordings are read-only: never write results beside or under them.
+    src = (a.path.parent if a.path.is_file() else a.path).resolve()
+    out = a.output_dir.resolve()
+    if out == src or src in out.parents:
+        raise SystemExit(f"--output-dir {out} is inside the input folder {src}, "
+                         "which is read-only. Choose an output folder outside it.")
+
     targets = discover(a.path, a.assay_subfolder or None)
     if not targets:
         raise SystemExit(f"No {'data.raw.h5'} found under {a.path}")

@@ -1,9 +1,9 @@
 // Render index.html the way a browser does, and fail if it comes out blank.
 //
-//   cd tests && npm install jsdom react@18 react-dom@18 @babel/standalone
-//   node render_ui.js [path/to/index.html] [--running]
+//   cd tests && npm install && npm run build
+//   node render_ui.js [path/to/app.js] [--running]
 //
-// The UI is one Babel-transformed <script> served as a static file, so a
+// The UI is one compiled script (app.js, built from app.jsx), so a
 // runtime error anywhere in it blanks the whole page with nothing in the
 // server log. Parsing the JSX is not enough: the bug this was written for
 // parsed perfectly and still broke every screen. A useEffect had been added
@@ -15,14 +15,13 @@
 // it talks to the server correctly.
 
 const fs = require('fs');
+const path = require('path');
 const { JSDOM } = require('jsdom');
-const babel = require('@babel/standalone');
 
-const file = process.argv.find(a => a.endsWith('.html')) ||
-  '/sessions/gracious-stoic-pascal/mnt/MEA/Orchestration-MEA/orchestration/static/index.html';
-const html = fs.readFileSync(file, 'utf8');
-const src = [...html.matchAll(/<script type="text\/babel"[^>]*>([\s\S]*?)<\/script>/g)][0][1];
-const code = babel.transform(src, { presets: ['react'] }).code;
+// The compiled bundle the browser actually loads (built from app.jsx).
+const file = process.argv.find(a => a.endsWith('.js') && !a.endsWith('render_ui.js')) ||
+  path.join(__dirname, '..', 'orchestration', 'static', 'app.js');
+const code = fs.readFileSync(file, 'utf8');
 
 const RUNNING = process.argv.includes('--running');
 
@@ -47,7 +46,7 @@ const data = {
                    stage_locally: false, scratch_dir: '', stage_min_free_gb: 200,
                    activity_active_hz: 0.05, h5_glob: 'data.raw.h5', driver_python: '' },
   '/api/schema': { groups: [] }, '/api/env': {}, '/api/queue': { batches: [] },
-  '/api/report/env': {}, '/api/logs': { lines: [] }, '/api/picker': {},
+  '/api/handoff': { state: 'idle' }, '/api/logs': { lines: [] }, '/api/picker': {},
 };
 w.fetch = (url) => {
   const body = data[String(url).split('?')[0]] ?? {};
@@ -73,6 +72,9 @@ setTimeout(() => {
   console.log('rendered characters:', text.length);
   console.log('first 140:', JSON.stringify(text.slice(0, 140)));
   if (errors.length) { console.log('\nERRORS:'); errors.slice(0, 3).forEach(e => console.log('  ' + e)); }
+  // The AI report panel only shows once config has loaded; its absence means
+  // the main view never got past loading.
+  if (!RUNNING && !text.includes('AI report')) errors.push('AI report panel missing');
   const ok = text.length > 50 && errors.length === 0;
   console.log(ok ? '\nPASS: UI renders' : '\nFAIL: UI did not render');
   process.exit(ok ? 0 : 1);

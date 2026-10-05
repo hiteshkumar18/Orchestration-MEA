@@ -7,10 +7,8 @@
 // clicking Wells threw a ReferenceError and React unmounted the whole app.
 // The initial render was perfect, which is exactly why it went unnoticed.
 
-const fs=require('fs'); const {JSDOM}=require('jsdom'); const babel=require('@babel/standalone');
-const file='/sessions/gracious-stoic-pascal/mnt/MEA/Orchestration-MEA/orchestration/static/index.html';
-const src=[...fs.readFileSync(file,'utf8').matchAll(/<script type="text\/babel"[^>]*>([\s\S]*?)<\/script>/g)][0][1];
-const code=babel.transform(src,{presets:['react']}).code;
+const fs=require('fs'); const path=require('path'); const {JSDOM}=require('jsdom');
+const code=fs.readFileSync(path.join(__dirname,'..','orchestration','static','app.js'),'utf8');
 const dom=new JSDOM('<!DOCTYPE html><div id="root"></div>',{runScripts:'dangerously',pretendToBeVisual:true,url:'http://localhost:8000/'});
 const w=dom.window;
 global.window=w; global.document=w.document; global.navigator=w.navigator;
@@ -28,7 +26,7 @@ const data={
    run_activity:true,max_concurrent_network:2,max_concurrent_activity:2,gpu_cooldown_seconds:5,
    queue_poll_seconds:2,settle_seconds:600,poll_seconds:30,logs_in_output:true,stage_locally:false,
    scratch_dir:'',stage_min_free_gb:200,activity_active_hz:0.05,h5_glob:'data.raw.h5',driver_python:''},
- '/api/schema':{groups:[]},'/api/env':{},'/api/queue':{batches:[]},'/api/report/env':{},
+ '/api/schema':{groups:[]},'/api/env':{},'/api/queue':{batches:[]},'/api/handoff':{state:'idle'},
  '/api/logs':{lines:[]},'/api/picker':{},
  '/api/runs/checkpoints':{summary:{wells:19,complete:18,failed:1},
    wells:[{well:'well001',run_id:'000061',chip_id:'M07036',stage:10,stage_name:'Reports complete',

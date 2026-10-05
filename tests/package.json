@@ -2,7 +2,10 @@
   "name": "orchestration-ui-tests",
   "private": true,
   "description": "Renders the UI headlessly so a runtime error cannot ship unnoticed.",
-  "scripts": { "test": "node render_ui.js && node render_ui.js --running && node click_ui.js" },
+  "scripts": {
+    "build": "node build_ui.js",
+    "test": "node build_ui.js --check && node render_ui.js && node render_ui.js --running && node click_ui.js"
+  },
   "devDependencies": {
     "@babel/standalone": "^7",
     "jsdom": "^24",

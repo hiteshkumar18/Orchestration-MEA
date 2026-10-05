@@ -12,6 +12,15 @@ obvious *and wrong* for reasons that are not visible in the code.
 
 ## 1. Where the time actually goes
 
+> **Since 2026-10-05 spike sorting is off by default** (`--skip-spikesorting`):
+> Phase 1, then threshold detection and burst analysis, with no Phase 2 GPU
+> work and no Phase 3 analyzer. The figures below are for sorting **on**.
+> In detection-only mode the pipeline leaves the checkpoint at stage 2
+> (`PREPROCESSING_COMPLETE`) even when the well is finished, so
+> `checkpoints.py` treats `processing_mode: spike_detection_only` + an existing
+> `network_results.json` as complete. It also means `should_skip()` never fires
+> for these wells: re-queuing a detection-only folder recomputes every well.
+
 Measured across six wells of `260904`, output on a local disk:
 
 | Phase | Share | Hardware | Notes |
@@ -317,27 +326,39 @@ well.
   the independence, and it is deliberate.
 * **The input directory is read-only.** The watcher never writes into the folder
   it watches.
-* **The API key comes from `ANTHROPIC_API_KEY` only** — never stored, logged, or
-  accepted over HTTP.
 * **The UI is unauthenticated** and binds 127.0.0.1. The SSH tunnel is the
   security boundary.
-* **The model is never the source of a number in a report.** `narrate.py`
-  validates every figure in the generated prose against the computed values and
-  drops anything that does not match.
+* **This tool does not write reports.** It prepares an AI handoff folder
+  (`handoff.py`, `skills/skills.md`) under the *output* directory. The rules in
+  `skills.md` — every number from a file, the well as the unit of replication,
+  write only into the handoff's `report/` — are what keep the AI honest, so
+  change them deliberately. Config validation refuses any output, checkpoint,
+  scratch or work directory inside the input folder, before creating anything.
 
 ---
 
 ## 8. Testing the UI
 
-The UI is one Babel-transformed `<script>` served as a static file. A runtime
-error anywhere in it blanks the whole page, with nothing in the server log —
-this happened twice, and both times the JSX parsed perfectly.
+The UI source is `orchestration/static/app.jsx`; the browser loads the compiled
+`app.js` and a local copy of React. A runtime error anywhere in it blanks the
+whole page, with nothing in the server log — this happened twice, and both times
+the JSX parsed perfectly.
 
 ```bash
 cd tests
 npm install        # jsdom, react, react-dom, @babel/standalone
-npm test
+npm run build      # app.jsx -> app.js; commit both
+npm test           # fails if app.js is stale
 ```
+
+**Why compiled.** The page used to pull React and `@babel/standalone` (~3 MB)
+from unpkg and compile ~1,700 lines of JSX in the browser on every load — the
+single largest cost of opening the UI over a tunnel. Alongside that: the status
+poll no longer overlaps itself or runs while the tab is hidden, per-well
+checkpoints refresh every 10 s instead of 2 s, responses are gzipped, the folder
+picker uses one depth-limited cached listing per folder instead of up to four
+unbounded `rglob`s, and Preview no longer walks the whole input tree (nor marks
+running jobs interrupted, which its throwaway `Watcher` used to do).
 
 `render_ui.js` renders the page under jsdom with `fetch` stubbed, in the stopped
 and running states, and fails if it comes out blank. `click_ui.js` opens the

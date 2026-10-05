@@ -69,8 +69,10 @@ SCHEMA: dict[str, list[dict[str, Any]]] = {
          "help": "Spike sorter to use (default: kilosort4)"},
         {"key": "docker", "flag": "--docker", "type": "str", "default": None,
          "help": "Docker image name for containerized sorting"},
-        {"key": "skip_spikesorting", "flag": "--skip-spikesorting", "type": "flag", "default": False,
-         "help": "Run spike detection only, skip full sorting"},
+        # On by default: detection + burst analysis needs no GPU and takes
+        # minutes per well instead of an hour. Turn it off to run Kilosort.
+        {"key": "skip_spikesorting", "flag": "--skip-spikesorting", "type": "flag", "default": True,
+         "help": "Run spike detection only, skip full sorting (default: on — untick to run Kilosort)"},
         {"key": "extract_rawsortedspikes", "flag": "--extract-rawsortedspikes", "type": "flag", "default": False,
          "help": "Extract per-unit raw mean templates (requires analyzer_output or phy_output)"},
     ],

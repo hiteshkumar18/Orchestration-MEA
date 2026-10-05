@@ -14,6 +14,9 @@ Serves the single-page frontend and exposes the watcher as a REST API:
     POST /api/watcher/stop  stop watching
     POST /api/runs/reset    forget a run so it can be re-processed
     GET  /api/runs/log      tail a run's pipeline log
+    POST /api/requirements  save the AI report requirements (any time)
+    POST /api/handoff       prepare an AI report handoff folder
+    GET  /api/handoff       the last handoff prepared
 
 Run:
     pip install fastapi uvicorn
@@ -34,7 +37,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -47,8 +52,9 @@ from mea_repo import (  # noqa: E402
 import native_picker  # noqa: E402
 from watcher import (  # noqa: E402
     JobConfig, Watcher, DEFAULT_WORK_DIR, JOB_LABELS,
-    find_recording, find_recordings, has_finished_marker,
+    has_finished_marker, list_h5,
 )
+import handoff  # noqa: E402
 
 LOG = logging.getLogger("mea.api")
 HERE = Path(__file__).resolve().parent
@@ -87,6 +93,9 @@ class RingLogHandler(logging.Handler):
 LOG_RING = RingLogHandler()
 
 app = FastAPI(title="MEA Pipeline Control", version="1.0")
+# /api/status is ~30 KB of JSON every two seconds, usually over an SSH tunnel.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
 # --------------------------------------------------------------------------- #
 # Process-wide state
@@ -176,6 +185,8 @@ class ConfigPayload(BaseModel):
     require_finished_marker: bool = True
     skip_settle_for_existing: bool = False
     driver_python: str = ""
+    ai_requirements: str = ""
+    auto_handoff: bool = True
     logs_in_output: bool = True
     stage_locally: bool = False
     scratch_dir: str = ""
@@ -204,8 +215,7 @@ class ResetAllPayload(BaseModel):
 class QueuePayload(BaseModel):
     folders: list[str] = []
     rerun: bool = False
-    auto_report: bool = True
-    per: str = "date"          # batches span sessions, so default to per-session
+    auto_handoff: Optional[bool] = None   # None = use the saved setting
 
 
 # --------------------------------------------------------------------------- #
@@ -273,6 +283,8 @@ def api_get_config():
         "stage_min_free_gb": cfg.stage_min_free_gb,
         "dry_run": cfg.dry_run,
         "work_dir": cfg.work_dir,
+        "ai_requirements": cfg.ai_requirements,
+        "auto_handoff": cfg.auto_handoff,
     }
 
 
@@ -315,6 +327,8 @@ def api_set_config(payload: ConfigPayload):
         stage_min_free_gb=payload.stage_min_free_gb,
         work_dir=str(WORK_DIR),
         dry_run=payload.dry_run,
+        ai_requirements=payload.ai_requirements,
+        auto_handoff=payload.auto_handoff,
     )
     errors = cfg.validate()
     if errors:
@@ -376,14 +390,19 @@ def api_browse(payload: BrowsePayload):
     cfg = get_watcher().cfg
     items = []
     for c in entries:
-        recs = find_recordings(c, cfg.h5_glob, cfg.assay_subfolder)
-        rec = recs[0] if recs else find_recording(c, cfg.h5_glob, cfg.assay_subfolder)
+        # One cached, depth-limited listing per folder answers all three
+        # questions. This used to be up to four full rglob walks per child,
+        # which over the NAS made the picker take minutes during a job.
+        found = list_h5(c, cfg.h5_glob)
+        recs = [r for r in found if not cfg.assay_subfolder or cfg.assay_subfolder in r.parts]
+        rec = recs[0] if recs else (found[0] if found else None)
         items.append({
             "name": c.name,
             "path": str(c),
             "is_run": rec is not None,
             "recordings": len(recs) or (1 if rec else 0),
-            "finished": (has_finished_marker(c, cfg.h5_glob, cfg.assay_subfolder)
+            "finished": (has_finished_marker(c, cfg.h5_glob, cfg.assay_subfolder,
+                                             listing=found)
                          if rec is not None else None),
         })
     return {"path": str(p), "parent": str(p.parent) if p.parent != p else None, "entries": items}
@@ -459,9 +478,22 @@ def api_preview(payload: ConfigPayload):
         activity_figures=payload.activity_figures,
         work_dir=str(WORK_DIR),
     )
-    probe = Watcher(cfg, on_event=lambda *_: None)
+    probe = Watcher(cfg, on_event=lambda *_: None, reconcile=False)
 
-    candidates = probe.scan_candidates()
+    # Never walk the whole input tree to draw a preview. Reuse what the live
+    # watcher already found for the same folder; otherwise look at one
+    # recording folder, which is all an example command needs.
+    live = get_watcher()
+    candidates: list = []
+    if live.cfg.watch_dir == cfg.watch_dir and live._cand_cache:
+        candidates = list(live._cand_cache[1])
+    elif cfg.watch_dir and Path(cfg.watch_dir).is_dir():
+        for child in sorted(Path(cfg.watch_dir).iterdir()):
+            if child.is_dir() and not child.name.startswith("."):
+                jobs = probe.jobs_for(child)
+                if jobs:
+                    candidates = [(child, jobs)]
+                    break
     sample, jobs = (candidates[0] if candidates
                     else (Path(payload.watch_dir or "/path/to") / "000000",
                           cfg.enabled_jobs()))
@@ -650,46 +682,44 @@ def api_checkpoints(path: str = "", tail: int = 0):
 # --------------------------------------------------------------------------- #
 # Queue
 # --------------------------------------------------------------------------- #
-LAST_BATCH_REPORT: dict = {"state": "idle"}
+LAST_HANDOFF: dict = {"state": "idle"}
+HANDOFF_LOCK = threading.Lock()
 
 
-def _batch_report(batch: dict, per: str = "date") -> None:
-    """Build the report for a finished batch.
-
-    Runs on its own thread. A batch whose jobs all failed still gets a report —
-    the quality-control view is exactly where you look to find out why.
-    """
+def _make_handoff(folders: Optional[list[str]] = None, label: str = "",
+                  requirements: Optional[str] = None) -> dict:
+    """Write an AI handoff folder for these input folders (all, if None)."""
     cfg = get_watcher().cfg
-    out = cfg.output_dir or cfg.driver_options.get("output_dir")
+    out = cfg.output_dir
     if not out:
-        LOG.warning("Batch %s finished but no output directory is configured; "
-                    "no report was built", batch["id"])
-        LAST_BATCH_REPORT.update({"state": "skipped", "batch": batch["id"],
-                                  "reason": "no output directory configured"})
-        return
-
-    LAST_BATCH_REPORT.update({"state": "running", "batch": batch["id"],
-                              "started": time.time(), "files": []})
+        raise ValueError("No output directory is configured.")
+    act = cfg.activity_out
+    with HANDOFF_LOCK:
+        LAST_HANDOFF.clear()
+        LAST_HANDOFF.update({"state": "running", "started": time.time(), "label": label})
     try:
-        from reports import generate as generate_reports
-        res = generate_reports(
-            Path(out).expanduser(), ["run"], ["html"],
-            activity_dir=(lambda a: Path(a) if a else None)(
-                _resolve_activity(cfg)["activity_dir"]),
-            use_ai=False, group_by=per)
-        LAST_BATCH_REPORT.update({
-            "state": "error" if res.get("error") else "done",
-            "files": res.get("files", []),
-            "groups": res.get("groups", []),
-            "error": res.get("error"),
-            "finished": time.time(),
-        })
-        for f in res.get("files", []):
-            LOG.info("Batch %s report: %s", batch["id"], f)
+        res = handoff.generate(
+            Path(out), cfg.ai_requirements if requirements is None else requirements,
+            watch_dir=cfg.watch_dir,
+            activity_dir=Path(act) if act and Path(act).is_dir() else None,
+            folders=folders, label=label)
     except Exception as exc:  # noqa: BLE001
-        LOG.exception("Batch %s: report generation failed", batch["id"])
-        LAST_BATCH_REPORT.update({"state": "error", "error": str(exc),
-                                  "finished": time.time()})
+        with HANDOFF_LOCK:
+            LAST_HANDOFF.update({"state": "error", "error": str(exc), "finished": time.time()})
+        raise
+    with HANDOFF_LOCK:
+        LAST_HANDOFF.update({"state": "done", **res, "finished": time.time()})
+    return res
+
+
+def _batch_handoff(batch: dict) -> None:
+    """Prepare the AI handoff for a finished batch. Runs on its own thread."""
+    folders = sorted({k.split("::")[0] for k in batch.get("keys", [])})
+    try:
+        res = _make_handoff(folders, label=batch["id"])
+        LOG.info("Batch %s: AI handoff ready — %s", batch["id"], res["prompt"])
+    except Exception:  # noqa: BLE001
+        LOG.exception("Batch %s: could not prepare the AI handoff", batch["id"])
 
 
 @app.post("/api/queue/inspect")
@@ -707,10 +737,10 @@ def api_queue(payload: QueuePayload):
     if errors:
         raise HTTPException(400, {"errors": errors})
 
+    auto = watcher.cfg.auto_handoff if payload.auto_handoff is None else payload.auto_handoff
     res = watcher.queue_folders(
         payload.folders, rerun=payload.rerun,
-        on_complete=((lambda b: _batch_report(b, payload.per))
-                     if payload.auto_report else None))
+        on_complete=_batch_handoff if auto else None)
     if not res["queued"]:
         # Nothing to do is a useful answer, not an error — but say why.
         reasons = sorted({s.get("reason", "") for s in res["skipped"]})
@@ -720,7 +750,9 @@ def api_queue(payload: QueuePayload):
 
 @app.get("/api/queue")
 def api_queue_status():
-    return {"batches": get_watcher().batches(), "report": LAST_BATCH_REPORT}
+    with HANDOFF_LOCK:
+        last = dict(LAST_HANDOFF)
+    return {"batches": get_watcher().batches(), "handoff": last}
 
 
 @app.get("/api/logs")
@@ -730,175 +762,43 @@ def api_logs(since: int = 0, limit: int = 500):
 
 
 # --------------------------------------------------------------------------- #
-# Reports
+# AI report handoff
 # --------------------------------------------------------------------------- #
-# Report generation runs in a thread and is polled, rather than blocking the
-# request: collecting wells and rendering charts takes seconds, and the model
-# call takes longer still. One job at a time — these are IO- and CPU-heavy and
-# the UI only ever shows one.
-REPORT_JOB: dict = {"state": "idle"}
-REPORT_LOCK = threading.Lock()
-
-REPORT_KINDS = {"run", "condition", "qc", "longitudinal"}
-REPORT_FORMATS = {"html", "pptx"}
+class RequirementsPayload(BaseModel):
+    text: str = ""
+    auto_handoff: Optional[bool] = None
 
 
-class ReportPayload(BaseModel):
-    types: list[str] = ["run"]
-    formats: list[str] = ["html"]
-    use_ai: bool = False
-    output_dir: Optional[str] = None
-    report_dir: Optional[str] = None
-    per: str = "none"          # none | date | chip | run | project
+class HandoffPayload(BaseModel):
+    folders: list[str] = []      # input folders to cover; empty = everything
+    label: str = ""
 
 
-def _resolve_activity(cfg) -> dict:
-    """Where the activity scan will be read from, and what is there.
-
-    The configured folder wins. If it is blank, look for an ActivityScan tree
-    beside or beneath the analysed output — that is where the scan usually
-    lands, and hunting for it by hand is the reason reports came out with no
-    activity tab. A guess is always reported as a guess, never applied silently.
-    """
-    out = cfg.output_dir or cfg.driver_options.get("output_dir") or ""
-    configured = (cfg.activity_output_dir or "").strip()
-    candidates: list[tuple[str, str]] = []
-    if configured:
-        candidates.append((configured, "configured"))
-    elif out:
-        base = Path(out).expanduser()
-        for guess in (base / "ActivityScan", base.parent / "ActivityScan",
-                      base / "activity_scan_output",
-                      base.parent / "activity_scan_output"):
-            if guess.is_dir():
-                candidates.append((str(guess), "found next to the output folder"))
-
-    for path, how in candidates:
-        try:
-            from report_data import collect_activity
-            runs = collect_activity(Path(path))
-        except Exception:                                    # noqa: BLE001
-            runs = []
-        if runs:
-            return {"activity_dir": path, "activity_source": how,
-                    "activity_runs": len(runs),
-                    "activity_wells": sum(len(r["wells"]) for r in runs),
-                    "activity_chips": sorted({r["chip_id"] for r in runs if r["chip_id"]})}
-    return {"activity_dir": configured or None,
-            "activity_source": "configured" if configured else "none",
-            "activity_runs": 0, "activity_wells": 0, "activity_chips": []}
+@app.post("/api/requirements")
+def api_requirements(payload: RequirementsPayload):
+    """Save the report requirements. Allowed while running — it is not a
+    pipeline setting, and the text box should never be locked."""
+    watcher = get_watcher()
+    watcher.cfg.ai_requirements = payload.text
+    if payload.auto_handoff is not None:
+        watcher.cfg.auto_handoff = payload.auto_handoff
+    watcher.cfg.save(CONFIG_PATH)
+    return {"ok": True, "chars": len(payload.text)}
 
 
-@app.get("/api/report/env")
-def api_report_env():
-    """Whether a written summary is available, and if not, precisely why.
-
-    The key is read from this process's environment and never returned — the UI
-    is told only that one is present.
-    """
+@app.post("/api/handoff")
+def api_handoff(payload: HandoffPayload):
+    label = "".join(ch for ch in payload.label if ch.isalnum() or ch in "-_")[:40]
     try:
-        from narrate import status as narrate_status
-        st = narrate_status()
-    except Exception as exc:                                    # noqa: BLE001
-        st = {"key_present": False, "sdk_installed": False, "ready": False,
-              "model": None, "reason": f"Narration unavailable: {exc}"}
-
-    cfg = get_watcher().cfg
-    out = cfg.output_dir or cfg.driver_options.get("output_dir")
-    return {**st, "output_dir": out,
-            "activity_output_dir": cfg.activity_output_dir,
-            **_resolve_activity(cfg)}
+        return _make_handoff(payload.folders or None, label=label)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
-@app.post("/api/report/generate")
-def api_report_generate(payload: ReportPayload):
-    kinds = [k for k in payload.types if k in REPORT_KINDS]
-    formats = [f for f in payload.formats if f in REPORT_FORMATS]
-    if not kinds:
-        raise HTTPException(400, "Choose at least one report type.")
-    if payload.per not in ("none", "date", "chip", "run", "project"):
-        raise HTTPException(400, f"Unknown grouping: {payload.per}")
-    if not formats:
-        raise HTTPException(400, "Choose at least one format.")
-
-    cfg = get_watcher().cfg
-    out = payload.output_dir or cfg.output_dir or cfg.driver_options.get("output_dir")
-    if not out:
-        raise HTTPException(400, "No output directory is configured.")
-    out_path = Path(out).expanduser()
-    if not out_path.is_dir():
-        raise HTTPException(400, f"Output directory not found: {out_path}")
-
-    with REPORT_LOCK:
-        if REPORT_JOB.get("state") == "running":
-            raise HTTPException(409, "A report is already being generated.")
-        REPORT_JOB.clear()
-        REPORT_JOB.update({"state": "running", "progress": [], "files": [],
-                           "started": time.time(), "use_ai": payload.use_ai})
-
-    report_dir = Path(payload.report_dir).expanduser() if payload.report_dir else None
-    activity = _resolve_activity(cfg)["activity_dir"]
-
-    def run() -> None:
-        try:
-            from reports import generate as generate_reports
-
-            def progress(msg: str) -> None:
-                with REPORT_LOCK:
-                    REPORT_JOB.setdefault("progress", []).append(msg)
-
-            res = generate_reports(
-                out_path, kinds, formats,
-                report_dir=report_dir,
-                activity_dir=Path(activity) if activity else None,
-                use_ai=payload.use_ai,
-                group_by=payload.per,
-                on_progress=progress)
-            with REPORT_LOCK:
-                REPORT_JOB.update(res)
-                REPORT_JOB["state"] = "error" if res.get("error") else "done"
-                # The narrative itself is large and already in the report; the
-                # UI only needs to know whether one was produced.
-                REPORT_JOB["has_narrative"] = bool(res.get("narrative"))
-                REPORT_JOB.pop("narrative", None)
-                REPORT_JOB.pop("summary", None)
-        except Exception as exc:                                # noqa: BLE001
-            LOG.exception("Report generation failed")
-            with REPORT_LOCK:
-                REPORT_JOB.update({"state": "error", "error": str(exc)})
-        finally:
-            with REPORT_LOCK:
-                REPORT_JOB["finished"] = time.time()
-
-    threading.Thread(target=run, name="mea-report", daemon=True).start()
-    return {"started": True}
-
-
-@app.get("/api/report/status")
-def api_report_status():
-    with REPORT_LOCK:
-        job = dict(REPORT_JOB)
-    # Show the file names rather than full paths; the folder is shown once.
-    job["file_names"] = [Path(f).name for f in job.get("files", [])]
-    return job
-
-
-@app.get("/api/report/file")
-def api_report_file(path: str):
-    """Serve a generated report, restricted to files this job actually wrote."""
-    with REPORT_LOCK:
-        allowed = {str(Path(f).resolve()) for f in REPORT_JOB.get("files", [])}
-    p = Path(path).expanduser()
-    try:
-        resolved = str(p.resolve())
-    except OSError:
-        raise HTTPException(400, "Bad path")
-    if resolved not in allowed:
-        LOG.warning("Refused report download outside the generated set: %s", p)
-        raise HTTPException(403, "Not a generated report")
-    if not p.is_file():
-        raise HTTPException(404, "File not found")
-    return FileResponse(p, filename=p.name)
+@app.get("/api/handoff")
+def api_handoff_status():
+    with HANDOFF_LOCK:
+        return dict(LAST_HANDOFF)
 
 
 # --------------------------------------------------------------------------- #
@@ -908,7 +808,11 @@ def api_report_file(path: str):
 def index():
     if not FRONTEND.exists():
         return JSONResponse({"error": f"Frontend not found at {FRONTEND}"}, status_code=500)
-    return FileResponse(FRONTEND)
+    # Stamp app.js with its mtime so a rebuilt UI is never served from cache.
+    app_js = FRONTEND.parent / "app.js"
+    version = str(int(app_js.stat().st_mtime)) if app_js.exists() else "0"
+    return HTMLResponse(FRONTEND.read_text().replace("__APP_VERSION__", version),
+                        headers={"Cache-Control": "no-cache"})
 
 
 def main() -> None:

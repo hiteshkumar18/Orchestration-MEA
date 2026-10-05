@@ -49,9 +49,17 @@ def _norm(state: dict, path: Path) -> dict:
     failed = state.get("failed_stage")
     error = state.get("error")
 
+    # --skip-spikesorting never advances the checkpoint past preprocessing
+    # (stage 2): detection and burst analysis run without saving a stage. The
+    # well is finished once its burst results exist beside the checkpoint.
+    detection_only = state.get("processing_mode") == "spike_detection_only"
+    out_dir = state.get("output_dir") or str(path.parent.parent)
+    detection_done = (detection_only and stage >= 2
+                      and (Path(out_dir) / "network_results.json").is_file())
+
     if failed is not None or error:
         status = "failed"
-    elif stage >= FINAL_STAGE:
+    elif stage >= FINAL_STAGE or detection_done:
         status = "complete"
     elif stage == 0:
         status = "pending"
@@ -65,8 +73,12 @@ def _norm(state: dict, path: Path) -> dict:
         "project": state.get("project", ""),
         "date": state.get("date", ""),
         "stage": stage,
-        "stage_name": STAGES.get(stage, f"stage {stage}"),
-        "progress": round(min(stage / FINAL_STAGE, 1.0), 3),
+        "stage_name": ("Detection + bursts complete" if detection_done
+                       else "Spike detection" if detection_only and stage >= 2
+                       and status == "running"
+                       else STAGES.get(stage, f"stage {stage}")),
+        "progress": 1.0 if detection_done else round(min(stage / FINAL_STAGE, 1.0), 3),
+        "mode": "detection_only" if detection_only else "sorted",
         "status": status,
         "failed_stage": STAGES.get(failed, failed) if failed is not None else None,
         "error": (str(error)[:600] if error else None),
@@ -75,6 +87,29 @@ def _norm(state: dict, path: Path) -> dict:
         "output_dir": state.get("output_dir", ""),
         "checkpoint_file": str(path),
     }
+
+
+# path -> (mtime, normalised row). The UI asks for the same checkpoints every
+# few seconds while a Wells panel is open; only files that changed are re-read.
+_ROW_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _cached_norm(fp: Path) -> Optional[dict]:
+    try:
+        mtime = fp.stat().st_mtime
+    except OSError:
+        return None
+    key = str(fp)
+    hit = _ROW_CACHE.get(key)
+    if hit and hit[0] == mtime and hit[1]["status"] != "running":
+        return dict(hit[1])
+    try:
+        state = json.loads(fp.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    rec = _norm(state, fp)
+    _ROW_CACHE[key] = (mtime, rec)
+    return dict(rec)
 
 
 def read_checkpoints(search_roots: list[Path], run_dir: Optional[Path] = None,
@@ -96,11 +131,9 @@ def read_checkpoints(search_roots: list[Path], run_dir: Optional[Path] = None,
             if key in seen:
                 continue
             seen.add(key)
-            try:
-                state = json.loads(fp.read_text())
-            except (OSError, json.JSONDecodeError):
+            rec = _cached_norm(fp)
+            if rec is None:
                 continue
-            rec = _norm(state, fp)
             if wanted:
                 d = rec.get("data_dir") or ""
                 try:

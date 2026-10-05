@@ -222,6 +222,13 @@ class JobConfig:
     work_dir: str = str(DEFAULT_WORK_DIR)   # where state + logs are written
     dry_run: bool = False
 
+    # --- AI report handoff --------------------------------------------------
+    # What the report should contain, typed once in the UI and kept here. It is
+    # written into every handoff folder next to skills.md; see handoff.py.
+    ai_requirements: str = ""
+    # Prepare a handoff automatically when a queued batch finishes.
+    auto_handoff: bool = True
+
     @property
     def output_dir(self) -> Optional[str]:
         return self.driver_options.get("output_dir")
@@ -307,6 +314,24 @@ class JobConfig:
                 "Set MEA_REPO (or --mea-repo) to your MEA-Analysis checkout.")
         if self.run_activity and not ACTIVITY_SCRIPT.exists():
             errs.append(f"activity_scan.py not found at: {ACTIVITY_SCRIPT}")
+        # The input directory is read-only, always. Anything this tool or the
+        # pipeline writes must land outside it, so refuse before creating a
+        # single directory — the mkdir checks below would otherwise create one.
+        if self.watch_dir and Path(self.watch_dir).is_dir():
+            writes = {
+                "Output path": self.output_dir,
+                "Activity scan output path": self.activity_out if self.run_activity else None,
+                "Checkpoint directory": self.driver_options.get("checkpoint_dir"),
+                "Scratch directory": self.scratch_dir if self.stage_locally else None,
+                "Work directory": self.work_dir,
+            }
+            inside = [name for name, path in writes.items()
+                      if path and path_is_within(path, self.watch_dir)]
+            if inside:
+                errs.append(
+                    f"{', '.join(inside)} lies inside the input folder {self.watch_dir}. "
+                    "The input folder is read-only — choose a location outside it.")
+                return errs
         out = self.output_dir
         if out:
             try:
@@ -437,8 +462,56 @@ def _metadata_says_finished(meta: Path) -> bool:
     return False
 
 
+# A MaxWell folder is <date>/<chip>/<assay>/<run>/data.raw.h5 — four levels
+# below the folder that gets dispatched. Walk a little deeper than that for
+# odd layouts, but no further: an unbounded rglob over a network mount is what
+# made the folder picker take minutes while a job was reading the same mount.
+MAX_RECORDING_DEPTH = 6
+# Listings are cached briefly so one click in the UI (browse, then inspect,
+# then queue) reads each folder from the NAS once, not three or four times.
+LISTING_TTL_SECONDS = 30.0
+_listing_cache: dict[tuple[str, str], tuple[float, list[Path]]] = {}
+_listing_lock = threading.Lock()
+
+
+def list_h5(run_dir: Path, h5_glob: str = "data.raw.h5",
+            max_age: float = LISTING_TTL_SECONDS) -> list[Path]:
+    """Every file under ``run_dir`` matching ``h5_glob``, depth-limited, cached.
+
+    One pruned ``os.walk`` answers every question asked of a folder — which
+    recordings it holds, which assays, where their metadata sits — so callers
+    share this rather than each running their own ``rglob``. Read-only.
+    """
+    import fnmatch
+    key = (str(run_dir), h5_glob)
+    now = time.time()
+    if max_age > 0:
+        with _listing_lock:
+            hit = _listing_cache.get(key)
+        if hit and now - hit[0] < max_age:
+            return list(hit[1])
+
+    root = str(run_dir)
+    base_depth = root.rstrip(os.sep).count(os.sep)
+    found: list[Path] = []
+    for cur, dirs, files in os.walk(root):
+        if cur.rstrip(os.sep).count(os.sep) - base_depth >= MAX_RECORDING_DEPTH:
+            dirs[:] = []
+        else:
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+        found.extend(Path(cur) / f for f in files if fnmatch.fnmatch(f, h5_glob))
+    found.sort()
+    with _listing_lock:
+        _listing_cache[key] = (now, found)
+        if len(_listing_cache) > 2000:
+            for k in sorted(_listing_cache, key=lambda k: _listing_cache[k][0])[:1000]:
+                _listing_cache.pop(k, None)
+    return list(found)
+
+
 def has_finished_marker(run_dir: Path, h5_glob: str = "data.raw.h5",
-                        assay_subfolder: str = "Network") -> bool:
+                        assay_subfolder: str = "Network",
+                        listing: Optional[list[Path]] = None) -> bool:
     """Whether every recording in this folder has been marked complete by MaxWell.
 
     MaxWell writes ``mxassay.metadata`` **next to each recording**, so in a
@@ -448,9 +521,10 @@ def has_finished_marker(run_dir: Path, h5_glob: str = "data.raw.h5",
 
     Falls back to a metadata file at the folder root for flat layouts.
     """
-    recordings = find_recordings(run_dir, h5_glob, assay_subfolder)
+    allh5 = listing if listing is not None else list_h5(run_dir, h5_glob)
+    recordings = [p for p in allh5 if not assay_subfolder or assay_subfolder in p.parts]
     if not recordings:
-        recordings = [p for p in run_dir.rglob(h5_glob)]
+        recordings = allh5
 
     metas = [r.parent / "mxassay.metadata" for r in recordings]
     metas = [m for m in metas if m.exists()]
@@ -464,16 +538,18 @@ def has_finished_marker(run_dir: Path, h5_glob: str = "data.raw.h5",
     return False
 
 
-def find_recordings(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network") -> list[Path]:
+def find_recordings(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network",
+                    max_age: float = LISTING_TTL_SECONDS) -> list[Path]:
     """Recordings that the driver would actually process.
 
     Mirrors ``helper_functions.find_files_with_subfolder``: in directory mode the
     driver only accepts ``data.raw.h5`` files that have ``assay_subfolder`` as a
     path component, which is how ActivityScan recordings get excluded.
     """
+    found = list_h5(run_dir, h5_glob, max_age=max_age)
     if not assay_subfolder:
-        return sorted(run_dir.rglob(h5_glob))
-    return sorted(p for p in run_dir.rglob(h5_glob) if assay_subfolder in p.parts)
+        return found
+    return [p for p in found if assay_subfolder in p.parts]
 
 
 def find_recording(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network") -> Optional[Path]:
@@ -482,14 +558,21 @@ def find_recording(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network"
     The fallback covers flattened layouts (``<run>/data.raw.h5`` with no assay
     subfolder), which the driver can still handle in single-file mode.
     """
-    hits = find_recordings(run_dir, h5_glob, assay_subfolder)
+    found = list_h5(run_dir, h5_glob)
+    hits = [p for p in found if not assay_subfolder or assay_subfolder in p.parts]
     if hits:
         return hits[0]
-    direct = run_dir / h5_glob
-    if direct.exists():
-        return direct
-    any_hit = sorted(run_dir.rglob(h5_glob))
-    return any_hit[0] if any_hit else None
+    return found[0] if found else None
+
+
+def path_is_within(child: str | Path, parent: str | Path) -> bool:
+    """True if ``child`` is ``parent`` or lies anywhere beneath it."""
+    try:
+        c = Path(child).expanduser().resolve()
+        p = Path(parent).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    return c == p or p in c.parents
 
 
 # --------------------------------------------------------------------------- #
@@ -498,7 +581,8 @@ def find_recording(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network"
 class Watcher:
     """Polls the watch directory and dispatches completed runs to the pipeline."""
 
-    def __init__(self, cfg: JobConfig, on_event: Optional[Callable[[str, dict], None]] = None):
+    def __init__(self, cfg: JobConfig, on_event: Optional[Callable[[str, dict], None]] = None,
+                 reconcile: bool = True):
         self.cfg = cfg
         self.work_dir = Path(cfg.work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -531,7 +615,10 @@ class Watcher:
         # Batches queued by hand from the UI. Each is a set of state keys; when
         # all of them reach a terminal status the batch is finished and its
         # on-completion hook runs exactly once.
-        self._reconcile_state()
+        # A throwaway Watcher (the UI's command preview) shares this state file
+        # with the live one, and must not mark the live one's jobs interrupted.
+        if reconcile:
+            self._reconcile_state()
 
         # Walking the watch directory is the most expensive thing this class
         # does, so the result is shared between the scan loop and the UI.
@@ -851,7 +938,7 @@ class Watcher:
                 LOG.error("  %s", res["error"])
         return res
 
-    def jobs_for(self, run_dir: Path) -> list[str]:
+    def jobs_for(self, run_dir: Path, max_age: float = LISTING_TTL_SECONDS) -> list[str]:
         """Which enabled analyses actually have data in this folder.
 
         One walk, not one per job. Each recording folder holds gigabytes over a
@@ -862,7 +949,7 @@ class Watcher:
         enabled = list(self.cfg.enabled_jobs())
         if not enabled:
             return []
-        found = sorted(Path(run_dir).rglob(self.cfg.h5_glob))
+        found = list_h5(Path(run_dir), self.cfg.h5_glob, max_age=max_age)
         if not found:
             return []
         jobs = []
@@ -1713,7 +1800,10 @@ class Watcher:
         # Check the GPU before taking the slot, not after. A job that fails
         # here has not blocked anything; one that hangs after taking the slot
         # blocks every job behind it.
-        if job == JOB_NETWORK and not self.cfg.dry_run:
+        # Spike detection without sorting never touches the GPU, so a broken
+        # driver must not block it.
+        sorting = not self.cfg.driver_options.get("skip_spikesorting")
+        if job == JOB_NETWORK and sorting and not self.cfg.dry_run:
             gpu = self.check_gpu(cmd[0] if cmd else "")
             if not gpu.get("ok"):
                 msg = ("the GPU is not usable, so spike sorting was not started — "
