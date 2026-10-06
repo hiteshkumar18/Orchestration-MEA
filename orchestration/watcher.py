@@ -1718,14 +1718,19 @@ class Watcher:
         dst.mkdir(parents=True, exist_ok=True)
         rsync = shutil.which("rsync")
         if rsync:
+            # binary/ is a well's uncompressed scratch copy (up to ~130 GB). It
+            # is left behind only by a well that failed, it is never a result,
+            # and copying it once made a copy-back outlive the server.
             proc = subprocess.run(
-                [rsync, "-a", "--partial", f"{src}{os.sep}", f"{dst}{os.sep}"],
+                [rsync, "-a", "--partial", "--exclude=binary/",
+                 f"{src}{os.sep}", f"{dst}{os.sep}"],
                 capture_output=True, text=True)
             if proc.returncode == 0:
                 return
             LOG.warning("rsync failed (%s); falling back to a plain copy",
                         (proc.stderr.strip().splitlines() or ["?"])[-1])
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+        shutil.copytree(src, dst, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("binary"))
 
     def _scratch_root(self) -> Path:
         return Path(self.cfg.scratch_dir or (Path(self.cfg.work_dir) / "scratch"))
@@ -1833,7 +1838,7 @@ class Watcher:
             except OSError:
                 break
 
-    def _stage_out(self, run_dir: Path, local: Path) -> None:
+    def _stage_out(self, run_dir: Path, local: Path) -> bool:
         """Copy staged results to the real output directory and clean up.
 
         Runs whether or not the job succeeded: a killed or failed run still
@@ -1853,9 +1858,10 @@ class Watcher:
                       "that work is repeated.", run_dir.name, dest, exc, local)
             with self._stage_lock:
                 self._stage_reserved.pop(str(local), None)
-            return
+            return False
         self._remove_scratch(local)
         LOG.info("%s: scratch at %s deleted", run_dir.name, local)
+        return True
 
     def _run_job(self, run_dir: Path, job: str, key: str,
                  cmd: list[str], log_path: Path) -> None:
@@ -1975,6 +1981,22 @@ class Watcher:
                 fh.flush()
                 rc, stall = self._supervise(cmd, env, fh, log_path,
                                             run_dir.name, label, key)
+            # Copy staged results back *before* the run is marked finished.
+            # A finished run is what triggers its report, and marking it done
+            # first let a report be built from a half-copied folder.
+            copy_error = None
+            if staged is not None:
+                self.state.update(key, detail="copying results from local scratch")
+                if not self._stage_out(run_dir, staged):
+                    copy_error = (f"results could not be copied from local scratch; they are "
+                                  f"kept at {staged}")
+                staged = None
+            if copy_error:
+                self.state.update(key, status="failed", completed_at=_now(), returncode=rc,
+                                  error=copy_error, duration_s=round(time.time() - started, 1))
+                LOG.error("%s [%s] %s", run_dir.name, label, copy_error)
+                self.on_event("failed", {"run": run_dir.name, "job": job, "error": copy_error})
+                return
             if stall:
                 self.state.update(key, status="failed", completed_at=_now(),
                                   returncode=rc, error=stall,
