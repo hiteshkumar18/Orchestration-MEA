@@ -16,3 +16,5 @@ matplotlib>=3.7
 # Optional: exact Mann-Whitney U in activity_trends.py (falls back to a normal
 # approximation when absent)
 # scipy>=1.10
+
+

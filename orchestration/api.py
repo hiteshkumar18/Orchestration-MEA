@@ -14,6 +14,9 @@ Serves the single-page frontend and exposes the watcher as a REST API:
     POST /api/watcher/stop  stop watching
     POST /api/runs/reset    forget a run so it can be re-processed
     GET  /api/runs/log      tail a run's pipeline log
+    POST /api/requirements  save the AI report requirements (any time)
+    POST /api/handoff       prepare an AI report handoff folder
+    GET  /api/handoff       the last handoff prepared
 
 Run:
     pip install fastapi uvicorn
@@ -26,13 +29,17 @@ import argparse
 import logging
 import os
 import sys
+import threading
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,8 +52,9 @@ from mea_repo import (  # noqa: E402
 import native_picker  # noqa: E402
 from watcher import (  # noqa: E402
     JobConfig, Watcher, DEFAULT_WORK_DIR, JOB_LABELS,
-    find_recording, find_recordings, has_finished_marker,
+    has_finished_marker, list_h5,
 )
+import handoff  # noqa: E402
 
 LOG = logging.getLogger("mea.api")
 HERE = Path(__file__).resolve().parent
@@ -85,6 +93,9 @@ class RingLogHandler(logging.Handler):
 LOG_RING = RingLogHandler()
 
 app = FastAPI(title="MEA Pipeline Control", version="1.0")
+# /api/status is ~30 KB of JSON every two seconds, usually over an SSH tunnel.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
 # --------------------------------------------------------------------------- #
 # Process-wide state
@@ -130,10 +141,24 @@ def load_job_config() -> JobConfig:
     return cfg
 
 
+_watcher_lock = threading.Lock()
+
+
 def get_watcher() -> Watcher:
+    """The one Watcher for this process.
+
+    The lock is not ceremony. FastAPI runs sync endpoints in a thread pool and
+    the UI fires several requests the moment the page loads, so an unguarded
+    "if None: create" let two threads each build a Watcher. Two watchers means
+    two scan loops walking the same directory, two StateStores writing the same
+    watcher_state.tmp — which raced and lost entries, so runs vanished from the
+    UI — and every log line printed twice. Double-checked under the lock.
+    """
     global _watcher
     if _watcher is None:
-        _watcher = Watcher(load_job_config(), on_event=_record_event)
+        with _watcher_lock:
+            if _watcher is None:
+                _watcher = Watcher(load_job_config(), on_event=_record_event)
     return _watcher
 
 
@@ -160,7 +185,12 @@ class ConfigPayload(BaseModel):
     require_finished_marker: bool = True
     skip_settle_for_existing: bool = False
     driver_python: str = ""
+    ai_requirements: str = ""
+    auto_handoff: bool = True
     logs_in_output: bool = True
+    stage_locally: bool = False
+    scratch_dir: str = ""
+    stage_min_free_gb: int = 200
     dry_run: bool = False
 
 
@@ -175,6 +205,17 @@ class PickPayload(BaseModel):
 
 class RunKeyPayload(BaseModel):
     path: str
+
+
+class ResetAllPayload(BaseModel):
+    # "failed" | "done" | "all" — what to forget in one go
+    which: str = "failed"
+
+
+class QueuePayload(BaseModel):
+    folders: list[str] = []
+    rerun: bool = False
+    auto_handoff: Optional[bool] = None   # None = use the saved setting
 
 
 # --------------------------------------------------------------------------- #
@@ -237,8 +278,13 @@ def api_get_config():
         "skip_settle_for_existing": cfg.skip_settle_for_existing,
         "driver_python": cfg.driver_python,
         "logs_in_output": cfg.logs_in_output,
+        "stage_locally": cfg.stage_locally,
+        "scratch_dir": cfg.scratch_dir,
+        "stage_min_free_gb": cfg.stage_min_free_gb,
         "dry_run": cfg.dry_run,
         "work_dir": cfg.work_dir,
+        "ai_requirements": cfg.ai_requirements,
+        "auto_handoff": cfg.auto_handoff,
     }
 
 
@@ -276,8 +322,13 @@ def api_set_config(payload: ConfigPayload):
         skip_settle_for_existing=payload.skip_settle_for_existing,
         driver_python=payload.driver_python,
         logs_in_output=payload.logs_in_output,
+        stage_locally=payload.stage_locally,
+        scratch_dir=payload.scratch_dir,
+        stage_min_free_gb=payload.stage_min_free_gb,
         work_dir=str(WORK_DIR),
         dry_run=payload.dry_run,
+        ai_requirements=payload.ai_requirements,
+        auto_handoff=payload.auto_handoff,
     )
     errors = cfg.validate()
     if errors:
@@ -285,7 +336,20 @@ def api_set_config(payload: ConfigPayload):
 
     cfg.save(CONFIG_PATH)
     global _watcher
-    _watcher = Watcher(cfg, on_event=_record_event)
+    with _watcher_lock:
+        # Stop the old one first. Replacing the reference does not stop its
+        # scan loop: that thread keeps walking the watch directory and keeps
+        # its own StateStore, so the process ends up with two watchers writing
+        # the same state file. Saving config from the UI is the ordinary way to
+        # reach this line, which made it the ordinary way to get two.
+        #
+        # stop() ends the scan loop but deliberately leaves running jobs alone
+        # — a Kilosort run mid-flight should survive a settings change.
+        old, _watcher = _watcher, None
+        if old is not None and old.is_running:
+            LOG.info("Configuration changed — stopping the previous watcher")
+            old.stop()
+        _watcher = Watcher(cfg, on_event=_record_event)
 
     # "detected" is only ever produced by a dry run, and it counts as claimed —
     # so a run marked that way would never be analyzed for real. Clear those
@@ -326,14 +390,19 @@ def api_browse(payload: BrowsePayload):
     cfg = get_watcher().cfg
     items = []
     for c in entries:
-        recs = find_recordings(c, cfg.h5_glob, cfg.assay_subfolder)
-        rec = recs[0] if recs else find_recording(c, cfg.h5_glob, cfg.assay_subfolder)
+        # One cached, depth-limited listing per folder answers all three
+        # questions. This used to be up to four full rglob walks per child,
+        # which over the NAS made the picker take minutes during a job.
+        found = list_h5(c, cfg.h5_glob)
+        recs = [r for r in found if not cfg.assay_subfolder or cfg.assay_subfolder in r.parts]
+        rec = recs[0] if recs else (found[0] if found else None)
         items.append({
             "name": c.name,
             "path": str(c),
             "is_run": rec is not None,
             "recordings": len(recs) or (1 if rec else 0),
-            "finished": (has_finished_marker(c, cfg.h5_glob, cfg.assay_subfolder)
+            "finished": (has_finished_marker(c, cfg.h5_glob, cfg.assay_subfolder,
+                                             listing=found)
                          if rec is not None else None),
         })
     return {"path": str(p), "parent": str(p.parent) if p.parent != p else None, "entries": items}
@@ -409,9 +478,22 @@ def api_preview(payload: ConfigPayload):
         activity_figures=payload.activity_figures,
         work_dir=str(WORK_DIR),
     )
-    probe = Watcher(cfg, on_event=lambda *_: None)
+    probe = Watcher(cfg, on_event=lambda *_: None, reconcile=False)
 
-    candidates = probe.scan_candidates()
+    # Never walk the whole input tree to draw a preview. Reuse what the live
+    # watcher already found for the same folder; otherwise look at one
+    # recording folder, which is all an example command needs.
+    live = get_watcher()
+    candidates: list = []
+    if live.cfg.watch_dir == cfg.watch_dir and live._cand_cache:
+        candidates = list(live._cand_cache[1])
+    elif cfg.watch_dir and Path(cfg.watch_dir).is_dir():
+        for child in sorted(Path(cfg.watch_dir).iterdir()):
+            if child.is_dir() and not child.name.startswith("."):
+                jobs = probe.jobs_for(child)
+                if jobs:
+                    candidates = [(child, jobs)]
+                    break
     sample, jobs = (candidates[0] if candidates
                     else (Path(payload.watch_dir or "/path/to") / "000000",
                           cfg.enabled_jobs()))
@@ -446,10 +528,21 @@ def api_start():
 
 
 @app.post("/api/watcher/stop")
-def api_stop():
+def api_stop(cancel_running: bool = False):
+    """Stop scanning, and optionally cancel work already in flight.
+
+    Plain stop leaves running drivers alone, which is right when settings are
+    being changed mid-run. It is wrong when the operator wants the machine
+    quiet: the jobs carry on for hours and the only recourse was killing
+    processes from a terminal — which orphans the per-well subprocesses and
+    causes the stray-process problem.
+    """
     watcher = get_watcher()
+    if cancel_running:
+        result = watcher.cancel_all()
+        return {"ok": True, "running": watcher.is_running, **result}
     watcher.stop()
-    return {"ok": True, "running": watcher.is_running}
+    return {"ok": True, "running": watcher.is_running, "cancelled": 0}
 
 
 @app.get("/api/status")
@@ -457,8 +550,27 @@ def api_status():
     watcher = get_watcher()
     snap = watcher.snapshot()
     snap["events"] = _events[-25:]
-    snap["candidates"] = [c.name for c in watcher.candidate_runs()]
+    # None while the first directory scan is still running. Kept distinct from
+    # [] so the UI can say "scanning" rather than "nothing found" — on a slow
+    # network mount that first walk takes a minute or more.
+    found = watcher.candidate_runs()
+    snap["candidates"] = None if found is None else [c.name for c in found]
+    snap["scanning"] = found is None
+    # How many jobs a Start would resume, so the UI can say so beforehand
+    # rather than the operator watching the whole previous queue reappear.
+    snap["resumable"] = len(watcher.resumable())
     return snap
+
+
+@app.get("/api/gpu")
+def api_gpu(refresh: bool = False):
+    """Whether spike sorting can actually run right now.
+
+    The answer is cached after the first call because the probe starts a
+    process and imports torch; pass ``?refresh=true`` after fixing the machine.
+    """
+    watcher = get_watcher()
+    return watcher.check_gpu(force=refresh)
 
 
 @app.post("/api/runs/reset")
@@ -476,6 +588,38 @@ def api_reset(payload: RunKeyPayload):
     watcher._prints.pop(folder, None)
     watcher._prints.pop(payload.path, None)   # tolerate a bare folder path
     return {"ok": True, "cleared_fingerprint_for": folder}
+
+
+@app.post("/api/runs/reset-all")
+def api_reset_all(payload: ResetAllPayload):
+    """Forget many runs at once, so a fresh start is one click.
+
+    Anything still in flight is left alone: clearing a running job would let the
+    watcher re-dispatch the same folder while the first process still holds the
+    GPU. Those are reported back rather than silently skipped.
+    """
+    if payload.which not in ("failed", "done", "all"):
+        raise HTTPException(400, f"Unknown selection: {payload.which}")
+
+    watcher = get_watcher()
+    in_flight = {"dispatched", "running", "queued", "detected"}
+    cleared, skipped = [], []
+    for key, entry in list(watcher.state.all().items()):
+        status = entry.get("status")
+        if status in in_flight:
+            skipped.append({"run": entry.get("run") or key, "status": status})
+            continue
+        if payload.which != "all" and status != payload.which:
+            continue
+        watcher.state.reset(key)
+        folder = key.split("::")[0]
+        watcher._prints.pop(folder, None)
+        cleared.append(entry.get("run") or key)
+
+    LOG.info("Cleared %d run(s) [%s]%s", len(cleared), payload.which,
+             f", {len(skipped)} still running" if skipped else "")
+    return {"ok": True, "cleared": len(cleared), "runs": sorted(set(cleared)),
+            "skipped": skipped}
 
 
 @app.get("/api/runs/log")
@@ -519,8 +663,13 @@ def api_checkpoints(path: str = "", tail: int = 0):
     hit an OOM and the rest are fine". The checkpoints can.
     """
     watcher = get_watcher()
+    # The scratch root is searched too. While a run is staged on local disk its
+    # checkpoints are written there, not to the output directory, so leaving it
+    # out would blank the per-well view for exactly the run you are watching.
     roots = [Path(p) for p in (watcher.cfg.output_dir,
-                               watcher.cfg.driver_options.get("checkpoint_dir")) if p]
+                               watcher.cfg.driver_options.get("checkpoint_dir"),
+                               str(watcher._scratch_root())
+                               if watcher.cfg.stage_locally else None) if p]
     if not roots:
         return {"summary": {"wells": 0}, "wells": [], "note": "No output directory configured"}
 
@@ -530,10 +679,138 @@ def api_checkpoints(path: str = "", tail: int = 0):
             "searched": [str(r) for r in roots]}
 
 
+# --------------------------------------------------------------------------- #
+# Queue
+# --------------------------------------------------------------------------- #
+LAST_HANDOFF: dict = {"state": "idle"}
+HANDOFF_LOCK = threading.Lock()
+
+
+def _make_handoff(folders: Optional[list[str]] = None, label: str = "",
+                  requirements: Optional[str] = None) -> dict:
+    """Write an AI handoff folder for these input folders (all, if None)."""
+    cfg = get_watcher().cfg
+    out = cfg.output_dir
+    if not out:
+        raise ValueError("No output directory is configured.")
+    # One project per handoff: its activity scans and its handoff folder both
+    # live under <output>/<project>/. Folders from several projects fall back
+    # to the output root.
+    probe_dirs = folders or ([cfg.watch_dir.rstrip("/") + "/x"] if cfg.watch_dir else [])
+    projects = {JobConfig.project_of(f) for f in probe_dirs}
+    if len(projects) == 1 and probe_dirs:
+        act = cfg.activity_out_for(probe_dirs[0])
+        root = cfg.project_dir(probe_dirs[0])
+        # Older outputs kept scans in <output>/ActivityScan.
+        if not (act and Path(act).is_dir()) and (Path(out) / "ActivityScan").is_dir():
+            act = str(Path(out) / "ActivityScan")
+    else:
+        act, root = str(Path(out) / "ActivityScan"), Path(out)
+    with HANDOFF_LOCK:
+        LAST_HANDOFF.clear()
+        LAST_HANDOFF.update({"state": "running", "started": time.time(), "label": label})
+    try:
+        res = handoff.generate(
+            Path(out), cfg.ai_requirements if requirements is None else requirements,
+            watch_dir=cfg.watch_dir,
+            activity_dir=Path(act) if act and Path(act).is_dir() else None,
+            folders=folders, label=label, handoff_root=root)
+    except Exception as exc:  # noqa: BLE001
+        with HANDOFF_LOCK:
+            LAST_HANDOFF.update({"state": "error", "error": str(exc), "finished": time.time()})
+        raise
+    with HANDOFF_LOCK:
+        LAST_HANDOFF.update({"state": "done", **res, "finished": time.time()})
+    return res
+
+
+def _batch_handoff(batch: dict) -> None:
+    """Prepare the AI handoff for a finished batch. Runs on its own thread."""
+    folders = sorted({k.split("::")[0] for k in batch.get("keys", [])})
+    try:
+        res = _make_handoff(folders, label=batch["id"])
+        LOG.info("Batch %s: AI handoff ready — %s", batch["id"], res["prompt"])
+    except Exception:  # noqa: BLE001
+        LOG.exception("Batch %s: could not prepare the AI handoff", batch["id"])
+
+
+@app.post("/api/queue/inspect")
+def api_queue_inspect(payload: QueuePayload):
+    """What queueing these folders would do, before anything is started."""
+    return {"folders": get_watcher().inspect_folders(payload.folders)}
+
+
+@app.post("/api/queue")
+def api_queue(payload: QueuePayload):
+    if not payload.folders:
+        raise HTTPException(400, "Select at least one folder.")
+    watcher = get_watcher()
+    errors = watcher.cfg.validate()
+    if errors:
+        raise HTTPException(400, {"errors": errors})
+
+    auto = watcher.cfg.auto_handoff if payload.auto_handoff is None else payload.auto_handoff
+    res = watcher.queue_folders(
+        payload.folders, rerun=payload.rerun,
+        on_complete=_batch_handoff if auto else None)
+    if not res["queued"]:
+        # Nothing to do is a useful answer, not an error — but say why.
+        reasons = sorted({s.get("reason", "") for s in res["skipped"]})
+        raise HTTPException(409, "Nothing was queued: " + "; ".join(reasons))
+    return res
+
+
+@app.get("/api/queue")
+def api_queue_status():
+    with HANDOFF_LOCK:
+        last = dict(LAST_HANDOFF)
+    return {"batches": get_watcher().batches(), "handoff": last}
+
+
 @app.get("/api/logs")
 def api_logs(since: int = 0, limit: int = 500):
     """Live watcher activity — polled by the UI with the last seq it received."""
     return {"lines": LOG_RING.since(since, limit), "last_seq": LOG_RING.seq}
+
+
+# --------------------------------------------------------------------------- #
+# AI report handoff
+# --------------------------------------------------------------------------- #
+class RequirementsPayload(BaseModel):
+    text: str = ""
+    auto_handoff: Optional[bool] = None
+
+
+class HandoffPayload(BaseModel):
+    folders: list[str] = []      # input folders to cover; empty = everything
+    label: str = ""
+
+
+@app.post("/api/requirements")
+def api_requirements(payload: RequirementsPayload):
+    """Save the report requirements. Allowed while running — it is not a
+    pipeline setting, and the text box should never be locked."""
+    watcher = get_watcher()
+    watcher.cfg.ai_requirements = payload.text
+    if payload.auto_handoff is not None:
+        watcher.cfg.auto_handoff = payload.auto_handoff
+    watcher.cfg.save(CONFIG_PATH)
+    return {"ok": True, "chars": len(payload.text)}
+
+
+@app.post("/api/handoff")
+def api_handoff(payload: HandoffPayload):
+    label = "".join(ch for ch in payload.label if ch.isalnum() or ch in "-_")[:40]
+    try:
+        return _make_handoff(payload.folders or None, label=label)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/handoff")
+def api_handoff_status():
+    with HANDOFF_LOCK:
+        return dict(LAST_HANDOFF)
 
 
 # --------------------------------------------------------------------------- #
@@ -543,7 +820,11 @@ def api_logs(since: int = 0, limit: int = 500):
 def index():
     if not FRONTEND.exists():
         return JSONResponse({"error": f"Frontend not found at {FRONTEND}"}, status_code=500)
-    return FileResponse(FRONTEND)
+    # Stamp app.js with its mtime so a rebuilt UI is never served from cache.
+    app_js = FRONTEND.parent / "app.js"
+    version = str(int(app_js.stat().st_mtime)) if app_js.exists() else "0"
+    return HTMLResponse(FRONTEND.read_text().replace("__APP_VERSION__", version),
+                        headers={"Cache-Control": "no-cache"})
 
 
 def main() -> None:

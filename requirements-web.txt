@@ -7,3 +7,8 @@
 # pinned scientific stack the pipeline depends on.
 fastapi>=0.110
 uvicorn[standard]>=0.27
+
+# Reading .xlsx lab notebooks (orchestration/explore.py). CSV needs nothing
+# extra, so this is only required if you point explore.py at a workbook.
+openpyxl>=3.1
+

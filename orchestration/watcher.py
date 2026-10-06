@@ -43,10 +43,12 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -57,6 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import checkpoints  # noqa: E402
 from driver_schema import build_driver_args, default_options  # noqa: E402
 from mea_repo import find_mea_repo, find_driver_python, check_python, required_imports  # noqa: E402
 
@@ -132,6 +135,58 @@ class JobConfig:
     gpu_cooldown_seconds: int = 5
     # How often a queued job re-checks for a free slot.
     queue_poll_seconds: int = 2
+    # Ceiling for the adaptive scan back-off (see _next_poll_delay).
+    max_poll_seconds: int = 600
+
+    # --- Local staging ------------------------------------------------------
+    # Run the analysis against local disk, then copy the results to the real
+    # output directory.
+    #
+    # The pipeline writes a float32 binary of the whole recording under the
+    # output directory, and Kilosort then reads it back many times. For a
+    # MaxTwo well that is roughly 1024 channels x 20 kHz x 4 bytes = 82 MB per
+    # second of recording, so a five-minute well is ~24 GB of scratch traffic —
+    # all of it over the network mount, and all of it deleted afterwards by
+    # --clean-up. Sending that to local disk leaves only the final results on
+    # the NAS, which are small.
+    #
+    # Off by default: it needs free local space, and on a fast local output
+    # directory it buys nothing.
+    stage_locally: bool = False
+    # Where to stage. Blank means <work_dir>/scratch.
+    scratch_dir: str = ""
+    # Refuse to stage unless this much space is free, and stop staging if a run
+    # would take the volume below it.
+    #
+    # Measured on this dataset: one well of a ~16-minute recording produced an
+    # 81 GB binary. The scratch volume here is a shared 19 TB disk sitting at
+    # 99% full, so staging must be able to decline. Running someone else's
+    # volume to zero would be a worse failure than a slow analysis.
+    stage_min_free_gb: int = 200
+
+    # --- Watchdog -----------------------------------------------------------
+    # A driver that hangs rather than exits is worse than one that crashes: it
+    # holds the GPU slot, so every job behind it waits too, and the run sits at
+    # "Running" with nothing in the log for as long as the server is up. Both
+    # limits below are measured against the job's own log file, which the
+    # driver writes to continuously while it works.
+    #
+    # No output for this long means the job is stuck, not slow. Kilosort is
+    # quiet during long GPU stretches, and a job reading from a busy network
+    # mount can be starved for a long time while perfectly healthy — two runs
+    # were killed at 45 minutes that were most likely only waiting on I/O. A
+    # false kill costs hours of GPU work, a late kill costs a queue slot, so
+    # this errs long.
+    stall_minutes: int = 120
+    # An absolute ceiling, whatever the log says. 0 disables it, and 0 is the
+    # default: a folder of 18 wells at roughly an hour each is a 17-hour job
+    # that is working perfectly. A 12-hour cap killed five of them. Whether a
+    # job is stuck is answered by stall_minutes above — it watches for the job
+    # going quiet, which is evidence. Elapsed time is not evidence of anything
+    # except that the work is large.
+    max_runtime_hours: float = 0.0
+    # Seconds given to a killed process group to exit before SIGKILL.
+    kill_grace_seconds: int = 20
 
     settle_seconds: int = 600
     poll_seconds: int = 30
@@ -167,17 +222,43 @@ class JobConfig:
     work_dir: str = str(DEFAULT_WORK_DIR)   # where state + logs are written
     dry_run: bool = False
 
+    # --- AI report handoff --------------------------------------------------
+    # What the report should contain, typed once in the UI and kept here. It is
+    # written into every handoff folder next to skills.md; see handoff.py.
+    ai_requirements: str = ""
+    # Prepare a handoff automatically when a queued batch finishes.
+    auto_handoff: bool = True
+
     @property
     def output_dir(self) -> Optional[str]:
         return self.driver_options.get("output_dir")
 
     @property
     def activity_out(self) -> Optional[str]:
-        """Resolved output directory for activity-scan results."""
+        """Root of activity-scan results: the configured folder, else the output
+        directory (each project then gets <output>/<project>/ActivityScan)."""
+        return self.activity_output_dir or self.output_dir
+
+    @staticmethod
+    def project_of(run_dir: Path | str) -> str:
+        """Project folder name for a recording folder: <project>/<date>."""
+        return Path(run_dir).resolve().parent.name
+
+    def project_dir(self, run_dir: Path | str) -> Optional[Path]:
+        """<output>/<project> — where everything for this project lands, next
+        to the pipeline's own <output>/<project>/<date>/... results."""
+        return Path(self.output_dir) / self.project_of(run_dir) if self.output_dir else None
+
+    def activity_out_for(self, run_dir: Path | str) -> Optional[str]:
+        """Activity-scan output for one recording folder.
+
+        Kept per project: dates and chip ids repeat across projects (the same
+        chip is reused), so a shared <output>/ActivityScan mixes them.
+        """
         if self.activity_output_dir:
             return self.activity_output_dir
-        base = self.output_dir
-        return str(Path(base) / "ActivityScan") if base else None
+        pd_ = self.project_dir(run_dir)
+        return str(pd_ / "ActivityScan") if pd_ else None
 
     def enabled_jobs(self) -> list[str]:
         jobs = []
@@ -252,6 +333,24 @@ class JobConfig:
                 "Set MEA_REPO (or --mea-repo) to your MEA-Analysis checkout.")
         if self.run_activity and not ACTIVITY_SCRIPT.exists():
             errs.append(f"activity_scan.py not found at: {ACTIVITY_SCRIPT}")
+        # The input directory is read-only, always. Anything this tool or the
+        # pipeline writes must land outside it, so refuse before creating a
+        # single directory — the mkdir checks below would otherwise create one.
+        if self.watch_dir and Path(self.watch_dir).is_dir():
+            writes = {
+                "Output path": self.output_dir,
+                "Activity scan output path": self.activity_out if self.run_activity else None,
+                "Checkpoint directory": self.driver_options.get("checkpoint_dir"),
+                "Scratch directory": self.scratch_dir if self.stage_locally else None,
+                "Work directory": self.work_dir,
+            }
+            inside = [name for name, path in writes.items()
+                      if path and path_is_within(path, self.watch_dir)]
+            if inside:
+                errs.append(
+                    f"{', '.join(inside)} lies inside the input folder {self.watch_dir}. "
+                    "The input folder is read-only — choose a location outside it.")
+                return errs
         out = self.output_dir
         if out:
             try:
@@ -325,9 +424,21 @@ class StateStore:
             self._flush()
 
     def _flush(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True))
-        tmp.replace(self.path)
+        # A temp name unique to this writer. The shared "watcher_state.tmp"
+        # was safe only while exactly one StateStore existed; when a second
+        # watcher appeared, both wrote that one path and whichever replaced()
+        # second found the file already gone — FileNotFoundError, taking the
+        # whole scan cycle down with it and losing the update. The duplicate
+        # watcher is fixed at its source, but a state file is the wrong place
+        # to rely on that holding.
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}."
+                                  f"{threading.get_ident():x}.tmp")
+        try:
+            tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True))
+            tmp.replace(self.path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 # --------------------------------------------------------------------------- #
@@ -370,8 +481,56 @@ def _metadata_says_finished(meta: Path) -> bool:
     return False
 
 
+# A MaxWell folder is <date>/<chip>/<assay>/<run>/data.raw.h5 — four levels
+# below the folder that gets dispatched. Walk a little deeper than that for
+# odd layouts, but no further: an unbounded rglob over a network mount is what
+# made the folder picker take minutes while a job was reading the same mount.
+MAX_RECORDING_DEPTH = 6
+# Listings are cached briefly so one click in the UI (browse, then inspect,
+# then queue) reads each folder from the NAS once, not three or four times.
+LISTING_TTL_SECONDS = 30.0
+_listing_cache: dict[tuple[str, str], tuple[float, list[Path]]] = {}
+_listing_lock = threading.Lock()
+
+
+def list_h5(run_dir: Path, h5_glob: str = "data.raw.h5",
+            max_age: float = LISTING_TTL_SECONDS) -> list[Path]:
+    """Every file under ``run_dir`` matching ``h5_glob``, depth-limited, cached.
+
+    One pruned ``os.walk`` answers every question asked of a folder — which
+    recordings it holds, which assays, where their metadata sits — so callers
+    share this rather than each running their own ``rglob``. Read-only.
+    """
+    import fnmatch
+    key = (str(run_dir), h5_glob)
+    now = time.time()
+    if max_age > 0:
+        with _listing_lock:
+            hit = _listing_cache.get(key)
+        if hit and now - hit[0] < max_age:
+            return list(hit[1])
+
+    root = str(run_dir)
+    base_depth = root.rstrip(os.sep).count(os.sep)
+    found: list[Path] = []
+    for cur, dirs, files in os.walk(root):
+        if cur.rstrip(os.sep).count(os.sep) - base_depth >= MAX_RECORDING_DEPTH:
+            dirs[:] = []
+        else:
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+        found.extend(Path(cur) / f for f in files if fnmatch.fnmatch(f, h5_glob))
+    found.sort()
+    with _listing_lock:
+        _listing_cache[key] = (now, found)
+        if len(_listing_cache) > 2000:
+            for k in sorted(_listing_cache, key=lambda k: _listing_cache[k][0])[:1000]:
+                _listing_cache.pop(k, None)
+    return list(found)
+
+
 def has_finished_marker(run_dir: Path, h5_glob: str = "data.raw.h5",
-                        assay_subfolder: str = "Network") -> bool:
+                        assay_subfolder: str = "Network",
+                        listing: Optional[list[Path]] = None) -> bool:
     """Whether every recording in this folder has been marked complete by MaxWell.
 
     MaxWell writes ``mxassay.metadata`` **next to each recording**, so in a
@@ -381,9 +540,10 @@ def has_finished_marker(run_dir: Path, h5_glob: str = "data.raw.h5",
 
     Falls back to a metadata file at the folder root for flat layouts.
     """
-    recordings = find_recordings(run_dir, h5_glob, assay_subfolder)
+    allh5 = listing if listing is not None else list_h5(run_dir, h5_glob)
+    recordings = [p for p in allh5 if not assay_subfolder or assay_subfolder in p.parts]
     if not recordings:
-        recordings = [p for p in run_dir.rglob(h5_glob)]
+        recordings = allh5
 
     metas = [r.parent / "mxassay.metadata" for r in recordings]
     metas = [m for m in metas if m.exists()]
@@ -397,16 +557,18 @@ def has_finished_marker(run_dir: Path, h5_glob: str = "data.raw.h5",
     return False
 
 
-def find_recordings(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network") -> list[Path]:
+def find_recordings(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network",
+                    max_age: float = LISTING_TTL_SECONDS) -> list[Path]:
     """Recordings that the driver would actually process.
 
     Mirrors ``helper_functions.find_files_with_subfolder``: in directory mode the
     driver only accepts ``data.raw.h5`` files that have ``assay_subfolder`` as a
     path component, which is how ActivityScan recordings get excluded.
     """
+    found = list_h5(run_dir, h5_glob, max_age=max_age)
     if not assay_subfolder:
-        return sorted(run_dir.rglob(h5_glob))
-    return sorted(p for p in run_dir.rglob(h5_glob) if assay_subfolder in p.parts)
+        return found
+    return [p for p in found if assay_subfolder in p.parts]
 
 
 def find_recording(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network") -> Optional[Path]:
@@ -415,14 +577,21 @@ def find_recording(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network"
     The fallback covers flattened layouts (``<run>/data.raw.h5`` with no assay
     subfolder), which the driver can still handle in single-file mode.
     """
-    hits = find_recordings(run_dir, h5_glob, assay_subfolder)
+    found = list_h5(run_dir, h5_glob)
+    hits = [p for p in found if not assay_subfolder or assay_subfolder in p.parts]
     if hits:
         return hits[0]
-    direct = run_dir / h5_glob
-    if direct.exists():
-        return direct
-    any_hit = sorted(run_dir.rglob(h5_glob))
-    return any_hit[0] if any_hit else None
+    return found[0] if found else None
+
+
+def path_is_within(child: str | Path, parent: str | Path) -> bool:
+    """True if ``child`` is ``parent`` or lies anywhere beneath it."""
+    try:
+        c = Path(child).expanduser().resolve()
+        p = Path(parent).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    return c == p or p in c.parents
 
 
 # --------------------------------------------------------------------------- #
@@ -431,7 +600,8 @@ def find_recording(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network"
 class Watcher:
     """Polls the watch directory and dispatches completed runs to the pipeline."""
 
-    def __init__(self, cfg: JobConfig, on_event: Optional[Callable[[str, dict], None]] = None):
+    def __init__(self, cfg: JobConfig, on_event: Optional[Callable[[str, dict], None]] = None,
+                 reconcile: bool = True):
         self.cfg = cfg
         self.work_dir = Path(cfg.work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -440,7 +610,12 @@ class Watcher:
         self.state = StateStore(self.work_dir / "watcher_state.json")
         self.on_event = on_event or (lambda *_: None)
 
+        # Two separate signals. `_stop` ends the scan loop; `_halt` ends the
+        # worker threads. Stopping the watcher should stop it looking for new
+        # folders, not abandon work already queued — a queued Kilosort job that
+        # is waiting for the GPU must survive someone pressing Stop.
         self._stop = threading.Event()
+        self._halt = threading.Event()
         self._thread: Optional[threading.Thread] = None
         # run_key -> (fingerprint, observed_at) from the previous poll
         self._prints: dict[str, tuple[tuple[int, int, float], float]] = {}
@@ -456,11 +631,185 @@ class Watcher:
         self._preflight: Optional[dict] = None
         self._active_lock = threading.Lock()
 
+        # Batches queued by hand from the UI. Each is a set of state keys; when
+        # all of them reach a terminal status the batch is finished and its
+        # on-completion hook runs exactly once.
+        # A throwaway Watcher (the UI's command preview) shares this state file
+        # with the live one, and must not mark the live one's jobs interrupted.
+        if reconcile:
+            self._reconcile_state()
+
+        # Walking the watch directory is the most expensive thing this class
+        # does, so the result is shared between the scan loop and the UI.
+        self._cand_cache: Optional[tuple[float, list]] = None
+        self._cand_lock = threading.Lock()
+        self._cand_refreshing = False
+        # pids this server started, so processes it did not can be spotted.
+        self._own_pids: set[int] = set()
+        self._walk_lock = threading.Lock()
+        # folder -> the jobs it offers. Kept so a folder whose work is already
+        # claimed is never deep-read again; cleared when state is reset.
+        self._jobs_cache: dict[str, list[str]] = {}
+
+        self._batches: dict[str, dict] = {}
+        self._batch_lock = threading.Lock()
+        # Scratch space promised to staged runs still in flight, so two jobs
+        # starting together cannot each pass the free-space check and then
+        # jointly take the disk below stage_min_free_gb.
+        self._stage_reserved: dict[str, float] = {}
+        self._stage_lock = threading.Lock()
+        self.on_batch_done: Optional[Callable[[dict], None]] = None
+
     # -- lifecycle ---------------------------------------------------------- #
+    IN_FLIGHT = ("detected", "dispatched", "queued", "running")
+
+    def _reconcile_state(self) -> None:
+        """Retire statuses left mid-flight by a previous process.
+
+        The state file outlives the process, but the threads that owned those
+        jobs do not. After a restart an entry still reading "running" holds no
+        slot and has no worker, yet it counts as claimed — so nothing is ever
+        dispatched for that folder again and the UI shows work that is not
+        happening. Mark them interrupted so they can simply be re-queued.
+        """
+        stale = [(k, e) for k, e in self.state.all().items()
+                 if e.get("status") in self.IN_FLIGHT]
+        for key, entry in stale:
+            # "interrupted", not "failed". A failed job is one the pipeline
+            # rejected and re-running it unchanged would fail again, so failure
+            # counts as claimed and the scan loop leaves it alone. This job was
+            # simply cut short by a restart — the right thing is to run it
+            # again, and the pipeline's own checkpoints mean finished wells are
+            # skipped, so doing so is cheap. Marking these failed meant every
+            # restart silently stalled the queue until someone noticed and
+            # cleared them by hand.
+            self.state.update(
+                key, status="interrupted", completed_at=_now(), detail=None,
+                error="interrupted — the server restarted while this job was "
+                      "in flight; it will be picked up again on the next scan")
+        if stale:
+            LOG.warning("Retired %d job(s) left in flight by a previous run: %s",
+                        len(stale),
+                        ", ".join(sorted({e.get("run") or k for k, e in stale})))
+
+    # Commands that mean "the pipeline is running", whoever started it.
+    PIPELINE_MARKERS = ("run_pipeline_driver.py", "mea_analysis_routine.py")
+
+    def find_foreign_pipelines(self) -> list[dict]:
+        """Pipeline processes this server did not start.
+
+        A driver outlives its server: killing the parent leaves the per-well
+        subprocesses running, reparented to init. They keep writing into the
+        output tree, so when a fresh server queues the same folder, two
+        processes create and delete the same sorter_output — which is how 13
+        wells were lost before. State reconciliation retires the *records* of
+        those jobs; it cannot see the processes.
+
+        Reported, never killed: a long sort is expensive to throw away, and a
+        process matching these names might belong to a colleague running the
+        pipeline by hand. The operator decides.
+        """
+        try:
+            proc = subprocess.run(["ps", "-eo", "pid,ppid,etime,args"],
+                                  capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOG.debug("Could not list processes (%s)", exc)
+            return []
+
+        # Ancestry, not just the direct parent. Preprocessing runs with
+        # n_jobs=16, so one well shows as seventeen processes whose parent is
+        # the well, whose parent is the driver, which is the only pid we
+        # recorded. Comparing parents alone reported sixteen healthy workers as
+        # strays and told the operator to kill them.
+        parents: dict[int, int] = {}
+        rows: list[tuple[int, int, str, str]] = []
+        for line in proc.stdout.splitlines()[1:]:
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            try:
+                parents[int(parts[0])] = int(parts[1])
+            except ValueError:
+                continue
+
+        with self._active_lock:
+            mine = {os.getpid(), *self._own_pids}
+
+        def descends_from_us(pid: int) -> bool:
+            seen = set()
+            while pid and pid not in seen:
+                if pid in mine:
+                    return True
+                seen.add(pid)
+                pid = parents.get(pid, 0)
+            return False
+
+        out: list[dict] = []
+        for line in proc.stdout.splitlines()[1:]:
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            pid, ppid, etime, args = parts
+            # A Python interpreter actually running one of these scripts —
+            # not merely a command line that mentions one. Matching on the
+            # text alone flagged "grep run_pipeline_driver.py", an editor with
+            # the file open, and a shell whose arguments quoted the path. Each
+            # would have told the operator to kill the wrong process, which is
+            # worse than missing a stray.
+            tokens = args.split()
+            if not tokens or "python" not in tokens[0].rsplit("/", 1)[-1]:
+                continue
+            if not any(tok == m or tok.endswith("/" + m)
+                       for tok in tokens[1:] for m in self.PIPELINE_MARKERS):
+                continue
+            try:
+                pid_i, ppid_i = int(pid), int(ppid)
+            except ValueError:
+                continue
+            if descends_from_us(pid_i):
+                continue
+            out.append({"pid": pid_i, "ppid": ppid_i, "elapsed": etime,
+                        "cmd": args[:300]})
+        return out
+
+    def warn_about_foreign_pipelines(self) -> list[dict]:
+        found = self.find_foreign_pipelines()
+        if found:
+            # One well runs sixteen preprocessing workers with identical
+            # command lines. Listing all seventeen buries the one line that
+            # says which recording is affected, so workers are counted under
+            # the process that owns them.
+            pids = {p["pid"] for p in found}
+            roots = [p for p in found if p["ppid"] not in pids]
+            kids: dict[int, int] = {}
+            for p in found:
+                if p["ppid"] in pids:
+                    kids[p["ppid"]] = kids.get(p["ppid"], 0) + 1
+
+            LOG.warning("=" * 70)
+            LOG.warning("%d pipeline process(es) are running that this server did "
+                        "not start, in %d job(s):", len(found), len(roots))
+            for p in roots:
+                extra = kids.get(p["pid"], 0)
+                LOG.warning("  pid %s (running %s)%s", p["pid"], p["elapsed"],
+                            f" + {extra} worker(s)" if extra else "")
+                LOG.warning("    %s", p["cmd"])
+            LOG.warning("These are usually left over from a previous server. They "
+                        "keep writing to the output folder, so if this server "
+                        "queues the same recording, both will write to the same "
+                        "well and the run will fail.")
+            LOG.warning("Check them, and if they are leftovers:  kill %s",
+                        " ".join(str(p["pid"]) for p in found))
+            LOG.warning("=" * 70)
+        return found
+
     def start(self) -> None:
         if self.is_running:
             return
+        # Before anything is dispatched, while there is still time to act.
+        self.warn_about_foreign_pipelines()
         self._stop.clear()
+        self._halt.clear()
         self._preflight = None
         if self.cfg.run_network and not self.cfg.dry_run:
             self.preflight()
@@ -484,11 +833,44 @@ class Watcher:
         self.on_event("started", {"watch_dir": self.cfg.watch_dir})
 
     def stop(self, timeout: float = 5.0) -> None:
+        """Stop scanning for new folders. Queued and running jobs continue."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=timeout)
-        LOG.info("Watcher stopped")
+        LOG.info("Watcher stopped (queued jobs continue)")
         self.on_event("stopped", {})
+
+    def halt(self, timeout: float = 5.0) -> None:
+        """Stop everything: scanning, queued jobs, and jobs already running.
+
+        Each running job's supervisor checks ``_halt`` and kills its process
+        group, so this cancels work in flight — the docstring here used to
+        promise the opposite, which was true before the supervisor existed.
+
+        Finished wells keep their checkpoints, so cancelling costs the well in
+        flight and nothing more.
+        """
+        self._halt.set()
+        self.stop(timeout)
+
+    def cancel_all(self) -> dict:
+        """Stop and cancel, for an operator who wants the machine quiet.
+
+        Stop on its own only ends the scan loop; drivers carry on for hours
+        afterwards. With no way to say "stop, and I mean it", the only
+        remaining option was killing processes by hand from a terminal, which
+        is how strays were created in the first place.
+        """
+        in_flight = [k for k, e in self.state.all().items()
+                     if e.get("status") in self.IN_FLIGHT]
+        LOG.warning("Cancelling: %d job(s) in flight will be stopped", len(in_flight))
+        self.halt()
+        return {"cancelled": len(in_flight), "runs": in_flight}
+
+    def resumable(self) -> list[str]:
+        """Jobs a start would pick up again, so the UI can say so first."""
+        return [k for k, e in self.state.all().items()
+                if e.get("status") == "interrupted"]
 
     @property
     def is_running(self) -> bool:
@@ -496,11 +878,37 @@ class Watcher:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            started = time.time()
             try:
                 self.scan_once()
             except Exception:  # noqa: BLE001 — a bad scan must not kill the daemon
                 LOG.exception("scan cycle failed; continuing")
-            self._stop.wait(self.cfg.poll_seconds)
+            self._stop.wait(self._next_poll_delay(time.time() - started))
+
+    def _next_poll_delay(self, last_scan_seconds: float) -> float:
+        """How long to wait before scanning again.
+
+        poll_seconds is a floor, not a promise. On the lab's NAS a full scan
+        takes minutes; sleeping the configured 30s between runs meant the
+        watcher spent most of its life walking the mount, which slowed the
+        mount for everything else including the analysis reading from it.
+
+        So a scan that takes longer than the poll interval earns a proportional
+        rest: never more than half the time walking. A fast local disk is
+        unaffected, since there the scan finishes well inside poll_seconds.
+        """
+        floor = max(1, self.cfg.poll_seconds)
+        # Capped, because a slow scan is often a symptom rather than a cause: a
+        # walk that takes 46 minutes is measuring contention with the analysis
+        # jobs reading the same mount, not the size of the directory. Backing
+        # off by that much would leave new folders unnoticed for the best part
+        # of an hour on the strength of one bad measurement.
+        delay = min(max(floor, last_scan_seconds), max(floor, self.cfg.max_poll_seconds))
+        if delay > floor:
+            LOG.info("Scan took %s; next scan in %s (the watch directory is "
+                     "slow, so scanning backs off to leave it free)",
+                     _hms(last_scan_seconds), _hms(delay))
+        return delay
 
     # -- scanning ----------------------------------------------------------- #
     def preflight(self, force: bool = False) -> dict:
@@ -524,6 +932,22 @@ class Watcher:
                 mods = None
         res = check_python(python, mods) if mods else check_python(python)
         res["python"] = python
+
+        # The driver launches every well with a bare "python3" from PATH, so
+        # checking the interpreter we pass is only half the story — the wells
+        # run under whatever "python3" resolves to. Test that resolution the
+        # same way the children will see it, or a whole batch fails one well at
+        # a time with ModuleNotFoundError while the driver still exits 0.
+        if res.get("ok"):
+            try:
+                child = self._check_child_python(python, mods)
+            except Exception:                                # noqa: BLE001
+                # A broken check must not stop the watcher starting; the run
+                # log's banner still records what actually ran.
+                LOG.warning("Could not check the child interpreter", exc_info=True)
+                child = None
+            if child and not child.get("ok"):
+                res = {**res, **child, "ok": False, "python": python}
         self._preflight = res
 
         if res.get("ok"):
@@ -538,35 +962,153 @@ class Watcher:
                 LOG.error("  %s", res["error"])
         return res
 
-    def jobs_for(self, run_dir: Path) -> list[str]:
-        """Which enabled analyses actually have data in this folder."""
+    def jobs_for(self, run_dir: Path, max_age: float = LISTING_TTL_SECONDS) -> list[str]:
+        """Which enabled analyses actually have data in this folder.
+
+        One walk, not one per job. Each recording folder holds gigabytes over a
+        network mount, and asking find_recordings() per job walked the same
+        tree twice to answer two questions that a single listing answers — 116
+        recursive walks for a 58-folder input directory, when 58 will do.
+        """
+        enabled = list(self.cfg.enabled_jobs())
+        if not enabled:
+            return []
+        found = list_h5(Path(run_dir), self.cfg.h5_glob, max_age=max_age)
+        if not found:
+            return []
         jobs = []
-        for job in self.cfg.enabled_jobs():
-            if find_recordings(run_dir, self.cfg.h5_glob, self.cfg.subfolder_for(job)):
+        for job in enabled:
+            sub = self.cfg.subfolder_for(job)
+            if not sub or any(sub in p.parts for p in found):
                 jobs.append(job)
         return jobs
 
-    def scan_candidates(self) -> list[tuple[Path, list[str]]]:
+    def scan_candidates(self, max_age: Optional[float] = None
+                        ) -> list[tuple[Path, list[str]]]:
         """Run folders with the analyses that apply to each.
 
         Returns the job list alongside the folder so callers do not have to call
         ``jobs_for`` again — each call walks the tree with ``rglob``, which is
         expensive on multi-GB folders and was previously done twice per poll.
+
+        The result is cached, because this walks the entire dataset. The UI
+        polls /api/status every two seconds, and that endpoint asked for the
+        candidate list on each poll: a full recursive walk of every recording
+        folder on a network mount, every two seconds, which is why the UI fell
+        behind the data it was displaying. Nothing here changes faster than a
+        folder being copied in, so serving a slightly stale list costs nothing
+        and the scan loop refreshes it anyway.
+
+        ``max_age=0`` forces a fresh walk — the scan loop uses that, since it
+        is what decides whether to dispatch.
         """
+        ttl = self.cfg.poll_seconds if max_age is None else max_age
+        with self._cand_lock:
+            cached = self._cand_cache
+            if cached and ttl and (time.time() - cached[0]) < ttl:
+                return list(cached[1])
+
+        # One walk at a time. This takes five minutes on the lab's NAS, and two
+        # of them running together — the scan loop's forced walk and a
+        # background refresh — only made each slower. The second caller waits
+        # for the first and takes its result.
+        with self._walk_lock:
+            with self._cand_lock:
+                cached = self._cand_cache
+            if cached and ttl and (time.time() - cached[0]) < ttl:
+                return list(cached[1])
+            return self._walk_now()
+
+    def _settled_jobs(self, child: Path) -> Optional[list[str]]:
+        """A folder's job list, if we can answer without walking it again.
+
+        Once every job a folder offers has been claimed, walking it again
+        discovers nothing — the recordings it holds are the ones we already
+        dispatched. That matters here because the deep walk competes with the
+        analysis for the same network mount: overnight, a scan of 12 folders
+        went from 8 seconds while idle to 46 minutes while Kilosort was reading,
+        and the scanning starved the very jobs it was scanning for.
+
+        Returns None when the folder must be walked — unknown, or still has
+        unclaimed work, so a recording that finished copying can be picked up.
+        """
+        known = self._jobs_cache.get(str(child))
+        if known is None:
+            return None
+        resolved = child.resolve()
+        if all(self.state.is_claimed(self.state_key(resolved, j)) for j in known):
+            return known
+        return None
+
+    def _walk_now(self) -> list[tuple[Path, list[str]]]:
         root = Path(self.cfg.watch_dir)
         if not root.is_dir():
-            return []
-        out: list[tuple[Path, list[str]]] = []
-        for child in sorted(root.iterdir()):
-            if not child.is_dir():
-                continue
-            jobs = self.jobs_for(child)
-            if jobs:
-                out.append((child, jobs))
-        return out
+            found: list[tuple[Path, list[str]]] = []
+        else:
+            started = time.time()
+            found, walked = [], 0
+            for child in sorted(root.iterdir()):
+                if not child.is_dir():
+                    continue
+                jobs = self._settled_jobs(child)
+                if jobs is None:
+                    jobs = self.jobs_for(child)
+                    self._jobs_cache[str(child)] = jobs
+                    walked += 1
+                if jobs:
+                    found.append((child, jobs))
+            elapsed = time.time() - started
+            # A scan that deep-read nothing is the healthy steady state, and
+            # calling five seconds of it "slow" at WARNING level buried the
+            # real problems in the log. Warn only when the scan actually went
+            # to the filesystem and took long enough to matter.
+            if walked and elapsed > 30:
+                LOG.warning("Scanning %s took %s — %d of %d folder(s) needed a "
+                            "full read; the watch directory is slow",
+                            root, _hms(elapsed), walked, len(found))
+            elif elapsed > 5:
+                LOG.debug("Scanned %s in %s (%d of %d folder(s) read)",
+                          root, _hms(elapsed), walked, len(found))
 
-    def candidate_runs(self) -> list[Path]:
-        return [d for d, _ in self.scan_candidates()]
+        with self._cand_lock:
+            self._cand_cache = (time.time(), list(found))
+        return found
+
+    def candidate_runs(self) -> Optional[list[Path]]:
+        """Folders the watcher would consider, or None while unknown.
+
+        This is called by /api/status, which the UI polls every two seconds, so
+        it never walks the tree itself. Walking a 58-folder input directory on
+        a network mount takes over a minute; doing that inside the request
+        handler meant each poll started a walk that outlived the poll interval,
+        the server's thread pool filled with them, and the UI stopped updating
+        entirely — which looks exactly like a hung back end.
+
+        So: serve what the scan loop last cached, and if nothing is cached yet,
+        refresh once in the background and answer None. None means "still
+        looking", which the UI can say honestly; an empty list would claim
+        there is nothing there.
+        """
+        with self._cand_lock:
+            cached = self._cand_cache
+            starting = self._cand_refreshing
+            if cached is None and not starting:
+                self._cand_refreshing = True
+        if cached is not None:
+            return [d for d, _ in cached[1]]
+        if not starting:
+            threading.Thread(target=self._refresh_candidates,
+                             name="candidate-scan", daemon=True).start()
+        return None
+
+    def _refresh_candidates(self) -> None:
+        try:
+            self.scan_candidates(max_age=0)
+        except Exception:                                   # noqa: BLE001
+            LOG.exception("Background scan of %s failed", self.cfg.watch_dir)
+        finally:
+            with self._cand_lock:
+                self._cand_refreshing = False
 
     @staticmethod
     def state_key(run_dir: Path, job: str) -> str:
@@ -574,7 +1116,9 @@ class Watcher:
         return f"{run_dir}::{job}"
 
     def scan_once(self) -> None:
-        for run_dir, jobs in self.scan_candidates():
+        # Forced fresh: this is the call that decides whether to dispatch, so
+        # it must see the directory as it is now, not as it was a poll ago.
+        for run_dir, jobs in self.scan_candidates(max_age=0):
             resolved = run_dir.resolve()
             pending = [j for j in jobs
                        if not self.state.is_claimed(self.state_key(resolved, j))]
@@ -689,17 +1233,19 @@ class Watcher:
         cmd = [self.cfg.python, str(ACTIVITY_SCRIPT), str(run_dir),
                "--assay-subfolder", self.cfg.activity_subfolder,
                "--active-hz", str(self.cfg.activity_active_hz)]
-        out = self.cfg.activity_out
+        out = self.cfg.activity_out_for(run_dir)
         if out:
             cmd += ["--output-dir", out]
         if not self.cfg.activity_figures:
             cmd.append("--no-figures")
 
-        # If a Network recording exists alongside, overlay which electrodes it
-        # kept — that is the selection-bias view, and it is free to compute.
+        # Overlay which electrodes the Network recording kept — the
+        # selection-bias view. Each scan is matched to the Network recording on
+        # its own chip; passing one file for the whole folder compared every
+        # chip with the first chip's selection.
         net = find_recordings(run_dir, self.cfg.h5_glob, self.cfg.assay_subfolder)
-        if net:
-            cmd += ["--selection-from", str(net[0])]
+        if net and self.cfg.assay_subfolder:
+            cmd += ["--selection-auto", "--network-subfolder", self.cfg.assay_subfolder]
         return cmd
 
     def dispatch(self, run_dir: Path, job: str = JOB_NETWORK, detail: str = "") -> None:
@@ -720,6 +1266,7 @@ class Watcher:
                                   detail="environment problem, not a data problem",
                                   error=msg)
                 self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
+                self._batch_finished(key)
                 return
         cmd = self.build_command(run_dir, job)
         printable = " ".join(shlex.quote(c) for c in cmd)
@@ -732,6 +1279,7 @@ class Watcher:
             self.state.update(key, status="detected", detected_at=_now(), **{
                 **common, "detail": f"dry run — {detail}" if detail else "dry run"})
             self.on_event("detected", {"run": run_dir.name, "job": job, "command": printable})
+            self._batch_finished(key)
             return
 
         log_path = self._log_path_for(run_dir, job)
@@ -744,6 +1292,210 @@ class Watcher:
             name=f"mea-{job}-{run_dir.name}", daemon=True,
         ).start()
 
+    def _env_banner(self, cmd: list[str], env: dict) -> list[str]:
+        """What will actually run, resolved — written at the top of each log."""
+        out = [f"# {_now()}  {JOB_LABELS.get('network', '')}".rstrip(),
+               f"# driver interpreter : {cmd[0] if cmd else '?'}"]
+        try:
+            which = subprocess.run(["bash", "-lc", "command -v python3"], env=env,
+                                   capture_output=True, text=True, timeout=30)
+            resolved = which.stdout.strip() or "(not found)"
+        except Exception:                                   # noqa: BLE001
+            resolved = "(could not resolve)"
+        out.append(f"# child 'python3'   : {resolved}")
+        try:
+            chk = subprocess.run(["python3", "-c", "import pandas;print(pandas.__version__)"],
+                                 env=env, capture_output=True, text=True, timeout=120)
+            out.append("# child pandas      : " + (chk.stdout.strip() if chk.returncode == 0
+                       else "MISSING — " + (chk.stderr.strip().splitlines() or ["?"])[-1]))
+        except Exception as exc:                            # noqa: BLE001
+            out.append(f"# child pandas      : could not check ({exc})")
+        out.append("# command           : " + " ".join(shlex.quote(c) for c in cmd))
+        return out
+
+    def _check_child_python(self, interpreter: str,
+                            mods: Optional[tuple] = None) -> Optional[dict]:
+        """What a bare ``python3`` resolves to for the driver's subprocesses."""
+        shim = self._python3_shim(interpreter)
+        env = dict(os.environ)
+        if shim:
+            env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+        names = list(mods or ("pandas",))[:12]
+        code = "import " + ", ".join(names)
+        try:
+            proc = subprocess.run(["python3", "-c", code], env=env, timeout=120,
+                                  capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"ok": False, "error": f"could not run python3: {exc}"}
+        if proc.returncode == 0:
+            return {"ok": True}
+        which = subprocess.run(["bash", "-lc", "command -v python3"], env=env,
+                               capture_output=True, text=True).stdout.strip()
+        missing = [ln.rsplit("'", 2)[-2] for ln in proc.stderr.splitlines()
+                   if "ModuleNotFoundError" in ln and "'" in ln]
+        return {"ok": False,
+                "missing": missing or None,
+                "error": ("the wells would run under "
+                          f"{which or 'an unknown python3'}, which cannot import "
+                          + (", ".join(missing) if missing else "the analysis stack")
+                          + " — the driver launches each well with a bare 'python3'")}
+
+    # A driver interpreter that can see a working GPU, remembered per path so
+    # the check costs one subprocess per server run rather than one per job.
+    _gpu_checked: dict = {}
+
+    def check_gpu(self, interpreter: str = "", force: bool = False) -> dict:
+        """Is the GPU usable by the interpreter the driver will run under?
+
+        Worth asking before dispatching rather than after. When the NVIDIA
+        kernel module and the userspace library fall out of step — which is
+        what a driver package upgrade does to a machine that has not been
+        rebooted — CUDA calls do not fail cleanly. They block. Kilosort then
+        sits on the GPU slot forever and the whole queue stops behind it, with
+        nothing in any log to say why. Asking first turns two silent hours into
+        one sentence.
+        """
+        interpreter = interpreter or self.cfg.driver_python or self.cfg.python
+        if not force and interpreter in self._gpu_checked:
+            return self._gpu_checked[interpreter]
+
+        probe = (
+            "import json, torch\n"
+            "out = {'torch': torch.__version__, 'built': torch.version.cuda}\n"
+            "try:\n"
+            "    out['available'] = bool(torch.cuda.is_available())\n"
+            "    if out['available']:\n"
+            "        out['name'] = torch.cuda.get_device_name(0)\n"
+            "        free, total = torch.cuda.mem_get_info(0)\n"
+            "        out['free_gb'] = round(free / 2**30, 1)\n"
+            "        out['total_gb'] = round(total / 2**30, 1)\n"
+            "        torch.zeros(64, device='cuda').sum().item()\n"
+            "        out['ok'] = True\n"
+            "    else:\n"
+            "        out['ok'] = False\n"
+            "        out['error'] = 'torch.cuda.is_available() is False'\n"
+            "except Exception as exc:\n"
+            "    out['ok'] = False\n"
+            "    out['error'] = f'{type(exc).__name__}: {exc}'\n"
+            "print(json.dumps(out))\n"
+        )
+        try:
+            # A hung CUDA call is the thing being tested for, so the probe must
+            # have its own deadline or it hangs exactly where the driver does.
+            proc = subprocess.run([interpreter, "-c", probe], timeout=90,
+                                  capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            res = {"ok": False, "error":
+                   "the GPU did not answer within 90s. The NVIDIA kernel module "
+                   "and the installed driver library are usually out of step "
+                   "after an upgrade; check `nvidia-smi` and reboot the machine.",
+                   "hung": True}
+        except (OSError, subprocess.SubprocessError) as exc:
+            res = {"ok": False, "error": f"could not run the GPU check: {exc}"}
+        else:
+            if proc.returncode == 0 and proc.stdout.strip():
+                try:
+                    res = json.loads(proc.stdout.strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    res = {"ok": False, "error": "the GPU check returned nothing usable"}
+            else:
+                tail = (proc.stderr.strip().splitlines() or ["no output"])[-1]
+                res = {"ok": False, "error": f"the GPU check failed: {tail}"}
+
+        res["interpreter"] = interpreter
+        res["checked_at"] = _now()
+        self._gpu_checked[interpreter] = res
+        if res.get("ok"):
+            LOG.info("GPU ready: %s, %.1f/%.1f GB free",
+                     res.get("name", "?"), res.get("free_gb", 0), res.get("total_gb", 0))
+        else:
+            LOG.error("GPU not usable — %s", res.get("error"))
+        return res
+
+    def _python3_shim(self, interpreter: str) -> Optional[Path]:
+        """A directory whose ``python3`` runs the interpreter we chose.
+
+        A small exec wrapper, not a symlink. A virtualenv's own ``bin/python3``
+        is itself a symlink to the system interpreter, so resolving it — or
+        linking to the resolved target — steps outside the venv and loses every
+        package in it. The wrapper invokes the venv's own path, which is how
+        Python finds ``pyvenv.cfg`` and its site-packages.
+
+        Created under the work directory; nothing is written near the pipeline
+        or the data.
+        """
+        if not interpreter:
+            return None
+        try:
+            target = Path(interpreter).expanduser()
+            if not target.is_absolute():
+                found = shutil.which(interpreter)
+                if not found:
+                    return None
+                target = Path(found)
+            if not target.exists():
+                return None
+
+            # One directory per interpreter. A single shared shim is unsafe:
+            # network jobs use the pipeline interpreter and activity jobs use
+            # this tool's own, so whichever dispatched last rewrote the file and
+            # the other job's subprocesses silently got the wrong environment.
+            tag = hashlib.sha1(str(target).encode()).hexdigest()[:12]
+            shim_dir = self.work_dir / "pybin" / tag
+            shim_dir.mkdir(parents=True, exist_ok=True)
+            wrapper = shim_dir / "python3"
+            body = ("#!/bin/sh\n"
+                    "# Generated by Orchestration-MEA so that a hardcoded\n"
+                    "# \"python3\" in the pipeline runs the configured interpreter.\n"
+                    f'exec {shlex.quote(str(target))} "$@"\n')
+
+            # Replace an earlier version of this shim before reading anything:
+            # it was a symlink to the interpreter binary, and exists() follows
+            # the link, so read_text() decoded an ELF file and raised.
+            if wrapper.is_symlink() or (wrapper.exists() and not wrapper.is_file()):
+                wrapper.unlink()
+            current = None
+            if wrapper.is_file():
+                try:
+                    current = wrapper.read_text()
+                except (OSError, UnicodeDecodeError):
+                    current = None            # unreadable: rewrite it
+            if current != body:
+                wrapper.write_text(body)
+                wrapper.chmod(0o755)
+            return shim_dir
+        except (OSError, ValueError):
+            LOG.warning("Could not create the python3 shim; the driver's "
+                        "subprocesses will use whatever python3 is on PATH",
+                        exc_info=True)
+            return None
+
+    @staticmethod
+    def read_driver_verdict(log_path: Path) -> Optional[str]:
+        """Whether a zero exit code actually meant the wells were analysed.
+
+        ``run_pipeline_driver.py`` launches one subprocess per well and catches
+        CalledProcessError itself — it logs the failure and carries on, then
+        exits 0. So a run where every well died still looks successful from the
+        outside. Reading the driver's own log is the only way to tell, and
+        without it a whole batch reports "done" having produced nothing.
+        """
+        try:
+            text = log_path.read_text(errors="ignore")
+        except OSError:
+            return None
+        launched = text.count("[DRIVER] Launching:")
+        failed = text.count("Subprocess failed for")
+        if launched and failed >= launched:
+            return (f"the driver exited 0 but all {launched} well subprocess(es) "
+                    "failed — see the driver log")
+        if failed:
+            return (f"{failed} of {launched} well subprocess(es) failed "
+                    "— see the driver log")
+        if "No data files found" in text:
+            return "the driver found no recordings to analyse"
+        return None
+
     def _log_path_for(self, run_dir: Path, job: str) -> Path:
         """Where this run's log goes.
 
@@ -752,7 +1504,9 @@ class Watcher:
         """
         name = f"{run_dir.name}_{job}_{datetime.now():%Y%m%d_%H%M%S}.log"
         if self.cfg.logs_in_output:
-            base = self.cfg.activity_out if job == JOB_ACTIVITY else self.cfg.output_dir
+            # Per project, beside that project's results.
+            base = (self.cfg.activity_out_for(run_dir) if job == JOB_ACTIVITY
+                    else self.cfg.project_dir(run_dir))
             if base:
                 try:
                     d = Path(base) / "orchestration_logs"
@@ -765,12 +1519,367 @@ class Watcher:
                     LOG.warning("Cannot write logs to %s (%s); using %s", base, exc, self.log_dir)
         return self.log_dir / name
 
+    def _kill_tree(self, proc: "subprocess.Popen") -> None:
+        """End the driver and every well it spawned.
+
+        The driver launches one child per well. Killing only the driver leaves
+        those children holding VRAM, which is exactly the state the cooldown
+        exists to avoid, so the whole process group goes — TERM first, so a
+        child can close its HDF5 file, then KILL for whatever ignored it.
+        """
+        import signal
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError, AttributeError):
+            pgid = None
+
+        def send(sig):
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, sig)
+                    return
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                proc.send_signal(sig)
+            except (ProcessLookupError, OSError):
+                pass
+
+        send(signal.SIGTERM)
+        try:
+            proc.wait(timeout=max(1, self.cfg.kill_grace_seconds))
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        send(signal.SIGKILL)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            LOG.error("pid %s did not die even after SIGKILL", proc.pid)
+
+    def _supervise(self, cmd: list[str], env: dict, fh, log_path: Path,
+                   run_name: str, label: str, key: str) -> tuple[int, Optional[str]]:
+        """Run the driver, watching for a hang. Returns (returncode, stall reason).
+
+        A crash is easy: the process exits and the log says why. A hang says
+        nothing at all — the run sits at "Running" for hours, and because the
+        GPU slot is only released when the job ends, every queued job behind it
+        waits too. So progress is judged by whether the log is still growing,
+        and a job that has gone quiet is killed and reported rather than left.
+        """
+        stall_s = max(0, self.cfg.stall_minutes) * 60
+        cap_s = max(0.0, self.cfg.max_runtime_hours) * 3600
+        started = time.time()
+
+        proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                                env=env, start_new_session=True)
+        with self._active_lock:
+            self._own_pids.add(proc.pid)
+        LOG.info("%s [%s] pid %s started", run_name, label, proc.pid)
+
+        last_size, last_change = -1, time.time()
+        note_at = 0.0
+        while True:
+            try:
+                rc = proc.wait(timeout=30)
+                return rc, None
+            except subprocess.TimeoutExpired:
+                pass
+
+            if self._halt.is_set():
+                LOG.warning("%s [%s] shutting down — ending pid %s",
+                            run_name, label, proc.pid)
+                self._kill_tree(proc)
+                return -1, ("cancelled — the watcher was stopped while this job "
+                            "was running. Finished wells kept their checkpoints, "
+                            "so re-running repeats only the well in flight.")
+
+            now = time.time()
+            try:
+                size = log_path.stat().st_size
+            except OSError:
+                size = last_size
+            if size != last_size:
+                last_size, last_change = size, now
+
+            quiet = now - last_change
+            elapsed = now - started
+
+            # Keep the UI honest about a long, legitimately quiet run.
+            if now - note_at >= 60:
+                note_at = now
+                self.state.update(key, detail=(
+                    f"running {_hms(elapsed)} · last log output "
+                    f"{_hms(quiet)} ago"))
+
+            if stall_s and quiet > stall_s:
+                self._kill_tree(proc)
+                return proc.returncode or -1, (
+                    f"no output for {_hms(quiet)} — the job was stopped as stuck "
+                    f"after running {_hms(elapsed)}. Check {log_path.name} for "
+                    "where it stopped: an unresponsive GPU and a saturated "
+                    "input mount both look like this from here.")
+            if cap_s and elapsed > cap_s:
+                self._kill_tree(proc)
+                return proc.returncode or -1, (
+                    f"still running after {_hms(elapsed)}, past the "
+                    f"{self.cfg.max_runtime_hours:g}h limit — stopped.")
+
+    # mea_checkpoint.ProcessingStage.SORTING_COMPLETE. Below this the pipeline
+    # re-runs the sorter; at or above it, it reads sorter_output back to resume.
+    SORTING_COMPLETE = 4
+
+    def _output_roots_for(self, run_dir: Path) -> list[Path]:
+        """The output folders belonging to one input run folder.
+
+        The driver writes to <output>/<project>/<date>/..., so this narrows to
+        the matching date folder instead of reading the whole output tree —
+        which on this NAS is the difference between a glob and several minutes.
+        """
+        base = self.cfg.output_dir
+        if not base:
+            return []
+        root = Path(base)
+        found = [p for p in root.glob(f"*/{run_dir.name}") if p.is_dir()]
+        direct = root / run_dir.name
+        if direct.is_dir():
+            found.append(direct)
+        return found
+
+    def clear_stale_sorter_output(self, run_dir: Path) -> list[str]:
+        """Move aside sorter_output folders that would break the next run.
+
+        SpikeInterface is called with remove_existing_folder=True, so before
+        sorting a well it does shutil.rmtree(sorter_output) with no error
+        handling. On this network mount that raises
+
+            OSError: [Errno 39] Directory not empty: 'sorter_output'
+
+        and the well exits 1. Because the pipeline resumes from its checkpoint,
+        it reaches that same line within seconds on every retry — so a well
+        that hits this once fails identically forever. That is what cost 8 of
+        21 wells on 260818 and 5 of 27 on 260821.
+
+        Renaming is the fix rather than a better rmtree: a rename does not need
+        the directory to be empty, so it succeeds whatever is holding those
+        entries — an open handle, an NFS silly-rename leftover, or a directory
+        listing the client has not caught up with. Deleting the renamed folder
+        is then best-effort, because by that point nothing depends on it.
+
+        Only folders whose checkpoint says sorting did NOT complete are moved.
+        At or past SORTING_COMPLETE the pipeline reads sorter_output back to
+        resume, and removing it would throw away hours of finished GPU work.
+        """
+        roots = self._output_roots_for(run_dir)
+        if not roots:
+            return []
+        try:
+            rows = checkpoints.read_checkpoints(roots, run_dir=run_dir)
+        except Exception:                                   # noqa: BLE001
+            LOG.exception("Could not read checkpoints under %s", roots)
+            return []
+
+        moved: list[str] = []
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        for rec in rows:
+            if int(rec.get("stage") or 0) >= self.SORTING_COMPLETE:
+                continue
+            out = rec.get("output_dir")
+            if not out:
+                continue
+            folder = Path(out) / "sorter_output"
+            if not folder.is_dir():
+                continue
+            aside = folder.with_name(f"sorter_output.stale-{stamp}")
+            try:
+                folder.rename(aside)
+            except OSError as exc:
+                LOG.warning("Could not move aside %s (%s); the well may fail "
+                            "when the sorter tries to clear it", folder, exc)
+                continue
+            moved.append(str(folder))
+            try:
+                shutil.rmtree(aside)
+            except OSError as exc:
+                LOG.info("Moved %s aside but could not delete it (%s); it is "
+                         "out of the way and safe to remove later", aside, exc)
+        if moved:
+            LOG.info("%s: cleared %d unfinished sorter_output folder(s) left by "
+                     "a previous run", run_dir.name, len(moved))
+        return moved
+
+    def _mirror(self, src: Path, dst: Path) -> None:
+        """Copy a tree onto another, preferring rsync.
+
+        rsync restarts cleanly and skips files that are already identical,
+        which matters when the destination is a slow mount and the same run is
+        copied back more than once.
+        """
+        dst.mkdir(parents=True, exist_ok=True)
+        rsync = shutil.which("rsync")
+        if rsync:
+            proc = subprocess.run(
+                [rsync, "-a", "--partial", f"{src}{os.sep}", f"{dst}{os.sep}"],
+                capture_output=True, text=True)
+            if proc.returncode == 0:
+                return
+            LOG.warning("rsync failed (%s); falling back to a plain copy",
+                        (proc.stderr.strip().splitlines() or ["?"])[-1])
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+
+    def _scratch_root(self) -> Path:
+        return Path(self.cfg.scratch_dir or (Path(self.cfg.work_dir) / "scratch"))
+
+    # One well's float32 binary against the size of the whole .h5 it came from.
+    #
+    # Measured, not derived: 260903/M07037/Network/000095 is 26 GB on disk and
+    # produced an 81 GB binary for a single well — a ratio of 3.1 against the
+    # *entire* file, not against one well's share of it. The MaxWell .h5 is
+    # compressed, so its size on disk says very little about the uncompressed
+    # working set, and dividing by the well count (the obvious thing, which I
+    # did first) underestimates by roughly six times.
+    #
+    # Rounded up from 3.1, because this decides whether it is safe to write to
+    # a shared volume at 99% full, and the cost of guessing low there falls on
+    # other people.
+    BINARY_VS_RAW = 3.5
+
+    def _staging_estimate_gb(self, run_dir: Path) -> float:
+        """Roughly how much scratch one well of this run needs.
+
+        Only one well's working set exists at a time — --clean-up removes the
+        binary and sorter_output as each well finishes — so the peak is set by
+        the largest single recording, not by the run as a whole.
+        """
+        try:
+            recs = find_recordings(run_dir, self.cfg.h5_glob,
+                                   self.cfg.subfolder_for(JOB_NETWORK))
+            biggest = max((p.stat().st_size for p in recs), default=0)
+        except OSError:
+            return float("inf")            # unknown size: decline to stage
+        return biggest * self.BINARY_VS_RAW / 2**30
+
+    def _stage_in(self, run_dir: Path) -> Optional[tuple[Path, list[str]]]:
+        """Prepare a local output directory, returning it and the patched flag.
+
+        Existing results for this run are copied down first, so the pipeline's
+        checkpoints still resume — otherwise staging would silently re-run
+        wells that had already finished.
+        """
+        # <scratch>/<project>/<date>: dates repeat across projects, and a
+        # shared <scratch>/<date> would let one job delete another's live
+        # scratch below.
+        local = self._scratch_root() / self.cfg.project_of(run_dir) / run_dir.name
+        try:
+            if local.exists():
+                shutil.rmtree(local, ignore_errors=True)
+            local.mkdir(parents=True, exist_ok=True)
+            need_gb = self._staging_estimate_gb(run_dir)
+            floor = max(0, self.cfg.stage_min_free_gb)
+            with self._stage_lock:
+                free_gb = shutil.disk_usage(local).free / 2**30
+                reserved = sum(self._stage_reserved.values())
+                fits = free_gb - reserved - need_gb >= floor
+                if fits:
+                    self._stage_reserved[str(local)] = need_gb
+            # Outside the lock: _remove_scratch takes it too.
+            if not fits:
+                LOG.warning(
+                    "%s: not staging — %.0f GB free at %s, %.0f GB already promised "
+                    "to other staged runs, this run needs about %.0f GB, and %d GB "
+                    "must stay free. Running against the output directory instead "
+                    "(slower, but it cannot fill the disk).", run_dir.name, free_gb,
+                    self._scratch_root(), reserved, need_gb, floor)
+                self._remove_scratch(local)
+                return None
+            LOG.info("%s: staging locally — %.0f GB free, %.0f GB promised elsewhere, "
+                     "about %.0f GB needed", run_dir.name, free_gb, reserved, need_gb)
+            for existing in self._output_roots_for(run_dir):
+                # <output>/<project>/<date>  ->  <local>/<project>/<date>
+                rel = existing.relative_to(Path(self.cfg.output_dir))
+                LOG.info("%s: copying previous results down to %s",
+                         run_dir.name, local / rel)
+                self._mirror(existing, local / rel)
+        except OSError as exc:
+            LOG.warning("%s: could not prepare local staging (%s); running "
+                        "against the output directory directly", run_dir.name, exc)
+            self._remove_scratch(local)
+            return None
+        return local, []
+
+    def _remove_scratch(self, local: Path) -> None:
+        """Delete one run's scratch, release its reservation, and remove the
+        project folder and scratch root once nothing else is staged there.
+
+        Only ever touches paths inside the configured scratch root: the run's
+        own folder unconditionally, its parents only if empty (rmdir).
+        """
+        with self._stage_lock:
+            self._stage_reserved.pop(str(local), None)
+        root = self._scratch_root().resolve()
+        try:
+            target = local.resolve()
+        except OSError:
+            return
+        if root not in target.parents:
+            LOG.error("Refusing to delete %s: not inside the scratch root %s", target, root)
+            return
+        shutil.rmtree(target, ignore_errors=True)
+        for d in (target.parent, root):
+            if d == root.parent:
+                break
+            try:
+                d.rmdir()                      # only succeeds when empty
+            except OSError:
+                break
+
+    def _stage_out(self, run_dir: Path, local: Path) -> None:
+        """Copy staged results to the real output directory and clean up.
+
+        Runs whether or not the job succeeded: a killed or failed run still
+        leaves checkpoints and finished wells worth keeping, and discarding
+        them would mean redoing that work.
+        """
+        dest = Path(self.cfg.output_dir)
+        try:
+            LOG.info("%s: copying results to %s", run_dir.name, dest)
+            started = time.time()
+            self._mirror(local, dest)
+            LOG.info("%s: results copied in %s", run_dir.name,
+                     _hms(time.time() - started))
+        except (OSError, shutil.Error) as exc:
+            LOG.error("%s: could not copy staged results to %s (%s). They are "
+                      "kept at %s — copy them across before re-running, or "
+                      "that work is repeated.", run_dir.name, dest, exc, local)
+            with self._stage_lock:
+                self._stage_reserved.pop(str(local), None)
+            return
+        self._remove_scratch(local)
+        LOG.info("%s: scratch at %s deleted", run_dir.name, local)
+
     def _run_job(self, run_dir: Path, job: str, key: str,
                  cmd: list[str], log_path: Path) -> None:
         label = JOB_LABELS.get(job, job)
         slot = self._slots.get(job)
         limit = (self.cfg.max_concurrent_network if job == JOB_NETWORK
                  else self.cfg.max_concurrent_activity)
+
+        # Check the GPU before taking the slot, not after. A job that fails
+        # here has not blocked anything; one that hangs after taking the slot
+        # blocks every job behind it.
+        # Spike detection without sorting never touches the GPU, so a broken
+        # driver must not block it.
+        sorting = not self.cfg.driver_options.get("skip_spikesorting")
+        if job == JOB_NETWORK and sorting and not self.cfg.dry_run:
+            gpu = self.check_gpu(cmd[0] if cmd else "")
+            if not gpu.get("ok"):
+                msg = ("the GPU is not usable, so spike sorting was not started — "
+                       + str(gpu.get("error", "unknown reason")))
+                self.state.update(key, status="failed", completed_at=_now(), error=msg)
+                LOG.error("%s [%s] %s", run_dir.name, label, msg)
+                self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
+                self._batch_finished(key)
+                return
 
         # Wait for a slot before starting. Kilosort4 reserves many GB of VRAM,
         # so two concurrent Network jobs OOM on a single GPU. The run stays
@@ -783,12 +1892,12 @@ class Watcher:
             self.state.update(key, detail=f"queued — waiting for a free {label.lower()} slot")
             self.on_event("queued", {"run": run_dir.name, "job": job})
             wait = max(1, self.cfg.queue_poll_seconds)
-            while not self._stop.is_set():
+            while not self._halt.is_set():
                 if slot.acquire(timeout=wait):
                     break
             else:
                 self.state.update(key, status="failed", completed_at=_now(),
-                                  error="watcher stopped before the job could start")
+                                  error="server shut down before the job could start")
                 return
 
             # Let the previous job's GPU memory actually be reclaimed.
@@ -796,7 +1905,38 @@ class Watcher:
             if cool > 0:
                 LOG.info("%s [%s] waiting %ss for GPU memory to free", run_dir.name, label, cool)
                 self.state.update(key, detail=f"starting in {cool}s (GPU cooldown)")
-                self._stop.wait(cool)
+                self._halt.wait(cool)
+
+        # After the slot is held, so nothing else is writing into this run's
+        # output while folders are moved, and before the driver starts, since
+        # it hits the sorter within seconds when resuming from a checkpoint.
+        if job == JOB_NETWORK and not self.cfg.dry_run:
+            try:
+                self.clear_stale_sorter_output(run_dir)
+            except Exception:                               # noqa: BLE001
+                LOG.exception("%s: clearing stale sorter output failed; "
+                              "continuing to the run anyway", run_dir.name)
+
+        staged: Optional[Path] = None
+        if job == JOB_NETWORK and self.cfg.stage_locally and not self.cfg.dry_run:
+            prepared = self._stage_in(run_dir)
+            if prepared:
+                staged, _ = prepared
+                cmd = [str(staged) if c == str(self.cfg.output_dir) else c
+                       for c in cmd]
+                if str(staged) not in cmd:
+                    # The flag is built from driver_options, so the path should
+                    # appear verbatim. If it does not, staging would run the job
+                    # against the NAS while pretending otherwise — say so and
+                    # fall back rather than quietly doing the slow thing.
+                    LOG.warning("%s: could not point the driver at %s; running "
+                                "against the output directory instead",
+                                run_dir.name, staged)
+                    self._remove_scratch(staged)
+                    staged = None
+                else:
+                    self.state.update(key, detail=f"staged on local disk: {staged}")
+                    LOG.info("%s [%s] staging output at %s", run_dir.name, label, staged)
 
         started = time.time()
         with self._active_lock:
@@ -808,32 +1948,205 @@ class Watcher:
             # Reduces CUDA fragmentation, which is what the allocator suggests
             # after an OOM. Harmless for the CPU-only activity scan.
             env.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
+            # run_pipeline_driver.py launches each well with a bare "python3"
+            # resolved from PATH, so choosing the interpreter for the driver is
+            # not enough — its children would still get whichever python3 the
+            # service happens to see and die on the first import.
+            #
+            # Prepending the interpreter's own bin directory is not reliable:
+            # a virtualenv may expose only "python" or "python3.11", and then
+            # "python3" still falls through to /usr/bin. So point a shim
+            # directory's "python3" at the exact interpreter and put that first.
+            shim = self._python3_shim(cmd[0] if cmd else "")
+            if shim:
+                env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+                venv = Path(cmd[0]).expanduser().parent.parent
+                if (venv / "pyvenv.cfg").is_file():
+                    env["VIRTUAL_ENV"] = str(venv)
+                    env.pop("PYTHONHOME", None)
+
             with open(log_path, "w") as fh:
-                proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
-                                      check=False, env=env)
-            ok = proc.returncode == 0
+                # Header first: every failure so far has come down to which
+                # interpreter ran what, and that was invisible in every log.
+                for line in self._env_banner(cmd, env):
+                    fh.write(line + "\n")
+                fh.write("-" * 72 + "\n")
+                fh.flush()
+                rc, stall = self._supervise(cmd, env, fh, log_path,
+                                            run_dir.name, label, key)
+            if stall:
+                self.state.update(key, status="failed", completed_at=_now(),
+                                  returncode=rc, error=stall,
+                                  duration_s=round(time.time() - started, 1))
+                LOG.error("%s [%s] %s (log: %s)", run_dir.name, label, stall, log_path)
+                self.on_event("failed", {"run": run_dir.name, "job": job,
+                                         "error": stall})
+                return
+            ok = rc == 0
+            # A zero exit code is necessary but not sufficient: the driver
+            # reports success even when every well failed.
+            verdict = self.read_driver_verdict(log_path) if ok else None
+            all_failed = bool(verdict and verdict.startswith("the driver exited 0 but all"))
+            if verdict:
+                LOG.warning("%s [%s]: %s", run_dir.name, label, verdict)
+            if all_failed or (verdict and verdict.startswith("the driver found no")):
+                ok = False
             self.state.update(
                 key,
                 status="done" if ok else "failed",
                 completed_at=_now(),
-                returncode=proc.returncode,
+                returncode=rc,
+                error=verdict if verdict and not ok else None,
+                detail=verdict if verdict and ok else None,
                 duration_s=round(time.time() - started, 1),
             )
             (LOG.info if ok else LOG.error)(
                 "%s [%s] finished with code %s (log: %s)",
-                run_dir.name, label, proc.returncode, log_path)
+                run_dir.name, label, rc, log_path)
             self.on_event("done" if ok else "failed",
-                          {"run": run_dir.name, "job": job, "returncode": proc.returncode})
+                          {"run": run_dir.name, "job": job, "returncode": rc})
         except Exception as exc:  # noqa: BLE001
             self.state.update(key, status="failed", completed_at=_now(), error=str(exc))
             LOG.exception("%s [%s]: dispatch raised", run_dir.name, label)
             self.on_event("failed", {"run": run_dir.name, "job": job, "error": str(exc)})
         finally:
+            # Before the slot is released: the copy is this run's own work, and
+            # letting the next Kilosort job start on top of it would put both
+            # on the mount at once.
+            if staged is not None:
+                try:
+                    self._stage_out(run_dir, staged)
+                except Exception:                           # noqa: BLE001
+                    LOG.exception("%s: copying staged results back failed; they "
+                                  "are still at %s", run_dir.name, staged)
             # Always release, so one crashed job cannot deadlock the queue.
             with self._active_lock:
                 self._active[job] = max(0, self._active.get(job, 1) - 1)
             if slot is not None:
                 slot.release()
+            # Terminal either way — a failed job must still close its batch, or
+            # the batch would never finish and no report would ever be built.
+            self._batch_finished(key)
+
+    # -- queueing ------------------------------------------------------------ #
+    TERMINAL = {"done", "failed"}
+
+    def inspect_folders(self, paths: list[str]) -> list[dict]:
+        """What would happen to each folder if it were queued now.
+
+        Lets the UI show "already analysed" before anything is started, rather
+        than silently skipping folders after the fact.
+        """
+        out: list[dict] = []
+        for raw in paths:
+            d = Path(raw).expanduser()
+            row: dict[str, Any] = {"path": str(d), "name": d.name, "jobs": [],
+                                   "exists": d.is_dir()}
+            if not row["exists"]:
+                row["note"] = "folder not found"
+                out.append(row)
+                continue
+            jobs = self.jobs_for(d)
+            if not jobs:
+                row["note"] = "no recording found for the enabled analyses"
+                out.append(row)
+                continue
+            for job in jobs:
+                st = self.state.status(self.state_key(d.resolve(), job))
+                row["jobs"].append({"job": job, "label": JOB_LABELS.get(job, job),
+                                    "status": st or "new",
+                                    "already_done": st in self.TERMINAL})
+            out.append(row)
+        return out
+
+    def queue_folders(self, paths: list[str], rerun: bool = False,
+                      on_complete: Optional[Callable[[dict], None]] = None) -> dict:
+        """Queue folders for analysis, and track them as one batch.
+
+        Folders already analysed are skipped unless `rerun` is asked for: a
+        Network job is an hour of GPU time, so re-running one must be a choice
+        rather than a side effect of selecting a folder twice.
+        """
+        batch_id = f"batch-{int(time.time())}-{len(self._batches) + 1}"
+        queued: list[dict] = []
+        skipped: list[dict] = []
+
+        for raw in paths:
+            d = Path(raw).expanduser()
+            if not d.is_dir():
+                skipped.append({"path": str(d), "reason": "folder not found"})
+                continue
+            jobs = self.jobs_for(d)
+            if not jobs:
+                skipped.append({"path": str(d),
+                                "reason": "no recording for the enabled analyses"})
+                continue
+            for job in jobs:
+                key = self.state_key(d.resolve(), job)
+                status = self.state.status(key)
+                if status in self.TERMINAL and not rerun:
+                    skipped.append({"path": str(d), "job": job,
+                                    "reason": f"already {status}"})
+                    continue
+                if status in ("detected", "dispatched", "running", "queued"):
+                    skipped.append({"path": str(d), "job": job,
+                                    "reason": f"already {status}"})
+                    continue
+                if rerun and status is not None:
+                    self.state.reset(key)
+                queued.append({"path": str(d), "job": job, "key": key,
+                               "name": d.name})
+
+        if queued:
+            with self._batch_lock:
+                self._batches[batch_id] = {
+                    "id": batch_id,
+                    "keys": {q["key"] for q in queued},
+                    "pending": {q["key"] for q in queued},
+                    "created_at": _now(),
+                    "finished": False,
+                    "on_complete": on_complete or self.on_batch_done,
+                }
+            LOG.info("Queued %d job(s) as %s: %s", len(queued), batch_id,
+                     ", ".join(sorted({q["name"] for q in queued})))
+            for q in queued:
+                self.dispatch(Path(q["path"]), q["job"], detail="queued by hand")
+
+        return {"batch": batch_id if queued else None,
+                "queued": queued, "skipped": skipped}
+
+    def _batch_finished(self, key: str) -> None:
+        """Mark one job done within its batch; fire the hook on the last one."""
+        ready: list[dict] = []
+        with self._batch_lock:
+            for batch in self._batches.values():
+                if batch["finished"] or key not in batch["pending"]:
+                    continue
+                batch["pending"].discard(key)
+                if not batch["pending"]:
+                    batch["finished"] = True
+                    batch["completed_at"] = _now()
+                    ready.append(batch)
+        for batch in ready:
+            hook = batch.get("on_complete")
+            LOG.info("Batch %s complete (%d job(s))", batch["id"], len(batch["keys"]))
+            self.on_event("batch_done", {"batch": batch["id"],
+                                         "jobs": len(batch["keys"])})
+            if hook:
+                # Never let a reporting failure look like an analysis failure.
+                try:
+                    threading.Thread(target=hook, args=(batch,),
+                                     name=f"mea-{batch['id']}-report",
+                                     daemon=True).start()
+                except Exception:  # noqa: BLE001
+                    LOG.exception("Could not start the batch-completion hook")
+
+    def batches(self) -> list[dict]:
+        with self._batch_lock:
+            return [{k: (sorted(v) if isinstance(v, set) else v)
+                     for k, v in b.items() if k != "on_complete"}
+                    for b in self._batches.values()]
 
     # -- status for the UI --------------------------------------------------- #
     def snapshot(self) -> dict[str, Any]:
@@ -873,6 +2186,19 @@ class Watcher:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _hms(seconds: float) -> str:
+    """A duration a person can read at a glance: 9m, 1h 12m, 2h."""
+    s = int(max(0, seconds))
+    h, m = s // 3600, (s % 3600) // 60
+    if h and m:
+        return f"{h}h {m}m"
+    if h:
+        return f"{h}h"
+    if m:
+        return f"{m}m"
+    return f"{s}s"
 
 
 # --------------------------------------------------------------------------- #

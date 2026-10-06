@@ -7,6 +7,12 @@ ActivityScan extraction that the pipeline itself does not perform.
 Drives [`MEA-Analysis`](https://github.com/hiteshkumar18/MEA-Analysis) without
 modifying it.
 
+**Running this on real data?** Read
+[docs/FIELD-NOTES.md](docs/FIELD-NOTES.md) first. It covers where the time
+actually goes, the failure modes seen in production and why each fix is shaped
+the way it is, a debugging playbook, and the handful of things that look like
+bugs but are not.
+
 ---
 
 ## Relationship to MEA-Analysis
@@ -134,16 +140,28 @@ still get the full window.
 |---|---|---|
 | Runs | `run_pipeline_driver.py` (external) | `orchestration/activity_scan.py` |
 | Reads | `<chip>/Network/<run>/data.raw.h5` | `<chip>/ActivityScan/<run>/data.raw.h5` |
-| Does | Kilosort4, curation, bursts | Whole-array maps, QC, network bursts |
-| Needs | GPU; hours per chip | CPU only; seconds per chip |
+| Does | Spike detection + bursts (default), or Kilosort4 + curation | Whole-array maps, QC, network bursts |
+| Needs | CPU; minutes per well (GPU and ~1 h/well with sorting on) | CPU only; seconds per chip |
+
+**Spike sorting is off by default.** Network jobs run the driver with
+`--skip-spikesorting`: threshold-crossing detection and burst analysis per
+electrode channel, no GPU. Untick *Skip spike sorting* under Configuration →
+Sorting to run Kilosort4 instead. With sorting off the GPU check is skipped, and
+a well counts as complete once its `network_results.json` exists — the
+pipeline does not advance the checkpoint past preprocessing in this mode.
 
 They are enabled separately, tracked separately, and fail independently. Each
 appears as its own row in the UI.
 
-**Concurrency is per analysis type.** Kilosort4 reserves several GB of VRAM, so
-two Network jobs on one GPU will OOM. The default limit is 1; extra jobs queue
-and show as **Queued**. A configurable GPU cooldown covers the case where CUDA
-has not released memory by the time the next job starts.
+**Concurrency is per analysis type.** Extra jobs queue and show as **Queued**,
+and a configurable GPU cooldown covers CUDA not having released memory by the
+time the next job starts.
+
+How many Network jobs fit at once depends on the card, so measure rather than
+assume. On an RTX 5090 this dataset peaks at 7.7 GB of 31.4 and leaves the GPU
+idle about two thirds of the time while it waits on data, so two jobs fit
+comfortably and the second largely fills the first one's gaps — see
+[docs/FIELD-NOTES.md](docs/FIELD-NOTES.md#2-concurrency).
 
 ### ActivityScan analysis
 
@@ -188,6 +206,75 @@ per-well trajectories, and per-timepoint comparisons. Scans are a better basis
 for this than Network recordings, which use a different electrode selection each
 session and so compare different samples of the array.
 
+### AI report handoff
+
+This tool does not write reports. When analysis finishes it prepares a
+**handoff folder** for an AI assistant, which writes the report:
+
+```
+<output>/AI_HANDOFF/<timestamp>[_<batch>]/
+    PROMPT.md        the request, with exact paths — the file you give the AI
+    skills.md        what the data is, what every metric means, and the rules
+    REQUIREMENTS.md  your requirements, from the UI's text box
+    MANIFEST.json    every result file in scope, per well
+    report/          where the AI writes the report
+```
+
+Type the study's requirements once in the **AI report** panel; they are saved
+with the configuration and copied into every handoff. A handoff is prepared
+automatically when a queued batch finishes (covering that batch's folders), or
+on demand for all results. Then, on this server:
+
+```bash
+cd <output>/AI_HANDOFF/<timestamp> && claude "Read PROMPT.md and do what it says."
+```
+
+`orchestration/skills/skills.md` is the default skills file — edit it to change
+what every future report does by default. Its rules (numbers only from files,
+the well as the unit of replication, never write outside `report/`, the input
+folder is read-only) are not overridden by requirements.
+
+```bash
+python orchestration/handoff.py /path/to/output --folder /input/260903 --requirements @req.md
+```
+
+### Queue
+
+Folders can be queued explicitly rather than waiting for detection — select
+them, and the AI handoff is prepared automatically when the batch completes.
+Already-analysed folders are reported as such before anything starts rather than
+silently skipped.
+
+### Output location matters more than anything else
+
+The pipeline uses `--output-dir` as **scratch**, not just as a results
+destination: it writes an uncompressed float32 copy of each recording there and
+reads it back repeatedly. Measured on this dataset, one well of a 26 GB
+recording produces an **81 GB** working file.
+
+Put the output directory on a **local disk**. With it on a network mount, the
+GPU sat at 0% while the machine pushed ~324 GB per well over CIFS, and heavy
+folders took ~90 min/well instead of ~57.
+
+If the output genuinely has to live on a network path, turn on **local staging**
+(Configuration → Execution): the job runs against local scratch and the results
+are copied back when the folder finishes. It declines rather than filling a
+volume below `stage_min_free_gb`.
+
+### Stopping
+
+Two controls, because they do different things:
+
+* **Stop scanning** — ends detection and dispatch. Jobs already running carry
+  on. Right when changing settings mid-run.
+* **Stop & cancel** — also ends jobs in flight, killing whole process groups.
+  Finished wells keep their checkpoints, so this costs the well in progress and
+  nothing else.
+
+Never `pkill -f run_pipeline_driver` on its own: it leaves every per-well
+subprocess running and orphaned, which is how two processes end up writing the
+same output folder.
+
 ---
 
 ## Command line
@@ -217,15 +304,42 @@ setup.sh             one-time: virtualenv, dependencies, config
 run.sh               start the UI
 config.env           per-machine settings (not committed)
 orchestration/
-  watcher.py         completion detection and dispatch
+  watcher.py         completion detection, dispatch, queue, staging, watchdog
   api.py             FastAPI backend
-  static/index.html  single-file UI, no build step
+  static/app.jsx     UI source (React/JSX)
+  static/app.js      compiled UI — generated by `npm run build` in tests/
+  static/index.html  page shell and styles
+  static/vendor/     React, served locally (no CDN)
   driver_schema.py   mirror of the driver's CLI options
   mea_repo.py        locates MEA-Analysis, checks the contract
   checkpoints.py     per-well status from pipeline checkpoints
   activity_scan.py   whole-array ActivityScan analysis
   activity_trends.py cross-session aggregation
+  handoff.py         prepares the AI report handoff folder
+  skills/skills.md   default skills file given to the AI with every handoff
+  tabular.py         finds tables inside lab-notebook spreadsheets
+  explore.py         those tables to figures and an HTML report
+tests/
+  build_ui.js        compiles app.jsx → app.js (`npm run build`)
+  render_ui.js       renders app.js headlessly; fails if the page is blank
+  click_ui.js        opens the Wells and Log panels and checks the same
+docs/
+  FIELD-NOTES.md     performance findings, failure modes, debugging playbook
 ```
+
+### Before changing the UI
+
+Edit `orchestration/static/app.jsx`, never `app.js`. The browser loads the
+compiled `app.js`; it used to download Babel (~3 MB) from a CDN and compile the
+whole UI on every page load. Rebuild and test after every change:
+
+```bash
+cd tests && npm install && npm run build && npm test
+```
+
+`npm test` fails if `app.js` is stale. A runtime error blanks the entire page
+with nothing in the server log, and parsing is not enough — both failures so far
+parsed perfectly.
 
 ## Requirements
 
@@ -244,7 +358,11 @@ uncompressed spike data.
 ## Known limitations
 
 * The UI has no authentication — reach it over an SSH tunnel.
-* Report/slide generation from pipeline output is not implemented yet.
+* The analyzer stage (~37% of per-well time) runs on a single core, because no
+  CLI flag reaches SpikeInterface's `n_jobs`. Fixing it needs a change in
+  MEA-Analysis, which is deliberately not modified — see
+  [docs/FIELD-NOTES.md](docs/FIELD-NOTES.md#6-known-measured-not-fixed).
+* Delivery to OneDrive is discussed but not implemented.
 * ActivityScan metrics are electrode-level, not sorted units; correlation and
   synchrony are computed within a recording block only, since electrodes in
   different blocks were never recorded simultaneously.
