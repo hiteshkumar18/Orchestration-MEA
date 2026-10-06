@@ -95,7 +95,13 @@ found. The layouts are:
 `network_results.json` exists. A checkpoint with `error` set is a failed well:
 quote the first line of the error in the QC section. `ValueError: n_samples=…
 should be >= n_clusters=…` means the well had almost no spikes — a biological
-result (silent well), not a software fault.
+result (silent well), not a software fault. `stream_id wellNNN is not in
+['well…']` means the driver asked for a well that this recording file does not
+contain — the well was not recorded in that run; report it as "not recorded",
+not as a failed analysis. A checkpoint stuck below completion with no `error`
+means the well's process stopped without reporting why; take the reason from
+the date's driver log in `<output>/<project>/orchestration_logs/` when it is
+there, and say "stopped without an error" when it is not.
 
 **`network_results.json`** top level:
 
@@ -126,6 +132,38 @@ Inside each `metrics` block (values marked † are `{mean, std, cv}` across burs
 
 If `diagnostics.burst_detection_valid` is 0 or `burst_count` is 0, report the
 well as "no network bursts detected", not as zero-valued metrics.
+
+**Check before trusting burst metrics.** `burst_detection_valid: 1` does not
+mean the bursts are real. Plot the participation signal in
+`network_plot_data.npz` (`time_s`, `participation_fraction_signal`,
+`nb_peak_times_s`) for every well and look. Flag a well's burst metrics as
+unreliable, keep it in every table, and leave it out of pooled plots and
+correlations, when any of these holds:
+
+* more than **60 network bursts per minute** (over one per second): the
+  detector is riding on noise fluctuations — peaks spread densely over a flat
+  trace, not discrete events;
+* fewer than **10 spiking channels**: participation is a fraction of a handful
+  of channels and jumps in big steps (often pinned near 1.0);
+* no network bursts.
+
+State these criteria in the report. Do not draw the detection threshold from
+`diagnostics` on the participation plot: its scale is not that of the signal,
+and peaks appear below it.
+
+**Noisy channels.** In detection-only mode a few channels often fire at
+hundreds to thousands of Hz for the whole recording — not neuronal. Count
+channels with a mean rate above **100 Hz** per well and the share of the well's
+spikes they carry (spike counts per channel from `spike_times.npy`,
+`np.load(..., allow_pickle=True).item()`, a dict channel → spike times in s).
+They inflate total spikes, `spike_count_per_burst` and population firing rates;
+burst *detection* works on participation and is much less affected. Report
+them; do not exclude wells for them alone. Use medians, not means, for
+per-well channel firing rates.
+
+**Recording length** is not always in `network_results.json` (`fs`,
+`duration_s` are missing in some outputs). Derive it as spikes ÷
+`mean_firing_rate_hz` per channel (median across channels), and say so.
 
 **`unit_stats.csv`** — one row per unit: `mean_firing_rate_hz`, `cv_isi`,
 `cv2`, `lv` (local variation; ~1 Poisson, <1 regular, >1 bursty),
@@ -162,6 +200,16 @@ fraction bursty) before comparing wells.
 | `network_burst_rate_hz`, `network_burst_count`, `burst_duration_mean_s`, `spikes_per_burst_mean`, `pct_spikes_in_bursts`, `interburst_interval_mean_s` | | bursts detected within scan blocks |
 | `correlation_mean/median/p95/max`, `mean_degree`, `functional_electrodes` | | functional connectivity, within block only |
 | `qc`, `qc_reasons` | `pass`/`warn`/`fail` | per-well quality verdict and why |
+
+**Electrode-selection fields** (`selected_electrodes`, `selected_active_fraction`,
+`selected_rate_mean_hz`, `selection_enrichment`, `captured_activity_fraction`,
+`selection_recall`, `selection_efficiency`, `selection_quality`) compare the
+scan with the electrodes chosen for a Network recording. Check
+`summary.json` → `selection_source`: it must be a Network recording **on the
+same chip** (same `<chip_id>` folder). If it is missing, absent, or names
+another chip, do not report the selection fields for that run — say why.
+Older scans have no `selection_source`; treat their selection fields as
+unverified.
 
 ActivityScan bursts and correlations are computed over ~30 s blocks, so they
 are **not** comparable in absolute value to Network-recording bursts. Report
@@ -216,9 +264,13 @@ trajectories; use a mixed model only if the requirements ask for it.
 2. Load the results listed in the manifest into one table per level (well,
    unit, ActivityScan well). Check counts against the manifest before
    analysing — if they disagree, say so in the report.
-3. Decide groups: from the requirements first; otherwise ActivityScan
+3. **Look before summarising.** Render the participation traces and a few
+   per-well figures and check them by eye; apply the reliability checks in
+   §3a and the selection check in §3b. A number that is computed correctly
+   from a bad detection is still a bad number.
+4. Decide groups: from the requirements first; otherwise ActivityScan
    `group`/`control` matched by `chip_id` + well; otherwise by chip. State which.
-4. Build the report, then re-check every number in the text against the table
+5. Build the report, then re-check every number in the text against the table
    it came from.
-5. Finish with a short message listing the report path, what is in it, and
+6. Finish with a short message listing the report path, what is in it, and
    anything you could not do (missing data, ambiguous requirements).

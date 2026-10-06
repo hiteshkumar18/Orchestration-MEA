@@ -144,7 +144,8 @@ def _prompt(hdir: Path, output_dir: Path, activity_dir: Optional[Path],
 def generate(output_dir: Path, requirements: str = "", *,
              watch_dir: str = "", activity_dir: Optional[Path] = None,
              folders: Optional[list[str]] = None, label: str = "",
-             skills_path: Path = DEFAULT_SKILLS) -> dict[str, Any]:
+             skills_path: Path = DEFAULT_SKILLS,
+             handoff_root: Optional[Path] = None) -> dict[str, Any]:
     """Write a handoff folder and return its paths and counts."""
     output_dir = Path(output_dir).expanduser()
     if not output_dir.is_dir():
@@ -161,7 +162,9 @@ def generate(output_dir: Path, requirements: str = "", *,
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"{stamp}_{label}" if label else stamp
-    hdir = output_dir / HANDOFF_DIRNAME / name
+    # Under the project's own folder when given, so handoffs sit with the
+    # results they describe: <output>/<project>/AI_HANDOFF/<stamp>_<label>.
+    hdir = Path(handoff_root or output_dir) / HANDOFF_DIRNAME / name
     (hdir / "report").mkdir(parents=True, exist_ok=False)
 
     shutil.copyfile(skills_path, hdir / "skills.md")

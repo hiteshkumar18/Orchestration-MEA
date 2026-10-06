@@ -428,6 +428,46 @@ def read_selection(path: Path) -> dict[int, set[int]]:
     return out
 
 
+def _chip_dir(h5_path: Path) -> Optional[Path]:
+    """<chip> folder of <session>/<chip>/<assay>/<run>/data.raw.h5, if that deep."""
+    parts = Path(h5_path).parts
+    return Path(h5_path).parents[2] if len(parts) >= 4 else None
+
+
+def find_chip_network(scan_path: Path, network_subfolder: str = "Network",
+                      h5_glob: str = "data.raw.h5", chip_id: str = "") -> Optional[Path]:
+    """The Network recording made on the same chip as this scan.
+
+    Looks only in the scan's own chip folder, so a scan is never compared with
+    another chip's electrode selection. With several Network runs on the chip,
+    takes the first one recorded after the scan (the selection is normally
+    built from the scan just before it), else the latest.
+    """
+    chip = _chip_dir(scan_path)
+    if chip is None:
+        return None
+    # MaxWell sometimes files a recording under a chip folder literally named
+    # "None"; the chip id inside the file is then the only reliable key, and
+    # the Network recording sits in the properly named sibling folder.
+    if not (chip / network_subfolder).is_dir() and chip_id and chip.name != chip_id:
+        chip = chip.parent / chip_id
+    if not (chip / network_subfolder).is_dir():
+        return None
+    runs = sorted(p for p in (chip / network_subfolder).glob(f"*/{h5_glob}") if p.is_file())
+    if not runs:
+        return None
+
+    def num(p: Path) -> int:
+        try:
+            return int(p.parent.name)
+        except ValueError:
+            return -1
+
+    scan_run = num(Path(scan_path))
+    after = [r for r in runs if num(r) > scan_run]
+    return min(after, key=num) if after else max(runs, key=num)
+
+
 def extract_file(path: Path, max_spikes_per_block: int = 0, *,
                  analyze: bool = True, functional: bool = True,
                  max_corr_electrodes: int = 400) -> dict[int, WellActivity]:
@@ -1044,6 +1084,7 @@ def _session_of(h5_path: Path) -> str:
 
 def process_file(h5_path: Path, out_dir: Path, *, figures: bool = True,
                  active_hz: float = 0.05, selection_from: Optional[Path] = None,
+                 selection_auto: Optional[str] = None,
                  max_spikes_per_block: int = 0, analyze: bool = True,
                  functional: bool = True, max_corr_electrodes: int = 400) -> dict[str, Any]:
     """Extract, measure, plot, and write everything for a single recording."""
@@ -1055,7 +1096,6 @@ def process_file(h5_path: Path, out_dir: Path, *, figures: bool = True,
         LOG.warning("No readable recording blocks in %s", h5_path)
         return {}
 
-    selection = read_selection(selection_from) if selection_from else {}
 
     run_id, chip_id, script_id = h5_path.parent.name, "", ""
     try:
@@ -1068,6 +1108,23 @@ def process_file(h5_path: Path, out_dir: Path, *, figures: bool = True,
                 chip_id = _s(_first(f["wellplate/id"]))
     except Exception:  # noqa: BLE001
         pass
+
+    # The selection must come from this chip. Electrode ids are matched by well
+    # number, so another chip's selection yields plausible-looking numbers that
+    # mean nothing — which is what happened when one Network file was passed
+    # for a whole date folder.
+    if selection_from is None and selection_auto:
+        selection_from = find_chip_network(h5_path, selection_auto, chip_id=chip_id)
+        if selection_from is None:
+            LOG.info("  no Network recording on this chip; selection metrics skipped")
+    elif selection_from is not None:
+        own, other = _chip_dir(h5_path), _chip_dir(Path(selection_from))
+        own_name = chip_id or (own.name if own is not None else "")
+        if other is not None and own_name and other.name != own_name:
+            LOG.warning("  --selection-from %s is from chip %s, not %s; selection metrics skipped",
+                        selection_from, other.name, own_name)
+            selection_from = None
+    selection = read_selection(selection_from) if selection_from else {}
 
     # Include the session folder. Run ids restart per session, so the same chip
     # scanned on two dates yields the same chip/run pair and the second scan
@@ -1106,6 +1163,9 @@ def process_file(h5_path: Path, out_dir: Path, *, figures: bool = True,
         "extracted_at": datetime.now(timezone.utc).isoformat(),
         "active_threshold_hz": active_hz,
         "array_electrodes": ARRAY_ELECTRODES,
+        # The Network recording the selection metrics compare against (None:
+        # no selection metrics). Recorded so a reader never has to guess.
+        "selection_source": str(selection_from) if selection else None,
         "wells": [metrics[k] for k in sorted(metrics)],
     }
     (dest / "summary.json").write_text(json.dumps(summary, indent=2))
@@ -1179,7 +1239,12 @@ def main(argv=None) -> None:
     p.add_argument("--active-hz", type=float, default=0.05,
                    help="Firing rate above which an electrode counts as active")
     p.add_argument("--selection-from", type=Path, default=None,
-                   help="Network data.raw.h5 whose electrode selection to overlay")
+                   help="Network data.raw.h5 whose electrode selection to overlay "
+                        "(ignored for scans on a different chip)")
+    p.add_argument("--selection-auto", action="store_true",
+                   help="Overlay each scan with the Network recording on its own chip")
+    p.add_argument("--network-subfolder", default="Network",
+                   help="Assay folder holding Network recordings (for --selection-auto)")
     p.add_argument("--max-spikes-per-block", type=int, default=0,
                    help="Cap spikes read per block (0 = all); useful for a quick look")
     p.add_argument("--no-temporal", action="store_true",
@@ -1213,6 +1278,7 @@ def main(argv=None) -> None:
         try:
             s = process_file(t, a.output_dir, figures=not a.no_figures,
                              active_hz=a.active_hz, selection_from=a.selection_from,
+                             selection_auto=a.network_subfolder if a.selection_auto else None,
                              max_spikes_per_block=a.max_spikes_per_block,
                              analyze=not a.no_temporal,
                              functional=not (a.no_functional or a.no_temporal),

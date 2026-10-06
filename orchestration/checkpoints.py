@@ -53,7 +53,12 @@ def _norm(state: dict, path: Path) -> dict:
     # (stage 2): detection and burst analysis run without saving a stage. The
     # well is finished once its burst results exist beside the checkpoint.
     detection_only = state.get("processing_mode") == "spike_detection_only"
-    out_dir = state.get("output_dir") or str(path.parent.parent)
+    # The well folder is wherever this checkpoint file actually is. The
+    # recorded output_dir goes stale when a run was staged on local scratch
+    # (it names the scratch path, deleted after the results were copied back).
+    here = path.parent.parent
+    recorded = state.get("output_dir")
+    out_dir = recorded if recorded and Path(recorded).is_dir() else str(here)
     detection_done = (detection_only and stage >= 2
                       and (Path(out_dir) / "network_results.json").is_file())
 
@@ -84,7 +89,7 @@ def _norm(state: dict, path: Path) -> dict:
         "error": (str(error)[:600] if error else None),
         "last_updated": state.get("last_updated"),
         "data_dir": state.get("data_dir", ""),
-        "output_dir": state.get("output_dir", ""),
+        "output_dir": out_dir,
         "checkpoint_file": str(path),
     }
 

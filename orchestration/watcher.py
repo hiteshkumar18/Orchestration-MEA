@@ -235,11 +235,30 @@ class JobConfig:
 
     @property
     def activity_out(self) -> Optional[str]:
-        """Resolved output directory for activity-scan results."""
+        """Root of activity-scan results: the configured folder, else the output
+        directory (each project then gets <output>/<project>/ActivityScan)."""
+        return self.activity_output_dir or self.output_dir
+
+    @staticmethod
+    def project_of(run_dir: Path | str) -> str:
+        """Project folder name for a recording folder: <project>/<date>."""
+        return Path(run_dir).resolve().parent.name
+
+    def project_dir(self, run_dir: Path | str) -> Optional[Path]:
+        """<output>/<project> — where everything for this project lands, next
+        to the pipeline's own <output>/<project>/<date>/... results."""
+        return Path(self.output_dir) / self.project_of(run_dir) if self.output_dir else None
+
+    def activity_out_for(self, run_dir: Path | str) -> Optional[str]:
+        """Activity-scan output for one recording folder.
+
+        Kept per project: dates and chip ids repeat across projects (the same
+        chip is reused), so a shared <output>/ActivityScan mixes them.
+        """
         if self.activity_output_dir:
             return self.activity_output_dir
-        base = self.output_dir
-        return str(Path(base) / "ActivityScan") if base else None
+        pd_ = self.project_dir(run_dir)
+        return str(pd_ / "ActivityScan") if pd_ else None
 
     def enabled_jobs(self) -> list[str]:
         jobs = []
@@ -634,6 +653,11 @@ class Watcher:
 
         self._batches: dict[str, dict] = {}
         self._batch_lock = threading.Lock()
+        # Scratch space promised to staged runs still in flight, so two jobs
+        # starting together cannot each pass the free-space check and then
+        # jointly take the disk below stage_min_free_gb.
+        self._stage_reserved: dict[str, float] = {}
+        self._stage_lock = threading.Lock()
         self.on_batch_done: Optional[Callable[[dict], None]] = None
 
     # -- lifecycle ---------------------------------------------------------- #
@@ -1209,17 +1233,19 @@ class Watcher:
         cmd = [self.cfg.python, str(ACTIVITY_SCRIPT), str(run_dir),
                "--assay-subfolder", self.cfg.activity_subfolder,
                "--active-hz", str(self.cfg.activity_active_hz)]
-        out = self.cfg.activity_out
+        out = self.cfg.activity_out_for(run_dir)
         if out:
             cmd += ["--output-dir", out]
         if not self.cfg.activity_figures:
             cmd.append("--no-figures")
 
-        # If a Network recording exists alongside, overlay which electrodes it
-        # kept — that is the selection-bias view, and it is free to compute.
+        # Overlay which electrodes the Network recording kept — the
+        # selection-bias view. Each scan is matched to the Network recording on
+        # its own chip; passing one file for the whole folder compared every
+        # chip with the first chip's selection.
         net = find_recordings(run_dir, self.cfg.h5_glob, self.cfg.assay_subfolder)
-        if net:
-            cmd += ["--selection-from", str(net[0])]
+        if net and self.cfg.assay_subfolder:
+            cmd += ["--selection-auto", "--network-subfolder", self.cfg.assay_subfolder]
         return cmd
 
     def dispatch(self, run_dir: Path, job: str = JOB_NETWORK, detail: str = "") -> None:
@@ -1478,7 +1504,9 @@ class Watcher:
         """
         name = f"{run_dir.name}_{job}_{datetime.now():%Y%m%d_%H%M%S}.log"
         if self.cfg.logs_in_output:
-            base = self.cfg.activity_out if job == JOB_ACTIVITY else self.cfg.output_dir
+            # Per project, beside that project's results.
+            base = (self.cfg.activity_out_for(run_dir) if job == JOB_ACTIVITY
+                    else self.cfg.project_dir(run_dir))
             if base:
                 try:
                     d = Path(base) / "orchestration_logs"
@@ -1738,25 +1766,34 @@ class Watcher:
         checkpoints still resume — otherwise staging would silently re-run
         wells that had already finished.
         """
-        local = self._scratch_root() / run_dir.name
+        # <scratch>/<project>/<date>: dates repeat across projects, and a
+        # shared <scratch>/<date> would let one job delete another's live
+        # scratch below.
+        local = self._scratch_root() / self.cfg.project_of(run_dir) / run_dir.name
         try:
             if local.exists():
                 shutil.rmtree(local, ignore_errors=True)
             local.mkdir(parents=True, exist_ok=True)
-            free_gb = shutil.disk_usage(local).free / 2**30
             need_gb = self._staging_estimate_gb(run_dir)
             floor = max(0, self.cfg.stage_min_free_gb)
-            if free_gb - need_gb < floor:
+            with self._stage_lock:
+                free_gb = shutil.disk_usage(local).free / 2**30
+                reserved = sum(self._stage_reserved.values())
+                fits = free_gb - reserved - need_gb >= floor
+                if fits:
+                    self._stage_reserved[str(local)] = need_gb
+            # Outside the lock: _remove_scratch takes it too.
+            if not fits:
                 LOG.warning(
-                    "%s: not staging — %.0f GB free at %s, this run needs about "
-                    "%.0f GB, and %d GB must stay free. Running against the "
-                    "output directory instead (slower, but it cannot fill the "
-                    "disk).", run_dir.name, free_gb, self._scratch_root(),
-                    need_gb, floor)
-                shutil.rmtree(local, ignore_errors=True)
+                    "%s: not staging — %.0f GB free at %s, %.0f GB already promised "
+                    "to other staged runs, this run needs about %.0f GB, and %d GB "
+                    "must stay free. Running against the output directory instead "
+                    "(slower, but it cannot fill the disk).", run_dir.name, free_gb,
+                    self._scratch_root(), reserved, need_gb, floor)
+                self._remove_scratch(local)
                 return None
-            LOG.info("%s: staging locally — %.0f GB free, about %.0f GB needed",
-                     run_dir.name, free_gb, need_gb)
+            LOG.info("%s: staging locally — %.0f GB free, %.0f GB promised elsewhere, "
+                     "about %.0f GB needed", run_dir.name, free_gb, reserved, need_gb)
             for existing in self._output_roots_for(run_dir):
                 # <output>/<project>/<date>  ->  <local>/<project>/<date>
                 rel = existing.relative_to(Path(self.cfg.output_dir))
@@ -1766,8 +1803,35 @@ class Watcher:
         except OSError as exc:
             LOG.warning("%s: could not prepare local staging (%s); running "
                         "against the output directory directly", run_dir.name, exc)
+            self._remove_scratch(local)
             return None
         return local, []
+
+    def _remove_scratch(self, local: Path) -> None:
+        """Delete one run's scratch, release its reservation, and remove the
+        project folder and scratch root once nothing else is staged there.
+
+        Only ever touches paths inside the configured scratch root: the run's
+        own folder unconditionally, its parents only if empty (rmdir).
+        """
+        with self._stage_lock:
+            self._stage_reserved.pop(str(local), None)
+        root = self._scratch_root().resolve()
+        try:
+            target = local.resolve()
+        except OSError:
+            return
+        if root not in target.parents:
+            LOG.error("Refusing to delete %s: not inside the scratch root %s", target, root)
+            return
+        shutil.rmtree(target, ignore_errors=True)
+        for d in (target.parent, root):
+            if d == root.parent:
+                break
+            try:
+                d.rmdir()                      # only succeeds when empty
+            except OSError:
+                break
 
     def _stage_out(self, run_dir: Path, local: Path) -> None:
         """Copy staged results to the real output directory and clean up.
@@ -1787,8 +1851,11 @@ class Watcher:
             LOG.error("%s: could not copy staged results to %s (%s). They are "
                       "kept at %s — copy them across before re-running, or "
                       "that work is repeated.", run_dir.name, dest, exc, local)
+            with self._stage_lock:
+                self._stage_reserved.pop(str(local), None)
             return
-        shutil.rmtree(local, ignore_errors=True)
+        self._remove_scratch(local)
+        LOG.info("%s: scratch at %s deleted", run_dir.name, local)
 
     def _run_job(self, run_dir: Path, job: str, key: str,
                  cmd: list[str], log_path: Path) -> None:
@@ -1865,7 +1932,7 @@ class Watcher:
                     LOG.warning("%s: could not point the driver at %s; running "
                                 "against the output directory instead",
                                 run_dir.name, staged)
-                    shutil.rmtree(staged, ignore_errors=True)
+                    self._remove_scratch(staged)
                     staged = None
                 else:
                     self.state.update(key, detail=f"staged on local disk: {staged}")

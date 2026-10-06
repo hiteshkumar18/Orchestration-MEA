@@ -693,7 +693,19 @@ def _make_handoff(folders: Optional[list[str]] = None, label: str = "",
     out = cfg.output_dir
     if not out:
         raise ValueError("No output directory is configured.")
-    act = cfg.activity_out
+    # One project per handoff: its activity scans and its handoff folder both
+    # live under <output>/<project>/. Folders from several projects fall back
+    # to the output root.
+    probe_dirs = folders or ([cfg.watch_dir.rstrip("/") + "/x"] if cfg.watch_dir else [])
+    projects = {JobConfig.project_of(f) for f in probe_dirs}
+    if len(projects) == 1 and probe_dirs:
+        act = cfg.activity_out_for(probe_dirs[0])
+        root = cfg.project_dir(probe_dirs[0])
+        # Older outputs kept scans in <output>/ActivityScan.
+        if not (act and Path(act).is_dir()) and (Path(out) / "ActivityScan").is_dir():
+            act = str(Path(out) / "ActivityScan")
+    else:
+        act, root = str(Path(out) / "ActivityScan"), Path(out)
     with HANDOFF_LOCK:
         LAST_HANDOFF.clear()
         LAST_HANDOFF.update({"state": "running", "started": time.time(), "label": label})
@@ -702,7 +714,7 @@ def _make_handoff(folders: Optional[list[str]] = None, label: str = "",
             Path(out), cfg.ai_requirements if requirements is None else requirements,
             watch_dir=cfg.watch_dir,
             activity_dir=Path(act) if act and Path(act).is_dir() else None,
-            folders=folders, label=label)
+            folders=folders, label=label, handoff_root=root)
     except Exception as exc:  # noqa: BLE001
         with HANDOFF_LOCK:
             LAST_HANDOFF.update({"state": "error", "error": str(exc), "finished": time.time()})
