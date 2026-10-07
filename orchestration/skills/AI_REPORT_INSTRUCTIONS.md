@@ -1,5 +1,9 @@
 # Instructions for the AI: making MEA reports
 
+<!-- Master copy. The control server writes this file into the results folder
+     each time watching starts or dates are queued, with {{RESULTS_FOLDER}}
+     filled in. Edit the master in the repo, not the copy. -->
+
 You are helping a lab member get a report on their multi-electrode array (MEA)
 experiments. They are scientists, not programmers. They will usually give you
 little more than a project or a results folder and the dates they care about.
@@ -36,8 +40,8 @@ Read this whole file before doing anything. Then read
 
 | What | Path |
 |---|---|
-| Results (all projects) | `/mnt/Vol20tb2/hitesh_mea_analysis/spike_detection/` |
-| One project's results | `/mnt/Vol20tb2/hitesh_mea_analysis/spike_detection/<project>/` |
+| Results (all projects) | `{{RESULTS_FOLDER}}/` |
+| One project's results | `{{RESULTS_FOLDER}}/<project>/` |
 | Report command | `/mnt/Vol20tb1/user_workspaces/hitesh/Orchestration-MEA/orchestration/report/make_report.py` |
 | Python to use | `/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python` |
 | What each measurement means | `/mnt/Vol20tb1/user_workspaces/hitesh/Orchestration-MEA/orchestration/skills/skills.md` |
@@ -65,7 +69,7 @@ Set these once (replace `<project>`):
 ```bash
 PY=/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python
 MR=/mnt/Vol20tb1/user_workspaces/hitesh/Orchestration-MEA/orchestration/report/make_report.py
-P=/mnt/Vol20tb2/hitesh_mea_analysis/spike_detection/<project>
+P={{RESULTS_FOLDER}}/<project>
 ```
 
 **Step 1 — see what exists.**

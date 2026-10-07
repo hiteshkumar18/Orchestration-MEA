@@ -68,6 +68,9 @@ LOG = logging.getLogger("mea.watcher")
 # This repo (Orchestration-MEA), not the analysis repo.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ACTIVITY_SCRIPT = Path(__file__).resolve().parent / "activity_scan.py"
+# What a lab member points their AI at to get a report. Written into the
+# output folder (whichever it is at the time) by place_report_instructions().
+REPORT_INSTRUCTIONS = Path(__file__).resolve().parent / "skills" / "AI_REPORT_INSTRUCTIONS.md"
 
 # The MEA-Analysis checkout is external and located at runtime — see mea_repo.py.
 def _default_driver() -> str:
@@ -803,9 +806,34 @@ class Watcher:
             LOG.warning("=" * 70)
         return found
 
+    def place_report_instructions(self) -> Optional[Path]:
+        """Write AI_REPORT_INSTRUCTIONS.md into the current output folder.
+
+        The output folder changes between runs, so this happens every time
+        watching starts or dates are queued, with that folder's path filled in.
+        Rewritten only when the content differs. Never fails the caller.
+        """
+        out = self.cfg.output_dir
+        if not out or not REPORT_INSTRUCTIONS.is_file():
+            return None
+        try:
+            dest = Path(out) / REPORT_INSTRUCTIONS.name
+            if self.cfg.watch_dir and path_is_within(dest, self.cfg.watch_dir):
+                return None                      # the input folder is read-only
+            text = REPORT_INSTRUCTIONS.read_text().replace("{{RESULTS_FOLDER}}", str(Path(out)))
+            Path(out).mkdir(parents=True, exist_ok=True)
+            if not dest.exists() or dest.read_text() != text:
+                dest.write_text(text)
+                LOG.info("Report instructions for AI written to %s", dest)
+            return dest
+        except OSError as exc:
+            LOG.warning("Could not write the report instructions into %s (%s)", out, exc)
+            return None
+
     def start(self) -> None:
         if self.is_running:
             return
+        self.place_report_instructions()
         # Before anything is dispatched, while there is still time to act.
         self.warn_about_foreign_pipelines()
         self._stop.clear()
@@ -2090,6 +2118,7 @@ class Watcher:
         Network job is an hour of GPU time, so re-running one must be a choice
         rather than a side effect of selecting a folder twice.
         """
+        self.place_report_instructions()
         batch_id = f"batch-{int(time.time())}-{len(self._batches) + 1}"
         queued: list[dict] = []
         skipped: list[dict] = []

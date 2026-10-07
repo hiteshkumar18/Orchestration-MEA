@@ -261,7 +261,9 @@ $PY orchestration/report/make_report.py --project-dir <results>/<project> --date
 One date gives the standard two-tab report (`orchestration/report/build_report.py`);
 several dates give the same report per date plus an overview with trends. Reports
 go to `<project>/AI_HANDOFF/<stamp>_<label>/report/` and appear in the UI's
-**AI report** tab. Keep the copy beside the results in step with the master.
+**AI report** tab. The server writes the instructions into the current output
+folder every time watching starts or dates are queued, with that folder's path
+filled in, so edit only the master.
 
 ### Queue
 
