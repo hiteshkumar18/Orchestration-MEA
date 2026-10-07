@@ -238,6 +238,31 @@ folder is read-only) are not overridden by requirements.
 python orchestration/handoff.py /path/to/output --folder /input/260903 --requirements @req.md
 ```
 
+### Reports for lab users (any AI on the server)
+
+Lab members get reports by pointing an AI that runs on the analysis computer
+(Claude Code, or ChatGPT's Codex CLI) at one file:
+
+```
+Please read /mnt/Vol20tb2/hitesh_mea_analysis/spike_detection/AI_REPORT_INSTRUCTIONS.md
+and follow it. I'd like a report on <project> for <dates>.
+```
+
+The file (master copy: `orchestration/skills/AI_REPORT_INSTRUCTIONS.md`) tells
+the AI the rules, where results are, and to run the standard report command,
+then check and explain the result in plain language:
+
+```bash
+PY=/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python
+$PY orchestration/report/make_report.py --project-dir <results>/<project> --list
+$PY orchestration/report/make_report.py --project-dir <results>/<project> --dates 260821 260825
+```
+
+One date gives the standard two-tab report (`orchestration/report/build_report.py`);
+several dates give the same report per date plus an overview with trends. Reports
+go to `<project>/AI_HANDOFF/<stamp>_<label>/report/` and appear in the UI's
+**AI report** tab. Keep the copy beside the results in step with the master.
+
 ### Queue
 
 Folders can be queued explicitly rather than waiting for detection — select
