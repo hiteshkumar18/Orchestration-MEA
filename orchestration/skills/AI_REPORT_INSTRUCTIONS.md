@@ -1,25 +1,26 @@
 # Instructions for the AI: making MEA reports
 
-<!-- Master copy. The control server writes this file into the results folder
-     each time watching starts or dates are queued, with {{RESULTS_FOLDER}}
-     filled in. Edit the master in the repo, not the copy. -->
-
 You are helping a lab member get a report on their multi-electrode array (MEA)
-experiments. They are scientists, not programmers. They will usually give you
-little more than a project or a results folder and the dates they care about.
-Your job: produce the lab's **standard report** for those dates, check it, and
-explain what it shows in plain language.
+experiments. They are scientists, not programmers. They will give you this file
+and an **output folder** (where the analysis results are), usually with little
+more than a project name and the dates they care about. Your job: produce the
+lab's **standard report** for those dates, check it, and explain what it shows
+in plain language.
+
+If they did not tell you the output folder, ask for it. Everything below is
+relative to that folder.
 
 Read this whole file before doing anything. Then read
-`orchestration/skills/skills.md` (path below) for what every measurement means.
+`report_tools/skills.md` (inside the output folder) for what every measurement
+means.
 
 ---
 
 ## 1. Rules — always
 
-1. **Never change, move or delete existing files.** The raw recordings
-   (`/mnt/benshalom-nas/...`) and the analysis results are read-only to you.
-   Every report goes into a *new* folder, which the report command creates.
+1. **Never change, move or delete existing files.** The raw recordings and the
+   analysis results are read-only to you. Every report goes into a *new* folder,
+   which the report command creates.
 2. **Do not run analyses, stop jobs, restart services, or touch other people's
    folders or processes.** Only make reports.
 3. **Use the standard report command (§3).** Do not write your own version of
@@ -36,46 +37,36 @@ Read this whole file before doing anything. Then read
 
 ---
 
-## 2. Where things are
-
-| What | Path |
-|---|---|
-| Results (all projects) | `{{RESULTS_FOLDER}}/` |
-| One project's results | `{{RESULTS_FOLDER}}/<project>/` |
-| Report command | `/mnt/Vol20tb1/user_workspaces/hitesh/Orchestration-MEA/orchestration/report/make_report.py` |
-| Python to use | `/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python` |
-| What each measurement means | `/mnt/Vol20tb1/user_workspaces/hitesh/Orchestration-MEA/orchestration/skills/skills.md` |
-
-Current projects: `IPN_Organoids_08142026_PVS`, `B6J_09092026_PVS`. List the
-results folder to see others.
-
-Inside a project folder (read-only):
+## 2. What is in the output folder
 
 ```
-<project>/<YYMMDD>/<chip>/Network/<run>/<well>/   Network analysis results per well
-<project>/ActivityScan/<YYMMDD>/<chip>/<run>/     Activity scan results per chip
-<project>/orchestration_logs/                      analysis logs per date
-<project>/AI_HANDOFF/<timestamp>_<label>/report/   finished reports (yours go here too)
+report_tools/make_report      the report command (already set up — just run it)
+report_tools/skills.md        what every measurement means
+<project>/                    one folder per project, e.g. IPN_Organoids_08142026_PVS
+  <YYMMDD>/<chip>/Network/<run>/<well>/    Network analysis results per well
+  ActivityScan/<YYMMDD>/<chip>/<run>/      Activity scan results per chip
+  orchestration_logs/                      analysis logs per date
+  AI_HANDOFF/<timestamp>_<label>/report/   finished reports (yours go here too)
 ```
 
 Dates are folder names in `YYMMDD` form: `260821` is 21 August 2026.
+
+The user may give you the output folder itself (it contains `report_tools` and
+one or more project folders) or a single project folder inside it (it contains
+date folders). If it is a project folder, `report_tools` is in the folder above it.
 
 ---
 
 ## 3. How to make a report
 
-Set these once (replace `<project>`):
-
-```bash
-PY=/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python
-MR=/mnt/Vol20tb1/user_workspaces/hitesh/Orchestration-MEA/orchestration/report/make_report.py
-P={{RESULTS_FOLDER}}/<project>
-```
+Run every command from the output folder. `<project>` is the project folder's
+name; list the output folder to see the projects and ask the user which one if
+there is more than one.
 
 **Step 1 — see what exists.**
 
 ```bash
-$PY $MR --project-dir $P --list
+report_tools/make_report --project-dir <project> --list
 ```
 
 This prints every date with results, whether its analysis has **finished**, and
@@ -86,9 +77,9 @@ were vague ("the latest", "all of September", "everything").
 **Step 2 — make the report.** Pick one:
 
 ```bash
-$PY $MR --project-dir $P --dates 260821                       # one date
-$PY $MR --project-dir $P --dates 260818 260821 260825         # several dates
-$PY $MR --project-dir $P --all                                # every finished date
+report_tools/make_report --project-dir <project> --dates 260821                 # one date
+report_tools/make_report --project-dir <project> --dates 260818 260821 260825   # several dates
+report_tools/make_report --project-dir <project> --all                          # every finished date
 ```
 
 Add `--requirements "…"` to record any extra wishes the user stated (they are
@@ -115,7 +106,7 @@ Confirm the well counts look right and note any wells flagged in QC.
 **Step 4 — tell the user.** Reply with:
 
 1. Where the report is: the path, and that it also appears in the control page
-   (`http://localhost:8000`, **AI report** tab, "Open report").
+   (the **AI report** tab, "Open report").
 2. Five to eight plain-language bullets on what it shows, each with its number
    and n, taken from the tables — e.g. "Network bursts in 19 of 27 wells, about
    13 per minute (median across wells)".
@@ -157,7 +148,7 @@ Make the standard report first, then add to it — never change it.
   tables, and a short `README.md` saying what each file is.
 * Work from the report's CSV tables where possible; they already apply the QC
   flags. Read raw result files only when the tables lack what you need
-  (layouts in skills.md §3).
+  (layouts in `report_tools/skills.md` §3).
 * Follow the rules in §1 and the statistics guidance in skills.md (per-well
   values, n stated, describe when n < 3).
 * Typical requests: compare named groups of chips or wells (ask which chips are
@@ -194,5 +185,5 @@ Make the standard report first, then add to it — never change it.
 | `Not finished yet: …` | The analysis is still running or waiting. Offer the finished dates, or a partial report if the user insists (`--allow-unfinished`). |
 | `control server not reachable` in `--list` | Status unknown, so nothing is refused. Say the status could not be checked. |
 | `FAILED <date>` | The report for that date could not be built. Show the user the last lines of the error and stop — do not try to repair the analysis or the script. |
-| `ModuleNotFoundError` | You used the wrong Python. Use the one in §2. |
+| `report_tools/make_report: not found` | You are not in the output folder, or it was given as a project folder — use `../report_tools/make_report`. If `report_tools` is missing, ask the user to start watching once in the control page (it writes the folder), and stop. |
 | Folder already exists | Use a different `--label`, or let the command choose the name. |

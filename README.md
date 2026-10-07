@@ -240,30 +240,30 @@ python orchestration/handoff.py /path/to/output --folder /input/260903 --require
 
 ### Reports for lab users (any AI on the server)
 
-Lab members get reports by pointing an AI that runs on the analysis computer
-(Claude Code, or ChatGPT's Codex CLI) at one file:
+Lab members get reports by giving an AI that runs on the analysis computer
+(Claude Code, or ChatGPT's Codex CLI) two things: the instructions file and the
+output folder.
 
 ```
-Please read /mnt/Vol20tb2/hitesh_mea_analysis/spike_detection/AI_REPORT_INSTRUCTIONS.md
-and follow it. I'd like a report on <project> for <dates>.
+Instructions: <output folder>/AI_REPORT_INSTRUCTIONS.md — output folder: <output folder>.
+Please make me a report on <project> for <dates>.
 ```
 
-The file (master copy: `orchestration/skills/AI_REPORT_INSTRUCTIONS.md`) tells
-the AI the rules, where results are, and to run the standard report command,
-then check and explain the result in plain language:
+Every time watching starts or dates are queued, the server writes a small kit
+into the current output folder:
 
-```bash
-PY=/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python
-$PY orchestration/report/make_report.py --project-dir <results>/<project> --list
-$PY orchestration/report/make_report.py --project-dir <results>/<project> --dates 260821 260825
+```
+AI_REPORT_INSTRUCTIONS.md   what the AI must do — contains no paths
+report_tools/make_report    launcher: this machine's Python + orchestration/report/make_report.py
+report_tools/skills.md      what every measurement means
 ```
 
-One date gives the standard two-tab report (`orchestration/report/build_report.py`);
-several dates give the same report per date plus an overview with trends. Reports
-go to `<project>/AI_HANDOFF/<stamp>_<label>/report/` and appear in the UI's
-**AI report** tab. The server writes the instructions into the current output
-folder every time watching starts or dates are queued, with that folder's path
-filled in, so edit only the master.
+Edit only the masters in `orchestration/skills/`. The AI runs, from the output
+folder, `report_tools/make_report --project-dir <project> --list`, then
+`--dates …` or `--all`. One date gives the standard two-tab report
+(`orchestration/report/build_report.py`); several dates give it per date plus an
+overview with trends. Reports go to `<project>/AI_HANDOFF/<stamp>_<label>/report/`
+and appear in the UI's **AI report** tab.
 
 ### Queue
 

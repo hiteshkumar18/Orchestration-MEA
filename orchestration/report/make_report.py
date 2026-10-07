@@ -246,6 +246,11 @@ def main() -> None:
     pdir = a.project_dir.expanduser().resolve()
     if not pdir.is_dir():
         sys.exit(f"Not a folder: {pdir}")
+    if not any(DATE_RE.match(x.name) for x in pdir.iterdir() if x.is_dir()):
+        projects = [x.name for x in sorted(pdir.iterdir())
+                    if x.is_dir() and any(DATE_RE.match(y.name) for y in x.iterdir() if y.is_dir())]
+        if projects:
+            sys.exit(f"{pdir} holds projects, not dates. Use --project-dir with one of: " + ", ".join(projects))
     have = available_dates(pdir)
     state = analysis_state(pdir.name)
     if a.list:

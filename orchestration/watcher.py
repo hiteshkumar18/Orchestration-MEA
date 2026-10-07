@@ -807,27 +807,42 @@ class Watcher:
         return found
 
     def place_report_instructions(self) -> Optional[Path]:
-        """Write AI_REPORT_INSTRUCTIONS.md into the current output folder.
+        """Put the AI report kit into the current output folder.
 
-        The output folder changes between runs, so this happens every time
-        watching starts or dates are queued, with that folder's path filled in.
-        Rewritten only when the content differs. Never fails the caller.
+        Writes AI_REPORT_INSTRUCTIONS.md (no paths in it) and report_tools/:
+        make_report, a launcher with this machine's Python and report script,
+        and skills.md. The output folder changes between runs, so this happens
+        every time watching starts or dates are queued. Files are rewritten only
+        when they differ. Never written inside the input folder; never fails
+        the caller.
         """
         out = self.cfg.output_dir
         if not out or not REPORT_INSTRUCTIONS.is_file():
             return None
         try:
-            dest = Path(out) / REPORT_INSTRUCTIONS.name
-            if self.cfg.watch_dir and path_is_within(dest, self.cfg.watch_dir):
+            root = Path(out)
+            if self.cfg.watch_dir and path_is_within(root, self.cfg.watch_dir):
                 return None                      # the input folder is read-only
-            text = REPORT_INSTRUCTIONS.read_text().replace("{{RESULTS_FOLDER}}", str(Path(out)))
-            Path(out).mkdir(parents=True, exist_ok=True)
-            if not dest.exists() or dest.read_text() != text:
-                dest.write_text(text)
-                LOG.info("Report instructions for AI written to %s", dest)
-            return dest
+            tools = root / "report_tools"
+            tools.mkdir(parents=True, exist_ok=True)
+            script = REPORT_INSTRUCTIONS.parent.parent / "report" / "make_report.py"
+            files = {
+                root / REPORT_INSTRUCTIONS.name: REPORT_INSTRUCTIONS.read_text(),
+                tools / "skills.md": (REPORT_INSTRUCTIONS.parent / "skills.md").read_text(),
+                tools / "make_report": (
+                    "#!/bin/sh\n"
+                    "# Written by Orchestration-MEA: runs the lab's standard MEA report with\n"
+                    "# the Python that has its libraries. See AI_REPORT_INSTRUCTIONS.md.\n"
+                    f'exec "{self.cfg.resolve_driver_python()}" "{script}" "$@"\n'),
+            }
+            for dest, text in files.items():
+                if not dest.exists() or dest.read_text() != text:
+                    dest.write_text(text)
+                    LOG.info("Report kit for AI: wrote %s", dest)
+            (tools / "make_report").chmod(0o755)
+            return root / REPORT_INSTRUCTIONS.name
         except OSError as exc:
-            LOG.warning("Could not write the report instructions into %s (%s)", out, exc)
+            LOG.warning("Could not write the report kit into %s (%s)", out, exc)
             return None
 
     def start(self) -> None:
