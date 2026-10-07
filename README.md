@@ -7,6 +7,10 @@ ActivityScan extraction that the pipeline itself does not perform.
 Drives [`MEA-Analysis`](https://github.com/hiteshkumar18/MEA-Analysis) without
 modifying it.
 
+**New lab member, not a programmer?** Start with the step-by-step
+[user guide](docs/USER-GUIDE.md): installing, opening the control page,
+analysing recordings and getting reports from an AI.
+
 **Running this on real data?** Read
 [docs/FIELD-NOTES.md](docs/FIELD-NOTES.md) first. It covers where the time
 actually goes, the failure modes seen in production and why each fix is shaped
