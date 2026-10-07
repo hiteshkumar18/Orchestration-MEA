@@ -56,8 +56,8 @@ const dur=s=>{if(s==null)return"";if(s<60)return`${Math.round(s)} s`;const m=s/6
 // One status word per job, in the operator's language.
 const JOB={
   running:   {say:"Analysing",          k:"run"},
-  dispatched:{say:"In line",            k:"line"},
-  queued:    {say:"In line",            k:"line"},
+  dispatched:{say:"In line",            k:"queue"},
+  queued:    {say:"In line",            k:"queue"},
   waiting:   {say:"Waiting for copy",   k:"wait"},
   detected:  {say:"Found (test mode)",  k:"wait"},
   interrupted:{say:"Paused — will resume",k:"wait"},
@@ -92,6 +92,8 @@ function plainNote(job){
     return {t:`Copy looks finished — confirming for ${Math.ceil(s/60)} more min`,k:""};}
   if(/waiting for MaxWell 'finished' marker/i.test(d))return{t:"Waiting for the recording to be marked finished",k:""};
   if(/queued — waiting/i.test(d))return{t:"Waiting for a free slot",k:""};
+  m=/^running (.+?) · last log output (.+)$/.exec(d);
+  if(m)return{t:`Running for ${m[1].replace(/(\d+)h/,"$1 h ").replace(/(\d+)m/,"$1 min")} · last activity ${m[2].replace(/(\d+)m ago/,"$1 min ago").replace(/(\d+)s ago/,"$1 s ago")}`,k:""};
   if(/staged on local disk/i.test(d))return{t:"Working on the fast local disk",k:""};
   if(/copying results/i.test(d))return{t:"Copying results back…",k:""};
   return d?{t:d.slice(0,160),k:""}:null;
@@ -290,7 +292,7 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,i}){
         <div className="lanes">
           {[["Network",net],["Activity scan",scan]].filter(x=>x[1]).map(([n,j])=>{
             const x=jobInfo(j.status);
-            return <span className="lane" key={n}><i className={"dot "+(x.k==="ok"?"ok":x.k==="bad"?"bad":x.k==="run"?"run":x.k==="line"?"line":"wait")}/>
+            return <span className="lane" key={n}><i className={"dot "+(x.k==="ok"?"ok":x.k==="bad"?"bad":x.k==="run"?"run":x.k==="queue"?"queue":"wait")}/>
               {n} <span className="lk">{x.say.toLowerCase()}{j.status==="done"&&j.duration_s?` · took ${dur(j.duration_s)}`:""}</span></span>;})}
         </div>
         {busy&&<div className="flow"><i/></div>}

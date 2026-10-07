@@ -254,11 +254,11 @@ const JOB = {
   },
   dispatched: {
     say: "In line",
-    k: "line"
+    k: "queue"
   },
   queued: {
     say: "In line",
-    k: "line"
+    k: "queue"
   },
   waiting: {
     say: "Waiting for copy",
@@ -333,6 +333,11 @@ function plainNote(job) {
   };
   if (/queued — waiting/i.test(d)) return {
     t: "Waiting for a free slot",
+    k: ""
+  };
+  m = /^running (.+?) · last log output (.+)$/.exec(d);
+  if (m) return {
+    t: `Running for ${m[1].replace(/(\d+)h/, "$1 h ").replace(/(\d+)m/, "$1 min")} · last activity ${m[2].replace(/(\d+)m ago/, "$1 min ago").replace(/(\d+)s ago/, "$1 s ago")}`,
     k: ""
   };
   if (/staged on local disk/i.test(d)) return {
@@ -760,7 +765,7 @@ function Line({
       className: "lane",
       key: n
     }, React.createElement("i", {
-      className: "dot " + (x.k === "ok" ? "ok" : x.k === "bad" ? "bad" : x.k === "run" ? "run" : x.k === "line" ? "line" : "wait")
+      className: "dot " + (x.k === "ok" ? "ok" : x.k === "bad" ? "bad" : x.k === "run" ? "run" : x.k === "queue" ? "queue" : "wait")
     }), n, " ", React.createElement("span", {
       className: "lk"
     }, x.say.toLowerCase(), j.status === "done" && j.duration_s ? ` · took ${dur(j.duration_s)}` : ""));
