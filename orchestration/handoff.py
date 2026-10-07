@@ -145,7 +145,8 @@ def generate(output_dir: Path, requirements: str = "", *,
              watch_dir: str = "", activity_dir: Optional[Path] = None,
              folders: Optional[list[str]] = None, label: str = "",
              skills_path: Path = DEFAULT_SKILLS,
-             handoff_root: Optional[Path] = None) -> dict[str, Any]:
+             handoff_root: Optional[Path] = None,
+             dates: Optional[list[str]] = None) -> dict[str, Any]:
     """Write a handoff folder and return its paths and counts."""
     output_dir = Path(output_dir).expanduser()
     if not output_dir.is_dir():
@@ -159,6 +160,11 @@ def generate(output_dir: Path, requirements: str = "", *,
     scope = [Path(f).expanduser() for f in (folders or [])]
     net = collect_network(output_dir, scope)
     act = collect_activity(Path(activity_dir) if activity_dir else None, scope)
+    if dates:
+        # Recording dates (YYMMDD folder names) to include.
+        keep = {str(d) for d in dates}
+        net = [w for w in net if str(w.get("date")) in keep]
+        act = [r for r in act if str(r.get("date")) in keep]
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"{stamp}_{label}" if label else stamp

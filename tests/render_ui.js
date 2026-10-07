@@ -46,7 +46,7 @@ const data = {
                    stage_locally: false, scratch_dir: '', stage_min_free_gb: 200,
                    activity_active_hz: 0.05, h5_glob: 'data.raw.h5', driver_python: '' },
   '/api/schema': { groups: [] }, '/api/env': {}, '/api/queue': { batches: [] },
-  '/api/handoff': { state: 'idle' }, '/api/logs': { lines: [] }, '/api/picker': {},
+  '/api/handoff': { state: 'idle' }, '/api/reports': { reports: [] }, '/api/logs': { lines: [] }, '/api/picker': {},
 };
 w.fetch = (url) => {
   const body = data[String(url).split('?')[0]] ?? {};

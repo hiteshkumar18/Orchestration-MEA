@@ -674,6 +674,20 @@ def api_checkpoints(path: str = "", tail: int = 0):
         return {"summary": {"wells": 0}, "wells": [], "note": "No output directory configured"}
 
     folder = Path(path.split("::")[0]) if path else None
+    if folder is not None:
+        # The pipeline writes a date folder's wells to <output>/<project>/<date>
+        # (and a staged run to <scratch>/<project>/<date>). Searching only
+        # there turns a whole-disk walk — ~55 s with two projects on a busy
+        # disk — into a read of one folder. Falls back to every root when
+        # the layout is different.
+        project, date = folder.parent.name, folder.name
+        narrowed = []
+        for r in roots:
+            for cand in (r / project / date, r / project / date / project / date):
+                if cand.is_dir():
+                    narrowed.append(cand)
+        if narrowed:
+            roots = narrowed
     rows = read_checkpoints(roots, folder)
     return {"summary": summarise(rows), "wells": rows,
             "searched": [str(r) for r in roots]}
@@ -805,6 +819,58 @@ def api_handoff(payload: HandoffPayload):
         return _make_handoff(payload.folders or None, label=label)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# Finished reports (read-only)
+# --------------------------------------------------------------------------- #
+def _report_files() -> list[Path]:
+    """report.html files written into handoff folders under the output dir."""
+    out = get_watcher().cfg.output_dir
+    if not out or not Path(out).is_dir():
+        return []
+    return sorted(Path(out).glob("*/AI_HANDOFF/*/report/report.html")) + \
+        sorted(Path(out).glob("AI_HANDOFF/*/report/report.html"))
+
+
+@app.get("/api/reports")
+def api_reports():
+    """The newest report for each recording folder, keyed project/date.
+
+    Handoff folders are named <stamp>_<label>; the label is the date for
+    per-date handoffs. Older handoffs for the same date are superseded.
+    """
+    latest: dict[str, dict] = {}
+    for f in _report_files():
+        hdir = f.parent.parent
+        stamp, _, label = hdir.name.partition("_")
+        stamp2, _, label2 = label.partition("_")
+        if stamp2.isdigit():                      # <date>_<time>_<label>
+            stamp, label = f"{stamp}_{stamp2}", label2
+        project = hdir.parent.parent.name if hdir.parent.parent != Path(get_watcher().cfg.output_dir) else ""
+        key = f"{project}/{label}"
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            continue
+        if key not in latest or mtime > latest[key]["mtime"]:
+            latest[key] = {"project": project, "label": label, "path": str(f),
+                           "built": datetime.fromtimestamp(mtime).isoformat(timespec="minutes"),
+                           "mtime": mtime}
+    return {"reports": sorted(latest.values(), key=lambda r: (r["project"], r["label"]))}
+
+
+@app.get("/api/reports/view")
+def api_report_view(path: str):
+    """Serve one report.html — only files that _report_files() lists."""
+    allowed = {str(f.resolve()) for f in _report_files()}
+    try:
+        p = Path(path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(404, "Report not found")
+    if str(p) not in allowed:
+        raise HTTPException(403, "Not a report written by this tool")
+    return FileResponse(p, media_type="text/html")
 
 
 @app.get("/api/handoff")

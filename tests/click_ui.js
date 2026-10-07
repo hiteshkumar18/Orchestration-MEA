@@ -26,7 +26,7 @@ const data={
    run_activity:true,max_concurrent_network:2,max_concurrent_activity:2,gpu_cooldown_seconds:5,
    queue_poll_seconds:2,settle_seconds:600,poll_seconds:30,logs_in_output:true,stage_locally:false,
    scratch_dir:'',stage_min_free_gb:200,activity_active_hz:0.05,h5_glob:'data.raw.h5',driver_python:''},
- '/api/schema':{groups:[]},'/api/env':{},'/api/queue':{batches:[]},'/api/handoff':{state:'idle'},
+ '/api/schema':{groups:[]},'/api/env':{},'/api/queue':{batches:[]},'/api/handoff':{state:'idle'},'/api/reports':{reports:[{project:'in',label:'260828',path:'/out/r.html',built:'2026-10-05T10:00'}]},
  '/api/logs':{lines:[]},'/api/picker':{},
  '/api/runs/checkpoints':{summary:{wells:19,complete:18,failed:1},
    wells:[{well:'well001',run_id:'000061',chip_id:'M07036',stage:10,stage_name:'Reports complete',

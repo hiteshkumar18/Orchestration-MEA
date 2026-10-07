@@ -1,1281 +1,912 @@
 // Source for app.js. Edit this, then: cd tests && npm run build
+//
+// MEA Bench — the lab-notebook front end for Orchestration-MEA.
+// Written for people who run experiments, not software: every label says what
+// happens in plain words, and the technical knobs live behind "Advanced".
+//
+// RULE: every hook sits above App's early returns (see docs/FIELD-NOTES.md §8).
 const {useState,useEffect,useCallback,useRef,useMemo} = React;
 
 /* ── Icons ─────────────────────────────────────────────────────────────── */
-const I=({d,s=16,f="none"})=>(
-  <svg width={s} height={s} viewBox="0 0 24 24" fill={f} stroke="currentColor"
-       strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{d}</svg>);
-const Wave =p=><I {...p} d={<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>}/>;
-const Folder=p=><I {...p} d={<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>}/>;
-const Play =p=><I {...p} f="currentColor" d={<polygon points="6 4 20 12 6 20"/>}/>;
+const I=({d,s=16,f="none",w=1.8})=>(
+  <svg width={s} height={s} viewBox="0 0 24 24" fill={f} stroke="currentColor" strokeWidth={w}
+       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{d}</svg>);
+const Play =p=><I {...p} f="currentColor" d={<polygon points="7 4 20 12 7 20"/>}/>;
+const Pause=p=><I {...p} d={<><line x1="9" y1="5" x2="9" y2="19"/><line x1="15" y1="5" x2="15" y2="19"/></>}/>;
 const Stop =p=><I {...p} f="currentColor" d={<rect x="6" y="6" width="12" height="12" rx="2"/>}/>;
 const Check=p=><I {...p} d={<polyline points="20 6 9 17 4 12"/>}/>;
-const Ex   =p=><I {...p} d={<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>}/>;
-const Search=p=><I {...p} d={<><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></>}/>;
+const X    =p=><I {...p} d={<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>}/>;
 const Chev =p=><I {...p} d={<polyline points="9 18 15 12 9 6"/>}/>;
-const Copy =p=><I {...p} d={<><rect x="9" y="9" width="13" height="13" rx="2.5"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>}/>;
-const Term =p=><I {...p} d={<><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></>}/>;
-const Sync =p=><I {...p} d={<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>}/>;
-const Moon =p=><I {...p} d={<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>}/>;
-const Sun  =p=><I {...p} d={<><circle cx="12" cy="12" r="4.5"/><line x1="12" y1="1.5" x2="12" y2="3.5"/><line x1="12" y1="20.5" x2="12" y2="22.5"/><line x1="4.2" y1="4.2" x2="5.7" y2="5.7"/><line x1="18.3" y1="18.3" x2="19.8" y2="19.8"/><line x1="1.5" y1="12" x2="3.5" y2="12"/><line x1="20.5" y1="12" x2="22.5" y2="12"/><line x1="4.2" y1="19.8" x2="5.7" y2="18.3"/><line x1="18.3" y1="5.7" x2="19.8" y2="4.2"/></>}/>;
+const Doc  =p=><I {...p} d={<><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><polyline points="14 3 14 8 19 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></>}/>;
+const Grid =p=><I {...p} d={<><circle cx="6" cy="6" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="18" cy="12" r="2"/></>}/>;
+const Lines=p=><I {...p} d={<><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="14" y2="18"/></>}/>;
+const Again=p=><I {...p} d={<><polyline points="1 4 1 10 7 10"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></>}/>;
+const Folder=p=><I {...p} d={<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>}/>;
+const Alert=p=><I {...p} d={<><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13.5"/><line x1="12" y1="17.2" x2="12.01" y2="17.2"/></>}/>;
 const Info =p=><I {...p} d={<><circle cx="12" cy="12" r="9.5"/><line x1="12" y1="16.5" x2="12" y2="11.5"/><line x1="12" y1="7.8" x2="12.01" y2="7.8"/></>}/>;
-const Alert=p=><I {...p} d={<><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13.5"/><line x1="12" y1="17.2" x2="12.01" y2="17.2"/></>}/>;
-const Inbox=p=><I {...p} d={<><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></>}/>;
-const Clock=p=><I {...p} d={<><circle cx="12" cy="12" r="9.5"/><polyline points="12 6.5 12 12 16 14"/></>}/>;
-const Slide=p=><I {...p} d={<><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="9" cy="8" r="2.4"/><circle cx="15" cy="16" r="2.4"/></>}/>;
+const Ext  =p=><I {...p} d={<><path d="M14 4h6v6"/><line x1="20" y1="4" x2="11" y2="13"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></>}/>;
 
 /* ── API ───────────────────────────────────────────────────────────────── */
-const IS_FILE = location.protocol === "file:";
-const H_FILE="This page is open as a local file, so it cannot reach the server.\n\n"+
-  "Start the backend and open it through that instead:\n\n"+
-  "    python orchestration/api.py --port 8000\n\nthen visit http://localhost:8000";
-const H_DOWN="Could not reach the API server.\n\nMake sure it is running:\n\n"+
-  "    python orchestration/api.py --port 8000\n\n"+
-  "and that this page is open at the same host and port.";
-
 async function api(path,opts){
-  if(IS_FILE) throw new Error(H_FILE);
+  if(location.protocol==="file:")
+    throw new Error("Open this page through the server (http://localhost:8000), not as a file.");
   let r;
   try{ r=await fetch(path,{headers:{"Content-Type":"application/json"},...opts}); }
-  catch(e){ throw new Error(H_DOWN); }
+  catch(e){ throw new Error("The analysis server is not answering. It may be restarting — try again in a minute."); }
   const b=await r.json().catch(()=>({}));
   if(!r.ok){const d=b.detail;
-    throw new Error(d?.errors?d.errors.join("\n"):(typeof d==="string"?d:"Request failed"));}
+    throw new Error(d?.errors?d.errors.join("\n"):(typeof d==="string"?d:`Request failed (${r.status})`));}
   return b;
 }
 
-/* ── Helpers ───────────────────────────────────────────────────────────── */
-const ST={
-  waiting:{l:"Waiting",c:"p-n",i:0}, detected:{l:"Detected",c:"p-a",i:1},
-  dispatched:{l:"Queued",c:"p-a",i:2}, running:{l:"Analyzing",c:"p-a",i:2},
-  done:{l:"Complete",c:"p-o",i:3}, failed:{l:"Failed",c:"p-b",i:3},
-  /* Cut short by a restart, not a failure: re-queued automatically. */
-  interrupted:{l:"Interrupted",c:"p-n",i:1},
-};
-const STAGES=["Detected","Settled","Analyzing","Complete"];
-const settleLeft=d=>{const m=/settling \((\d+)s remaining\)/.exec(d||"");return m?+m[1]:null;};
-const ago=iso=>{if(!iso)return"";const s=Math.max(0,(Date.now()-new Date(iso))/1e3);
-  return s<60?`${s|0}s ago`:s<3600?`${s/60|0}m ago`:s<86400?`${s/3600|0}h ago`:`${s/86400|0}d ago`;};
-const dur=s=>{if(s==null)return"";if(s<60)return`${Math.round(s)}s`;
-  const m=s/60|0;return m<60?`${m}m ${Math.round(s%60)}s`:`${m/60|0}h ${m%60}m`;};
+/* ── Plain-language helpers ────────────────────────────────────────────── */
+const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// MaxWell date folders are YYMMDD.
+const prettyDate=code=>{const m=/^(\d{2})(\d{2})(\d{2})$/.exec(code||"");
+  if(!m) return {big:code,year:""};
+  const mo=+m[2]-1; return mo>=0&&mo<12?{big:`${+m[3]} ${MONTHS[mo]}`,year:`20${m[1]}`}:{big:code,year:""};};
+const projectOf=folder=>{const p=(folder||"").replace(/\/+$/,"").split("/");return p[p.length-2]||"";};
+const prettyProject=s=>(s||"").replace(/_/g," ");
+const ago=iso=>{if(!iso)return"";const t=new Date(iso);if(isNaN(t))return"";
+  const s=Math.max(0,(Date.now()-t)/1e3);
+  return s<60?"just now":s<3600?`${s/60|0} min ago`:s<86400?`${s/3600|0} h ago`:`${s/86400|0} days ago`;};
+const dur=s=>{if(s==null)return"";if(s<60)return`${Math.round(s)} s`;const m=s/60|0;
+  return m<60?`${m} min`:`${m/60|0} h ${m%60} min`;};
 
-/* ── Primitives ────────────────────────────────────────────────────────── */
+// One status word per job, in the operator's language.
+const JOB={
+  running:   {say:"Analysing",          k:"run"},
+  dispatched:{say:"In line",            k:"queue"},
+  queued:    {say:"In line",            k:"queue"},
+  waiting:   {say:"Waiting for copy",   k:"wait"},
+  detected:  {say:"Found (test mode)",  k:"wait"},
+  interrupted:{say:"Paused — will resume",k:"wait"},
+  done:      {say:"Done",               k:"ok"},
+  failed:    {say:"Needs attention",    k:"bad"},
+};
+const jobInfo=st=>JOB[st]||{say:st||"Not started",k:"wait"};
+
+// A date folder's overall state, from its Network and Activity-scan jobs.
+function folderState(jobs){
+  const sts=jobs.map(j=>j.status);
+  if(sts.includes("running"))return"running";
+  if(sts.some(s=>s==="dispatched"||s==="queued"))return"dispatched";
+  if(sts.includes("failed"))return"failed";
+  if(sts.length&&sts.every(s=>s==="done"))return"done";
+  if(sts.includes("interrupted"))return"interrupted";
+  return sts[0]||"waiting";
+}
+
+// What the pipeline's notes mean, said simply.
+function plainNote(job){
+  const d=job.detail||"", e=job.error||"";
+  let m=/(\d+) of (\d+) well subprocess\(es\) failed/.exec(d);
+  if(m) return {t:`${m[2]-m[1]} of ${m[2]} wells finished · ${m[1]} had problems`,k:"warn"};
+  if(job.status==="failed"){
+    if(/cancelled/i.test(e))return{t:"Stopped by hand — press “Analyse again” to redo it.",k:"bad"};
+    if(/GPU is not usable/i.test(e))return{t:"The graphics card was not available.",k:"bad"};
+    if(/could not be copied from local scratch/i.test(e))return{t:"Results could not be copied back from the fast disk.",k:"bad"};
+    return {t:(e.split("\n")[0]||"Something went wrong — open the log.").slice(0,160),k:"bad"};
+  }
+  if(/settling \((\d+)s remaining\)/.test(d)){const s=+/settling \((\d+)s/.exec(d)[1];
+    return {t:`Copy looks finished — confirming for ${Math.ceil(s/60)} more min`,k:""};}
+  if(/waiting for MaxWell 'finished' marker/i.test(d))return{t:"Waiting for the recording to be marked finished",k:""};
+  if(/queued — waiting/i.test(d))return{t:"Waiting for a free slot",k:""};
+  m=/^running (.+?) · last log output (.+)$/.exec(d);
+  if(m)return{t:`Running for ${m[1].replace(/(\d+)h/,"$1 h ").replace(/(\d+)m/,"$1 min")} · last activity ${m[2].replace(/(\d+)m ago/,"$1 min ago").replace(/(\d+)s ago/,"$1 s ago")}`,k:""};
+  if(/staged on local disk/i.test(d))return{t:"Working on the fast local disk",k:""};
+  if(/copying results/i.test(d))return{t:"Copying results back…",k:""};
+  return d?{t:d.slice(0,160),k:""}:null;
+}
+
+function plainWellError(r,note){
+  const e=String(r.error||note?.fail||"");
+  if(/stream_id well\d+ is not in/.test(e))return"Not in this recording file — nothing to analyse.";
+  if(/n_samples=\d+ should be >= n_clusters/.test(e))return"Almost no activity in this well.";
+  if(/out of memory/i.test(e))return"Ran out of memory.";
+  if(r.status!=="complete"&&!e)return"Stopped without an error message.";
+  return (e.split("\n").find(Boolean)||"Unknown problem").slice(0,180);
+}
+
+// What the driver log says about each well: failures and silent wells are
+// only recorded there, not in the checkpoint files. Key: chip|recording|well.
+function parseWellNotes(lines){
+  const notes={};let cur=null;
+  for(const l of lines){
+    let m=/Processing : (\S+) recording : \S+ well_id : (well\d+)/.exec(l);
+    if(m){const p=m[1].split("/");cur=`${p[p.length-4]}|${p[p.length-2]}|${m[2]}`;continue;}
+    if(!cur)continue;
+    m=/CRITICAL FAILURE in (well\d+): (.*)/.exec(l);
+    if(m&&cur.endsWith("|"+m[1])){notes[cur]={...notes[cur],fail:m[2].trim()};continue;}
+    if(/Detected 0 total spikes|returned error: no_spikes/.test(l))notes[cur]={...notes[cur],silent:true};
+  }
+  return notes;
+}
+// complete | silent | absent | failed | running
+function wellClass(r,note,finished){
+  if(r.status==="complete")return note?.silent?"silent":"complete";
+  if(note?.fail&&/stream_id well\d+ is not in/.test(note.fail))return"absent";
+  if(note?.silent)return"silent";
+  if(r.status==="failed"||note?.fail||finished)return"failed";
+  return"running";
+}
+function wellCounts(data,finished){
+  const c={complete:0,silent:0,absent:0,failed:0,running:0};
+  (data?.wells||[]).forEach(r=>{c[wellClass(r,data.notes?.[`${r.chip_id}|${r.run_id}|${r.well}`],finished)]++;});
+  return c;
+}
+
+// Log lines worth reading: drop progress bars, keep the story.
+function cleanLog(lines){
+  return lines.filter(l=>l&&!/\d+%\|/.test(l)&&!/it\/s\]/.test(l)&&!/^\s*write_binary_recording\s*$/.test(l)
+    &&!/^engine=process/.test(l)&&!/libcompression\.so/.test(l)&&!/UserWarning|warnings\.warn\(/.test(l));
+}
+const logKind=l=>/ERROR|CRITICAL|Traceback|Error:|FAILED/.test(l)?"err":/WARNING/.test(l)?"warn"
+  :/Processing Complete|completed in|Checkpoint Saved: REPORTS_COMPLETE/.test(l)?"ok":"";
+
+/* ── Small components ─────────────────────────────────────────────────── */
 function Switch({checked,onChange,label,hint,id,disabled}){
   return (
-    <div className="sw-row" style={disabled?{opacity:.5}:undefined}>
+    <div className="sw-row">
       <button type="button" role="switch" aria-checked={!!checked} id={id} disabled={disabled}
-              className="sw" data-on={!!checked} onClick={()=>!disabled&&onChange(!checked)}>
-        <span className="sw-k"/>
-      </button>
+              className="sw" onClick={()=>!disabled&&onChange(!checked)}/>
       <label htmlFor={id} style={{cursor:disabled?"not-allowed":"pointer"}}>
         <div className="sw-l">{label}</div>
         {hint&&<div className="sw-h">{hint}</div>}
       </label>
-    </div>
-  );
+    </div>);
 }
 
-function Code({text,scroll}){
+function Code({text}){
   const [c,setC]=useState(false);
   return (
-    <div className="code-w">
-      <pre className={"code"+(scroll?" code-s":"")}>{text}</pre>
-      <button className="btn btn-s code-c"
-              onClick={()=>navigator.clipboard?.writeText(text).then(()=>{setC(true);setTimeout(()=>setC(false),1600);})}>
-        {c?<><Check s={12}/> Copied</>:<><Copy s={12}/> Copy</>}
-      </button>
-    </div>
-  );
+    <pre className="code">{text}
+      <button className="cp" onClick={()=>navigator.clipboard?.writeText(text)
+        .then(()=>{setC(true);setTimeout(()=>setC(false),1500);})}>{c?"Copied":"Copy"}</button>
+    </pre>);
+}
+
+function Callout({kind="",icon,children}){
+  return <div className={"callout "+kind}><span className="ic">{icon||<Info s={17}/>}</span><div>{children}</div></div>;
 }
 
 function Toasts({items,close}){
   return (
     <div className="toasts" role="status" aria-live="polite">
       {items.map(t=>(
-        <div key={t.id} className="toast">
-          <span style={{color:`var(--${t.k==="error"?"bad":t.k==="success"?"ok":"accent"})`,
-                        flex:"none",marginTop:1,display:"flex"}}>
-            {t.k==="error"?<Alert s={15}/>:t.k==="success"?<Check s={15}/>:<Info s={15}/>}
-          </span>
+        <div key={t.id} className={"toast"+(t.k==="error"?" err":"")}>
+          <span style={{flex:"none",marginTop:2}}>{t.k==="error"?<Alert s={16}/>:<Check s={16}/>}</span>
           <div style={{flex:1,minWidth:0}}>
-            <div className="toast-t">{t.t}</div>
-            {t.m&&<div className="toast-m">{t.m}</div>}
+            <div className="toast-t">{t.t}</div>{t.m&&<div className="toast-m">{t.m}</div>}
           </div>
-          <button className="btn btn-q btn-s btn-i" onClick={()=>close(t.id)} aria-label="Dismiss">
-            <Ex s={13}/></button>
-        </div>
-      ))}
-    </div>
-  );
+          <button className="btn ghost sm" style={{color:"inherit"}} onClick={()=>close(t.id)} aria-label="Dismiss"><X s={13}/></button>
+        </div>))}
+    </div>);
 }
 
-function LiveLog({lines,follow,setFollow,onClear}){
-  const ref=useRef(null);
-  useEffect(()=>{if(follow&&ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[lines,follow]);
-  return (
-    <>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-        <span className="pill p-o"><span className="dot dot-l"/>Live</span>
-        <span className="f-h">{lines.length} line{lines.length===1?"":"s"}</span>
-        <div className="grow"/>
-        <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12.5,
-                       cursor:"pointer",color:"var(--ink-2)"}}>
-          <input type="checkbox" checked={follow} onChange={e=>setFollow(e.target.checked)}
-                 style={{accentColor:"var(--accent)"}}/>Auto-scroll
-        </label>
-        {lines.length>0&&<button className="btn btn-q btn-s" onClick={onClear}>Clear</button>}
+function Confirm({ask,onClose}){
+  if(!ask) return null;
+  return (<>
+    <div className="scrim m" onClick={()=>onClose(false)}/>
+    <div className="modal" role="dialog" aria-modal="true" aria-labelledby="cf-t">
+      <h3 id="cf-t">{ask.title}</h3>
+      <div className="hint" style={{whiteSpace:"pre-wrap"}}>{ask.body}</div>
+      <div className="acts">
+        <button className="btn ghost" onClick={()=>onClose(false)}>Cancel</button>
+        <button className={"btn "+(ask.danger?"red":"ink")} autoFocus onClick={()=>onClose(true)}>{ask.ok||"Continue"}</button>
       </div>
-      <div className="log" ref={ref}>
-        {lines.length===0
-          ? <div style={{color:"#6e6e78"}}>Waiting for activity…</div>
-          : lines.map(l=>(
-              <div className="ll" key={l.seq}>
-                <span className="lt">{l.time}</span>
-                <span className={"lv l-"+l.level}>{l.level}</span>
-                <span className="lm">{l.message}</span>
-              </div>))}
-      </div>
-    </>
-  );
+    </div></>);
 }
 
-function Field({spec,value,onChange}){
-  const set=v=>onChange(spec.key,v);
-  const mod=value!==spec.default&&value!==null&&value!==""&&value!==false;
-  const L=<span className="f-l" style={{display:"flex",alignItems:"center",gap:6}}>
-    {mod&&<span className="mod" title="Changed"/>}<code className="mono">{spec.flag}</code></span>;
-
-  if(spec.type==="flag")
-    return <Switch id={spec.key} checked={!!value} onChange={set} label={spec.flag} hint={spec.help}/>;
-  if(spec.type==="tristate")
-    return <div className="f">{L}
-      <select className="sel" value={value==null?"":String(value)}
-              onChange={e=>set(e.target.value===""?null:e.target.value==="true")}>
-        <option value="">Default</option><option value="true">Enabled</option><option value="false">Disabled</option>
-      </select><span className="f-h">{spec.help}</span></div>;
-  if(spec.type==="choice")
-    return <div className="f">{L}
-      <select className="sel" value={value??""} onChange={e=>set(e.target.value||null)}>
-        <option value="">Default</option>
-        {spec.choices.map(c=><option key={c} value={c}>{c}</option>)}
-      </select><span className="f-h">{spec.help}</span></div>;
-  if(spec.type==="list")
-    return <div className="f">{L}
-      <input className="inp mono" placeholder="comma separated"
-             value={Array.isArray(value)?value.join(", "):(value??"")}
-             onChange={e=>set(e.target.value.split(",").map(s=>s.trim()).filter(Boolean))}/>
-      <span className="f-h">{spec.help}</span></div>;
-  const num=spec.type==="int"||spec.type==="float";
-  return <div className="f">{L}
-    <input className={"inp"+(spec.type==="path"?" mono":"")} type={num?"number":"text"}
-           step={spec.type==="float"?"0.01":"1"}
-           placeholder={spec.type==="path"?"/path/on/server":"Default"} value={value??""}
-           onChange={e=>set(e.target.value===""?null:(num?Number(e.target.value):e.target.value))}/>
-    <span className="f-h">{spec.help}</span></div>;
-}
-
-function Browser({initial,onPick,onClose,picker,onNative,busyNative}){
+function Browser({initial,onPick,onClose}){
   const [d,setD]=useState(null),[p,setP]=useState(initial||""),[e,setE]=useState("");
   const load=useCallback(async q=>{
     try{setE("");const r=await api("/api/browse",{method:"POST",body:JSON.stringify({path:q})});
         setD(r);setP(r.path);}catch(x){setE(x.message);}},[]);
   useEffect(()=>{load(initial||"");},[load,initial]);
-
-  // Clickable path segments — faster than retyping a long path.
-  const crumbs=[];
-  if(d?.path){
-    const parts=d.path.split("/").filter(Boolean);
-    crumbs.push({name:"/",path:"/"});
-    let acc="";
-    for(const seg of parts){acc+="/"+seg;crumbs.push({name:seg,path:acc});}
-  }
-
   return (
     <div className="br">
       <div className="br-p">
-        <input className="inp mono" value={p} onChange={e=>setP(e.target.value)}
-               onKeyDown={e=>e.key==="Enter"&&load(p)} aria-label="Path"/>
-        <button className="btn btn-s" onClick={()=>load(p)}>Go</button>
-        {picker?.available&&
-          <button className="btn btn-s" disabled={busyNative} onClick={onNative}
-                  title={`Open the ${picker.tool} folder chooser on the server`}>
-            {busyNative?<><span className="spin"/> Waiting…</>:<><Folder s={12}/> File manager</>}
-          </button>}
-        <button className="btn btn-s btn-pri" onClick={()=>{onPick(p);onClose();}}>Select</button>
+        <input className="inp mono" value={p} onChange={ev=>setP(ev.target.value)}
+               onKeyDown={ev=>ev.key==="Enter"&&load(p)} aria-label="Folder path"/>
+        <button className="btn sm" onClick={()=>load(p)}>Go</button>
+        <button className="btn ink sm" onClick={()=>{onPick(p);onClose();}}>Use this folder</button>
       </div>
-
-      {crumbs.length>0&&(
-        <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:2,
-                     padding:"7px 12px",borderBottom:"1px solid var(--line)",
-                     background:"var(--raise)",fontSize:12}}>
-          {crumbs.map((c,i)=>(
-            <React.Fragment key={c.path}>
-              {i>0&&<span style={{color:"var(--ink-3)"}}>/</span>}
-              <button className="btn btn-q btn-s" style={{height:22,padding:"0 6px",
-                      fontFamily:"var(--mono)",fontSize:11.5}}
-                      onClick={()=>load(c.path)}>{c.name}</button>
-            </React.Fragment>))}
-        </div>)}
-
-      {e&&<div style={{padding:"10px 14px",fontSize:12.5,color:"var(--bad)"}}>{e}</div>}
+      {e&&<div style={{padding:"10px 14px",color:"var(--red)",fontSize:13.5}}>{e}</div>}
       <div className="br-l">
-        {d?.parent&&<div className="br-i" onClick={()=>load(d.parent)}>
-          <Folder s={14}/><span className="br-n" style={{color:"var(--ink-3)"}}>..</span></div>}
-        {d?.entries?.length===0&&<div style={{padding:"14px",fontSize:12.5,color:"var(--ink-3)"}}>No subfolders</div>}
+        {d?.parent&&<div className="br-i" onClick={()=>load(d.parent)}><Folder s={15}/><span className="n">.. (up one level)</span></div>}
+        {d?.entries?.length===0&&<div className="hint" style={{padding:14}}>No folders inside.</div>}
         {d?.entries?.map(x=>(
-          <div key={x.path} className="br-i" onClick={()=>load(x.path)}
-               onDoubleClick={()=>{onPick(x.path);onClose();}}>
-            <Folder s={14}/><span className="br-n">{x.name}</span>
-            {x.recordings>0&&<span className="f-h" style={{flex:"none"}}>{x.recordings} rec</span>}
-            {x.is_run&&<span className={"pill "+(x.finished?"p-o":"p-w")}>
-              <span className="dot"/>{x.finished?"run · finished":"run · in progress"}</span>}
+          <div key={x.path} className="br-i" onClick={()=>load(x.path)} onDoubleClick={()=>{onPick(x.path);onClose();}}>
+            <Folder s={15}/><span className="n">{x.name}</span>
+            {x.is_run&&<span className="hint-s">{x.recordings} recording{x.recordings===1?"":"s"}</span>}
           </div>))}
       </div>
-      {picker&&!picker.available&&(
-        <div style={{padding:"8px 12px",borderTop:"1px solid var(--line)"}} className="f-h">
-          {picker.reason}
-        </div>)}
-    </div>
-  );
+    </div>);
 }
 
-function Row({run,onLog,onReset,wells,onWells,expanded}){
-  const m=ST[run.status]||ST.waiting;
-  const left=settleLeft(run.detail);
-  const busy=run.status==="running"||run.status==="dispatched";
-  const bad=run.status==="failed";
-  const idx=bad?3:m.i;
-  return (
-    <div className="row">
+/* ── Wells: a plate map per chip ──────────────────────────────────────── */
+function Plates({data,finished}){
+  if(!data) return <div className="hint" style={{paddingTop:10,display:"flex",gap:10,alignItems:"center"}}>
+    <span className="spin"/> Reading well results… While analyses are running the results disk is busy,
+    so this can take a minute or two. You can keep using the page.</div>;
+  if(data.error) return <div className="hint" style={{paddingTop:10,color:"var(--red)"}}>{data.error}</div>;
+  const rows=data.wells||[];
+  if(!rows.length) return <div className="hint" style={{paddingTop:10}}>
+    No wells have started yet. They appear here as the analysis reaches them.</div>;
+  const note=r=>data.notes?.[`${r.chip_id}|${r.run_id}|${r.well}`];
+  const chips={};
+  rows.forEach(r=>{const k=`${r.chip_id||"?"}·${r.run_id||""}`;(chips[k]=chips[k]||{chip:r.chip_id,run:r.run_id,wells:{}}).wells[r.well]=r;});
+  const c=wellCounts(data,finished);
+  const probs=rows.filter(r=>wellClass(r,note(r),finished)==="failed");
+  const tips={complete:"finished",silent:"finished, but no spikes were detected",
+    absent:"not in this recording file — nothing to analyse",running:"in progress"};
+  let i=0;
+  return (<>
+    <div className="legend">
+      <span><b>{c.complete}</b>&nbsp;finished</span>
+      {c.silent>0&&<span><b>{c.silent}</b>&nbsp;no activity</span>}
+      {c.absent>0&&<span><b>{c.absent}</b>&nbsp;not in the recording file</span>}
+      {c.running>0&&<span><b>{c.running}</b>&nbsp;in progress</span>}
+      {c.failed>0&&<span style={{color:"var(--red)"}}><b>{c.failed}</b>&nbsp;problem{c.failed===1?"":"s"}</span>}
+    </div>
+    <div className="legend" style={{marginTop:6}}>
+      <span><i className="well-k complete"/>finished</span><span><i className="well-k silent"/>no activity</span>
+      {!finished&&<span><i className="well-k running"/>in progress</span>}
+      <span><i className="well-k failed"/>problem</span><span><i className="well-k absent"/>not in the recording file</span>
+      <span><i className="well-k none"/>not recorded</span>
+    </div>
+    <div className="plates">
+      {Object.values(chips).map(ch=>{
+        const ids=Object.keys(ch.wells).map(w=>+w.replace(/\D/g,""));
+        const n=Math.max(6,Math.ceil((Math.max(...ids)+1)/6)*6);
+        return (
+          <div className="plate" key={ch.chip+ch.run}>
+            <div className="plate-h">Chip <b>{ch.chip||"?"}</b><span className="hint-s">recording {ch.run}</span></div>
+            <div className="wells">
+              {Array.from({length:n},(_,k)=>{
+                const r=ch.wells[`well${String(k).padStart(3,"0")}`];
+                const cls=r?wellClass(r,note(r),finished):"none";
+                const tip=!r?`Well ${k+1}: not recorded in this run`
+                  :cls==="failed"?`Well ${k+1}: ${plainWellError(r,note(r))}`
+                  :cls==="running"?`Well ${k+1}: ${r.stage_name||"in progress"}`:`Well ${k+1}: ${tips[cls]}`;
+                return <div key={k} className={"well "+cls} style={{"--i":i++}} title={tip}>{k+1}</div>;
+              })}
+            </div>
+          </div>);})}
+    </div>
+    {probs.length>0&&<div className="probs">
+      {probs.map((r,j)=><div className="prob" key={j}><span className="w">{r.chip_id} · well {+r.well.replace(/\D/g,"")+1}</span>
+        <span>{plainWellError(r,note(r))}</span></div>)}
+    </div>}
+  </>);
+}
+
+/* ── Log drawer ───────────────────────────────────────────────────────── */
+function LogDrawer({log,onClose,live}){
+  const [raw,setRaw]=useState(false);
+  const ref=useRef(null);
+  const lines=raw?log.lines:cleanLog(log.lines);
+  useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[log.lines,raw]);
+  useEffect(()=>{const k=e=>e.key==="Escape"&&onClose();addEventListener("keydown",k);return()=>removeEventListener("keydown",k);},[onClose]);
+  return (<>
+    <div className="scrim" onClick={onClose}/>
+    <aside className="drawer" role="dialog" aria-label="Log">
+      <div className="dr-h">
+        <div style={{flex:1,minWidth:0}}>
+          <div className="dr-t">{log.title}</div>
+          <div className="hint">{live?<><span className="dot run" style={{display:"inline-block",marginRight:7}}/>Updating live</>:"Last 600 lines"}
+            {" · "}{lines.length} shown</div>
+        </div>
+        <button className="btn sm" onClick={()=>setRaw(r=>!r)}>{raw?"Hide progress noise":"Show everything"}</button>
+        <button className="btn ghost sm" onClick={onClose} aria-label="Close"><X s={15}/></button>
+      </div>
+      <div className="dr-b" ref={ref}>
+        {log.error&&<div className="lg err">{log.error}</div>}
+        {!log.lines.length&&!log.error&&<div className="lg">Loading…</div>}
+        {lines.map((l,i)=><div key={i} className={"lg "+logKind(l)}>{l}</div>)}
+      </div>
+    </aside></>);
+}
+
+/* ── Progress tab ─────────────────────────────────────────────────────── */
+function Line({f,report,wells,open,onWells,onLog,onAgain,i}){
+  const st=folderState(f.jobs), ji=jobInfo(st);
+  const dt=prettyDate(f.date);
+  const net=f.jobs.find(j=>j.job==="network"), scan=f.jobs.find(j=>j.job==="activity");
+  const note=net?plainNote(net):null;
+  const busy=st==="running";
+  const sum=wells?.summary;
+  const netDone=net&&(net.status==="done"||net.status==="failed");
+  const wc=netDone&&wells?.wells&&wells.notes?wellCounts(wells,true):null;
+  const refined=wc&&{t:[`${wc.complete} wells finished`,wc.silent&&`${wc.silent} with no activity`,
+    wc.absent&&`${wc.absent} not in the recording file`,wc.failed&&`${wc.failed} with problems`].filter(Boolean).join(" · "),
+    k:wc.failed?"bad":""};
+  return (<>
+    <div className="line rise" style={{"--i":i}}>
       <div>
-        <div className="row-id">{run.run}</div>
-        <div className="row-job">
-          <span className="dot" style={{background:run.job==="activity"?"var(--ok)":"var(--accent)"}}/>
-          {run.job_label||(run.job==="activity"?"Activity scan":"Network")}
-        </div>
+        <div className="d-big">{dt.big}</div>
+        <div className="d-code">{dt.year} · {f.date}</div>
       </div>
-      <div className="row-mid">
-        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-          <span className={"pill "+m.c}>
-            {busy?<span className="spin"/>:<span className={"dot"+(run.status==="waiting"?" dot-l":"")}/>}
-            {m.l}</span>
-          {/* A run can finish with wells failed. The pill still says Complete,
-              because the job did complete, so the count carries the warning. */}
-          <span className={"row-note"+(/\bfailed\b/i.test(run.detail||"")?" warn":"")}
-                title={run.detail||""}>
-            {run.detail||(run.returncode!=null?`exit code ${run.returncode}`:"")}</span>
+      <div className="mid">
+        <div className="say">
+          <span className={"stamp "+ji.k}>{ji.say}</span>
+          {busy&&sum?.wells>0&&<span className="note-l">{sum.complete} wells finished so far</span>}
+          {(refined||note)&&<span className={"note-l "+(refined||note).k}>{(refined||note).t}</span>}
         </div>
-        {bad&&run.error&&<div className="row-why">{run.error}</div>}
-        {busy&&<div className="bar-t"><div className="bar-i"/></div>}
-        {left!=null&&run.status==="waiting"&&
-          <div className="bar-t"><div className="bar-f" style={{width:`${Math.max(4,100-Math.min(100,left))}%`}}/></div>}
+        <div className="lanes">
+          {[["Network",net],["Activity scan",scan]].filter(x=>x[1]).map(([n,j])=>{
+            const x=jobInfo(j.status);
+            return <span className="lane" key={n}><i className={"dot "+(x.k==="ok"?"ok":x.k==="bad"?"bad":x.k==="run"?"run":x.k==="queue"?"queue":"wait")}/>
+              {n} <span className="lk">{x.say.toLowerCase()}{j.status==="done"&&j.duration_s?` · took ${dur(j.duration_s)}`:""}</span></span>;})}
+        </div>
+        {busy&&<div className="flow"><i/></div>}
       </div>
-      <div className="rail" aria-label={m.l}>
-        {STAGES.map((s,i)=>(
-          <React.Fragment key={s}>
-            {i>0&&<span className="st-l" data-d={i<=idx}/>}
-            <span className="st" data-s={bad&&i===3?"failed":i<idx?"done":i===idx?"active":"todo"}>
-              <span className="st-d">{bad&&i===3?<Ex s={9}/>:i<idx?<Check s={9}/>:
-                <span style={{width:4,height:4,borderRadius:"50%",background:"currentColor"}}/>}</span>
-              <span className="st-n">{s}</span>
-            </span>
-          </React.Fragment>))}
-      </div>
-      <div style={{display:"flex",alignItems:"center",gap:"var(--s4)"}}>
-        <div className="row-time">
-          <div className="row-dur tnum">{dur(run.duration_s)}</div>
-          <div className="row-ago">{ago(run.completed_at||run.started_at||run.dispatched_at||run.last_seen)}</div>
-        </div>
-        <div className="btns" style={{flexWrap:"nowrap"}}>
-          {run.job!=="activity"&&
-            <button className="btn btn-s" onClick={()=>onWells(run)} title="Per-well status from checkpoints">
-              <Slide s={12}/> Wells</button>}
-          {run.log&&<button className="btn btn-s" onClick={()=>onLog(run)}><Term s={12}/> Log</button>}
-          <button className="btn btn-q btn-s btn-i" onClick={()=>onReset(run)} title="Reset this run"><Sync s={12}/></button>
-        </div>
+      <div className="acts">
+        {report&&<a className="btn ink sm" href={`/api/reports/view?path=${encodeURIComponent(report.path)}`}
+                    target="_blank" rel="noopener"><Doc s={14}/> Report</a>}
+        {net&&<button className="btn sm" aria-expanded={open} onClick={()=>onWells(f)}><Grid s={14}/> Wells</button>}
+        {(net?.log||scan?.log)&&<button className="btn sm" onClick={()=>onLog(f)}><Lines s={14}/> Log</button>}
+        <button className="btn ghost sm" title="Analyse this date again" aria-label="Analyse again" onClick={()=>onAgain(f)}><Again s={14}/></button>
       </div>
     </div>
-  );
+    {open&&<div className="plate-wrap"><Plates data={wells} finished={!!netDone}/></div>}
+  </>);
 }
 
-/* Per-well status from the pipeline's own checkpoints.
-   RunBlock has always rendered <Wells>, but the component was never defined,
-   so opening Wells threw a ReferenceError and blanked the page. */
-function Wells({rows,summary}){
-  if(!rows?.length) return null;
-  const s=summary||{};
-  const cls=r=>r.status==="complete"?"p-o":r.status==="failed"?"p-b"
-           :r.status==="running"?"p-a":"p-n";
-  const when=t=>{if(!t)return"";const d=new Date(t.replace(" ","T"));
-    return isNaN(d)?String(t).slice(0,19):ago(d.toISOString());};
-  return (
-    <div style={{padding:"0 24px 18px"}}>
-      <div className="facts" style={{display:"flex",gap:18,margin:"2px 0 10px",
-           fontSize:12.5,color:"var(--ink-2)",flexWrap:"wrap"}}>
-        <span><b>{s.wells??rows.length}</b> wells</span>
-        {s.complete!=null&&<span><b>{s.complete}</b> complete</span>}
-        {!!s.failed&&<span style={{color:"var(--bad)"}}><b>{s.failed}</b> failed</span>}
-        {!!s.running&&<span><b>{s.running}</b> running</span>}
-      </div>
-      <div className="panel" style={{overflowX:"auto"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12.5}}>
-          <thead><tr>
-            {["Well","Chip","Recording","Stage","Status","Updated"].map(h=>
-              <th key={h} style={{textAlign:"left",padding:"7px 10px",fontSize:10.5,
-                  textTransform:"uppercase",letterSpacing:".05em",color:"var(--ink-3)",
-                  borderBottom:"1px solid var(--line)",whiteSpace:"nowrap"}}>{h}</th>)}
-          </tr></thead>
-          <tbody>
-            {rows.map((r,i)=>(
-              <React.Fragment key={(r.output_dir||"")+r.well+i}>
-                <tr>
-                  <td style={{padding:"6px 10px"}} className="mono">{r.well}</td>
-                  <td style={{padding:"6px 10px"}} className="mono">{r.chip_id||"—"}</td>
-                  <td style={{padding:"6px 10px"}} className="mono">{r.run_id||"—"}</td>
-                  <td style={{padding:"6px 10px",whiteSpace:"nowrap"}}>{r.stage_name||r.stage}</td>
-                  <td style={{padding:"6px 10px"}}>
-                    <span className={"pill "+cls(r)}><span className="dot"/>{r.status}</span></td>
-                  <td style={{padding:"6px 10px",whiteSpace:"nowrap",color:"var(--ink-3)"}}>
-                    {when(r.last_updated)}</td>
-                </tr>
-                {r.error&&<tr><td colSpan={6} style={{padding:"0 10px 8px",color:"var(--bad)",
-                  fontSize:12,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>
-                  {r.failed_stage?`${r.failed_stage}: `:""}{String(r.error).slice(0,400)}</td></tr>}
-              </React.Fragment>))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
+function Progress({folders,reports,wells,openW,onWells,onLog,onAgain,feed,goAdd}){
+  const byProj={};
+  folders.forEach(f=>{(byProj[f.project]=byProj[f.project]||[]).push(f);});
+  if(!folders.length) return (
+    <div className="ledger rise"><div className="empty">
+      <div className="empty-t">Nothing in the notebook yet</div>
+      <div className="empty-d">Choose recording dates to analyse and they will appear here, one line per date.</div>
+      <div style={{marginTop:18}}><button className="btn ink" onClick={goAdd}><Play s={12}/> Add recordings</button></div>
+    </div></div>);
+  let i=0;
+  return (<>
+    {Object.entries(byProj).map(([p,fs])=>(
+      <div className="sec" key={p}>
+        <div className="ledger">
+          <div className="proj"><span className="proj-n">{prettyProject(p)}</span>
+            <span className="proj-c">{fs.length} date{fs.length===1?"":"s"} · {fs.filter(f=>folderState(f.jobs)==="done").length} done</span></div>
+          {fs.map(f=><Line key={f.folder} f={f} i={i++} report={reports[`${p}/${f.date}`]}
+                           wells={wells[f.folder]} open={!!openW[f.folder]}
+                           onWells={onWells} onLog={onLog} onAgain={onAgain}/>)}
+        </div>
+      </div>))}
+    {feed.some(l=>!/^=+$|Open this in your browser|do not open index\.html|^Work dir:/.test(l.message))&&<div className="sec">
+      <div className="sec-h"><div className="sec-t">Today’s entries</div><div className="sec-d">What the system has been doing, newest first</div></div>
+      <div className="card"><div className="card-b feed">
+        {feed.filter(l=>!/^=+$|Open this in your browser|do not open index\.html|^Work dir:/.test(l.message))
+             .slice(-14).reverse().map(l=>(
+          <div className={"feed-i"+(l.level==="ERROR"?" err":"")} key={l.seq}>
+            <span className="feed-t">{l.time.slice(0,5)}</span><span className="feed-m">{l.message}</span></div>))}
+      </div></div>
+    </div>}
+  </>);
 }
 
-function RunBlock(props){
-  const {run,wells,expanded}=props;
-  return (
-    <div style={{borderTop:"1px solid var(--line)"}}>
-      <Row {...props}/>
-      {expanded&&wells&&<Wells rows={wells.wells} summary={wells.summary}/>}
-      {expanded&&wells&&!wells.wells?.length&&
-        <div style={{padding:"0 24px 18px"}} className="f-h">
-          No checkpoint files found yet for this run{wells.searched?.length
-            ? <> under <span className="mono">{wells.searched.join(", ")}</span></>:null}.
-        </div>}
-    </div>
-  );
-}
-
-
-/* ── Queue ─────────────────────────────────────────────────────────────── */
-function QueuePanel({cfg,toast}){
-  const [dir,setDir]=useState(cfg?.watch_dir||"");
+/* ── Add recordings tab ───────────────────────────────────────────────── */
+function AddRecordings({cfg,toast,ask,onQueued}){
+  const [dir,setDir]=useState(cfg.watch_dir||"");
   const [entries,setEntries]=useState(null);
-  const [sel,setSel]=useState({});          // path -> true
-  const [info,setInfo]=useState({});        // path -> inspect row
-  const [rerun,setRerun]=useState(false);
+  const [info,setInfo]=useState({});
+  const [sel,setSel]=useState({});
+  const [again,setAgain]=useState(false);
   const [busy,setBusy]=useState(false);
-  const [q,setQ]=useState(null);            // {batches, report}
-  const timer=useRef(null);
+  const [browse,setBrowse]=useState(false);
+  const [checking,setChecking]=useState(false);
 
   const load=useCallback(async path=>{
+    setEntries(null);setSel({});
     try{
       const r=await api("/api/browse",{method:"POST",body:JSON.stringify({path})});
       setDir(r.path);
       const runs=(r.entries||[]).filter(x=>x.is_run);
       setEntries(runs);
+      setInfo({});
       if(runs.length){
-        const ins=await api("/api/queue/inspect",{method:"POST",
-          body:JSON.stringify({folders:runs.map(x=>x.path)})});
-        const by={}; (ins.folders||[]).forEach(f=>{by[f.path]=f;});
-        setInfo(by);
-      } else setInfo({});
-    }catch(e){ setEntries([]); toast("Could not list folders",e.message,"error"); }
-  },[toast]);
-
-  useEffect(()=>{ if(cfg?.watch_dir) load(cfg.watch_dir); },[cfg?.watch_dir,load]);
-
-  const poll=useCallback(async()=>{
-    try{
-      const d=await api("/api/queue"); setQ(d);
-      const live=(d.batches||[]).some(b=>!b.finished);
-      if(!live&&d.handoff?.state!=="running"){
-        clearInterval(timer.current); timer.current=null;
+        setChecking(true);
+        try{const ins=await api("/api/queue/inspect",{method:"POST",body:JSON.stringify({folders:runs.map(x=>x.path)})});
+            const by={};(ins.folders||[]).forEach(f=>{by[f.path]=f;});setInfo(by);}
+        finally{setChecking(false);}
       }
-    }catch(e){ clearInterval(timer.current); timer.current=null; }
-  },[]);
-  useEffect(()=>()=>clearInterval(timer.current),[]);
+    }catch(e){setEntries([]);setChecking(false);toast("Could not read that folder",e.message,"error");}
+  },[toast]);
+  useEffect(()=>{if(cfg.watch_dir)load(cfg.watch_dir);},[cfg.watch_dir,load]);
 
+  // "Analysed" only when every analysis for the date is finished.
+  const done=p=>{const j=info[p]?.jobs||[];return j.length>0&&j.every(x=>x.status==="done");};
+  const partly=p=>!done(p)&&(info[p]?.jobs||[]).some(x=>x.status==="done");
   const chosen=Object.keys(sel).filter(k=>sel[k]);
-  const doneCount=chosen.filter(p=>(info[p]?.jobs||[]).some(j=>j.already_done)).length;
+  const chosenDone=chosen.filter(done).length;
+  const fresh=(entries||[]).filter(x=>!done(x.path)&&x.finished!==false);
 
-  const start=async()=>{
-    if(!chosen.length) return;
+  const go=async()=>{
+    if(chosenDone&&again&&!(await ask({title:"Analyse again?",ok:"Analyse again",
+      body:`${chosenDone} of these dates were already analysed. Their results will be computed again and replaced.`})))return;
     setBusy(true);
     try{
-      const r=await api("/api/queue",{method:"POST",
-        body:JSON.stringify({folders:chosen,rerun})});
-      toast("Queued",`${r.queued.length} job(s) started`,"ok");
-      setSel({});
-      if(!timer.current) timer.current=setInterval(poll,2000);
-      poll();
-    }catch(e){ toast("Nothing queued",e.message,"error"); }
-    finally{ setBusy(false); }
+      const r=await api("/api/queue",{method:"POST",body:JSON.stringify({folders:chosen,rerun:again})});
+      const n=new Set(r.queued.map(q=>q.path)).size;
+      toast(`${n} date${n===1?"":"s"} added`,"They will be analysed in order. Follow them under Progress.");
+      setSel({});onQueued();
+    }catch(e){toast("Nothing was added",e.message,"error");}
+    finally{setBusy(false);}
   };
 
-  const batch=(q?.batches||[]).slice(-1)[0];
-  const rep=q?.handoff;
+  return (<div className="rise">
+    <div className="sec-h"><div className="sec-t">Add recordings</div>
+      <div className="sec-d">Tick the recording dates you want analysed, then press the button at the bottom.</div></div>
+    <div className="card" style={{marginBottom:18}}><div className="card-b" style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+      <Folder s={18}/><div style={{flex:1,minWidth:0}}>
+        <div className="hint-s">Looking in</div>
+        <div className="mono" style={{wordBreak:"break-all"}}>{dir||"—"}</div></div>
+      <button className="btn sm" onClick={()=>setBrowse(b=>!b)}>{browse?"Close":"Look somewhere else"}</button>
+      <button className="btn sm" onClick={()=>load(dir)}>Refresh</button>
+      {browse&&<div style={{flexBasis:"100%"}}><Browser initial={dir} onClose={()=>setBrowse(false)} onPick={p=>load(p)}/></div>}
+    </div></div>
 
-  return (
-    <div>
-      <div className="sec-h">
-        <div className="sec-t">Queue</div>
-        <div className="sec-d">Pick folders to analyse now — they run one at a time, in order</div>
+    {entries===null
+      ? <div className="tiles">{[0,1,2,3,4,5].map(k=><div key={k} className="skel" style={{height:96}}/>)}</div>
+      : entries.length===0
+        ? <Callout kind="amber" icon={<Alert s={17}/>}>No recording dates were found in this folder. Choose the folder that
+            <b> contains</b> the date folders (like <span className="mono">260818</span>).</Callout>
+        : <>
+            <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+              {checking&&<span className="hint" style={{display:"flex",gap:8,alignItems:"center"}}>
+                <span className="spin"/> Checking which dates were already analysed…</span>}
+              <button className="btn sm" disabled={checking||!fresh.length}
+                      onClick={()=>setSel(Object.fromEntries(fresh.map(x=>[x.path,true])))}>Select all new ({fresh.length})</button>
+              {chosen.length>0&&<button className="btn ghost sm" onClick={()=>setSel({})}>Clear selection</button>}
+            </div>
+            <div className="tiles">
+              {entries.map((x,k)=>{
+                const dt=prettyDate(x.name), on=!!sel[x.path], dn=done(x.path);
+                const jobs=(info[x.path]?.jobs||[]).map(j=>j.label).join(" + ");
+                return (
+                  <label key={x.path} className="tile" data-on={on} data-done={dn} style={{"--i":k}}>
+                    <input type="checkbox" checked={on} onChange={()=>setSel(v=>({...v,[x.path]:!v[x.path]}))}/>
+                    {dn?<span className="t-tag done">analysed</span>:partly(x.path)?<span className="t-tag copy">partly done</span>
+                      :x.finished===false?<span className="t-tag copy">copying</span>:null}
+                    <div className="t-date">{dt.big}</div>
+                    <div className="t-code">{dt.year} · {x.name}</div>
+                    <div className="t-what">{jobs||info[x.path]?.note||" "}</div>
+                    <span className="t-tick">{on&&<Check s={13} w={3}/>}</span>
+                  </label>);})}
+            </div>
+          </>}
+
+    {chosen.length>0&&<div className="sticky">
+      <div style={{flex:1,minWidth:200}}>
+        <b>{chosen.length} date{chosen.length===1?"":"s"} selected</b>
+        {chosenDone>0&&<label style={{display:"flex",gap:8,alignItems:"center",marginTop:4,fontSize:13,cursor:"pointer"}}>
+          <input type="checkbox" checked={again} onChange={e=>setAgain(e.target.checked)}/>
+          Also redo the {chosenDone} already analysed</label>}
       </div>
-      <div className="panel"><div className="panel-b"
-           style={{display:"flex",flexDirection:"column",gap:"var(--s5)"}}>
-
-        <div className="btns" style={{alignItems:"center"}}>
-          <span className="f-h">In</span>
-          <code className="mono f-h" style={{wordBreak:"break-all"}}>{dir||"—"}</code>
-          <div className="grow"/>
-          <button className="btn btn-q btn-s" onClick={()=>load(dir)}>Refresh</button>
-        </div>
-
-        {entries===null
-          ? <div className="f-h">Loading…</div>
-          : entries.length===0
-            ? <div className="note n-w"><span className="n-i"><Alert s={15}/></span>
-                <div>No run folders with a recording were found here. Check the input
-                     folder under Folders.</div></div>
-            : <div className="qlist">
-                {entries.map(x=>{
-                  const row=info[x.path]||{};
-                  const jobs=row.jobs||[];
-                  const already=jobs.some(j=>j.already_done);
-                  const on=!!sel[x.path];
-                  return (
-                    <label key={x.path} className={"qrow"+(on?" on":"")}>
-                      <input type="checkbox" checked={on}
-                             onChange={()=>setSel(v=>({...v,[x.path]:!v[x.path]}))}/>
-                      <span className="qname">{x.name}</span>
-                      <span className="qmeta">
-                        {jobs.length
-                          ? jobs.map(j=>j.label).join(" + ")
-                          : (row.note||"no analysis applies")}
-                      </span>
-                      {already&&<span className="pill p-w">already analysed</span>}
-                      {x.finished===false&&<span className="pill p-w">still copying</span>}
-                    </label>
-                  );
-                })}
-              </div>}
-
-        <div style={{borderTop:"1px solid var(--line)",paddingTop:"var(--s4)",
-                     display:"flex",flexDirection:"column",gap:"var(--s3)"}}>
-          {doneCount>0&&
-            <Switch id="q-rerun" checked={rerun} onChange={setRerun}
-                    label={`Re-run ${doneCount} folder(s) already analysed`}
-                    hint="Off by default — a Network analysis is a long GPU job."/>}
-        </div>
-
-        <div className="btns" style={{alignItems:"center"}}>
-          <button className="btn btn-pri" disabled={busy||!chosen.length} onClick={start}>
-            <Play s={13}/>{busy?"Queueing…":`Queue ${chosen.length||""} folder${chosen.length===1?"":"s"}`}
-          </button>
-          {batch&&!batch.finished&&
-            <span className="f-h">Running — {batch.keys.length} job(s) in this batch</span>}
-          {batch&&batch.finished&&rep?.state==="running"&&
-            <span className="f-h">Analysis done — preparing the AI handoff…</span>}
-        </div>
-
-        {batch?.finished&&rep?.state==="done"&&rep.label===batch.id&&
-          <div className="note n-a"><span className="n-i"><Check s={15}/></span>
-            <div style={{minWidth:0,flex:1}}>AI handoff for this batch is ready. Run:
-              <div style={{marginTop:8}}><Code text={rep.instruction}/></div></div></div>}
-        {batch?.finished&&rep?.state==="error"&&
-          <div className="note n-b"><span className="n-i"><Alert s={15}/></span>
-            <div>The analysis finished, but the AI handoff failed: {rep.error}</div></div>}
-      </div></div>
-    </div>
-  );
+      <button className="btn lite" disabled={busy} onClick={go}>
+        {busy?<span className="spin"/>:<Play s={12}/>} Analyse {chosen.length} date{chosen.length===1?"":"s"}</button>
+    </div>}
+  </div>);
 }
 
-/* ── AI report handoff ───────────────────────────────────────────────── */
-// The report is written by an AI assistant, not by this tool. This panel keeps
-// the study's requirements (saved with the configuration) and prepares a
-// handoff folder — skills.md + requirements + the result paths — to give it.
-function AiHandoff({cfg,toast}){
-  const [text,setText]=useState(cfg?.ai_requirements||"");
-  const [saved,setSaved]=useState(cfg?.ai_requirements||"");
-  const [auto,setAuto]=useState(cfg?.auto_handoff!==false);
+/* ── AI report tab ────────────────────────────────────────────────────── */
+function AiReport({cfg,reports,toast}){
+  const [text,setText]=useState(cfg.ai_requirements||"");
+  const [saved,setSaved]=useState(cfg.ai_requirements||"");
+  const [auto,setAuto]=useState(cfg.auto_handoff!==false);
   const [busy,setBusy]=useState(false);
   const [last,setLast]=useState(null);
-
-  useEffect(()=>{(async()=>{try{
-    const d=await api("/api/handoff"); if(d&&d.state) setLast(d);}catch(e){}})();},[]);
-
-  const save=async(nextAuto=auto)=>{
-    try{ await api("/api/requirements",{method:"POST",
-           body:JSON.stringify({text,auto_handoff:nextAuto})});
-         setSaved(text); return true; }
-    catch(e){ toast("Requirements not saved",e.message,"error"); return false; }
+  useEffect(()=>{api("/api/handoff").then(d=>d?.state&&d.state!=="idle"&&setLast(d)).catch(()=>{});},[]);
+  const save=async(a=auto)=>{
+    try{await api("/api/requirements",{method:"POST",body:JSON.stringify({text,auto_handoff:a})});
+        setSaved(text);toast("Saved","Every new report will follow these instructions.");return true;}
+    catch(e){toast("Not saved",e.message,"error");return false;}
   };
   const prepare=async()=>{
     setBusy(true);
-    try{
-      if(text!==saved && !(await save())) return;
-      const r=await api("/api/handoff",{method:"POST",body:JSON.stringify({folders:[]})});
-      setLast({state:"done",...r});
-      toast("AI handoff ready",`${r.network_wells} network well(s), ${r.activity_runs} scan run(s)`,"ok");
-    }catch(e){ toast("Handoff failed",e.message,"error"); }
-    finally{ setBusy(false); }
+    try{if(text!==saved&&!(await save()))return;
+        const r=await api("/api/handoff",{method:"POST",body:JSON.stringify({folders:[]})});
+        setLast({state:"done",...r});}
+    catch(e){toast("Could not prepare",e.message,"error");}
+    finally{setBusy(false);}
   };
-  const dirty=text!==saved;
+  const list=Object.values(reports);
+  const byP={};list.forEach(r=>{(byP[r.project]=byP[r.project]||[]).push(r);});
+  return (<div className="rise">
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Finished reports</div>
+        <div className="sec-d">One report per recording date. It opens in a new tab.</div></div>
+      {list.length===0
+        ? <div className="card"><div className="empty"><div className="empty-t">No reports yet</div>
+            <div className="empty-d">Reports appear here as each recording date finishes, a few minutes after its analyses complete.</div></div></div>
+        : Object.entries(byP).map(([p,rs])=>(
+          <div className="ledger" key={p} style={{marginBottom:16}}>
+            <div className="proj"><span className="proj-n">{prettyProject(p)||"Reports"}</span><span className="proj-c">{rs.length} report{rs.length===1?"":"s"}</span></div>
+            {rs.map((r,k)=>{const dt=prettyDate(r.label);return(
+              <div className="line rise" key={r.path} style={{"--i":k}}>
+                <div><div className="d-big">{dt.big}</div><div className="d-code">{dt.year} · {r.label}</div></div>
+                <div className="hint">Written {ago(r.built)}</div>
+                <div className="acts"><a className="btn ink sm" target="_blank" rel="noopener"
+                  href={`/api/reports/view?path=${encodeURIComponent(r.path)}`}><Ext s={14}/> Open report</a></div>
+              </div>);})}
+          </div>))}
+    </div>
 
-  return (
-    <div>
-      <div className="sec-h">
-        <div className="sec-t">AI report</div>
-        <div className="sec-d">Requirements for the report, and the handoff folder to give Claude</div>
-      </div>
-      <div className="panel"><div className="panel-b"
-           style={{display:"flex",flexDirection:"column",gap:"var(--s4)"}}>
-        <div>
-          <div className="f-l" style={{marginBottom:6}}>Requirements</div>
-          <textarea className="inp" rows={7} value={text}
-                    style={{height:"auto",padding:"10px 12px",resize:"vertical",lineHeight:1.5}}
-                    placeholder={"What should the report show? e.g.\n• Compare KO vs WT burst rate and IBI at each DIV\n• Exclude wells with QC fail\n• Word document with one figure per metric"}
-                    onChange={e=>setText(e.target.value)}/>
-          <div className="f-h" style={{marginTop:6}}>
-            Saved with the configuration and copied into every handoff. Defaults for
-            anything not stated here come from <span className="mono">skills.md</span>.
-          </div>
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">What reports should cover</div>
+        <div className="sec-d">Write it the way you would brief a colleague. Applies to every new report.</div></div>
+      <div className="card"><div className="card-b">
+        <textarea className="inp" rows={8} value={text} onChange={e=>setText(e.target.value)}
+          placeholder={"For example:\n• Compare burst rate between the two lines at each age\n• Leave out wells that failed quality control\n• One figure per measurement"}/>
+        <div style={{display:"flex",gap:10,marginTop:12,flexWrap:"wrap",alignItems:"center"}}>
+          <button className="btn ink" disabled={text===saved} onClick={()=>save()}>{text===saved?"Saved":"Save instructions"}</button>
+          <span className="hint-s">Anything you leave out follows the lab’s standard report.</span>
         </div>
-        <Switch id="ai-auto" checked={auto}
-                onChange={v=>{setAuto(v); save(v);}}
-                label="Prepare a handoff automatically when a queued batch finishes"
-                hint="Covers just the folders in that batch."/>
-        <div className="btns" style={{alignItems:"center"}}>
-          <button className="btn" disabled={!dirty} onClick={()=>save()}>
-            {dirty?"Save requirements":"Saved"}</button>
-          <button className="btn btn-pri" disabled={busy} onClick={prepare}>
-            {busy?"Preparing…":"Prepare handoff for all results"}</button>
-        </div>
-        {last?.state==="done"&&last.prompt&&
-          <div className="note n-a"><span className="n-i"><Check s={15}/></span>
-            <div style={{minWidth:0,flex:1}}>
-              <div>Handoff ready — {last.network_wells} network well(s), {last.activity_runs} scan
-                run(s). In a terminal on this server, run:</div>
-              <div style={{marginTop:8}}><Code text={last.instruction}/></div>
-              <div className="f-h" style={{marginTop:6}}>The report will be written to{" "}
-                <span className="mono" style={{wordBreak:"break-all"}}>{last.report_dir}</span></div>
-            </div></div>}
-        {last?.state==="error"&&
-          <div className="note n-b"><span className="n-i"><Alert s={15}/></span>
-            <div>The handoff could not be prepared: {last.error}</div></div>}
+        <details className="adv">
+          <summary><span className="chev"><Chev s={14}/></span>Report packages for Claude</summary>
+          <Switch id="ai-auto" checked={auto} onChange={v=>{setAuto(v);save(v);}}
+                  label="Make a package when a batch of added dates finishes"
+                  hint="Leave this off while the lab's report service is writing a report for each date — otherwise every batch gets two packages."/>
+          <div className="hint" style={{margin:"6px 0 12px"}}>Bundles all results with these instructions into one folder that
+            Claude can turn into a report covering every date.</div>
+          <button className="btn" disabled={busy} onClick={prepare}>{busy?<span className="spin"/>:<Doc s={14}/>} Prepare package for all results</button>
+          {last?.state==="done"&&last.prompt&&<div style={{marginTop:12}}>
+            <Callout kind="green" icon={<Check s={17}/>}>Package ready — {last.network_wells} wells, {last.activity_runs} scans.
+              In a terminal on the analysis computer, run:</Callout>
+            <div style={{marginTop:8}}><Code text={last.instruction}/></div></div>}
+          {last?.state==="error"&&<div style={{marginTop:12}}><Callout kind="red" icon={<Alert s={17}/>}>{last.error}</Callout></div>}
+        </details>
       </div></div>
     </div>
-  );
+  </div>);
 }
 
-/* ── App ───────────────────────────────────────────────────────────────── */
+/* ── Settings tab ─────────────────────────────────────────────────────── */
+function Field({spec,value,onChange}){
+  const set=v=>onChange(spec.key,v);
+  if(spec.type==="flag")return <Switch id={"o-"+spec.key} checked={!!value} onChange={set} label={spec.flag} hint={spec.help}/>;
+  const L=<span className="f-l mono" style={{fontWeight:500}}>{spec.flag}</span>;
+  const H=<span className="hint-s">{spec.help}</span>;
+  if(spec.type==="tristate")return <div className="f">{L}
+    <select className="sel" value={value==null?"":String(value)} onChange={e=>set(e.target.value===""?null:e.target.value==="true")}>
+      <option value="">Default</option><option value="true">On</option><option value="false">Off</option></select>{H}</div>;
+  if(spec.type==="choice")return <div className="f">{L}
+    <select className="sel" value={value??""} onChange={e=>set(e.target.value||null)}>
+      <option value="">Default</option>{spec.choices.map(c=><option key={c} value={c}>{c}</option>)}</select>{H}</div>;
+  if(spec.type==="list")return <div className="f">{L}
+    <input className="inp mono" placeholder="comma separated" value={Array.isArray(value)?value.join(", "):(value??"")}
+           onChange={e=>set(e.target.value.split(",").map(s=>s.trim()).filter(Boolean))}/>{H}</div>;
+  const num=spec.type==="int"||spec.type==="float";
+  return <div className="f">{L}
+    <input className={"inp"+(spec.type==="path"?" mono":"")} type={num?"number":"text"} step={spec.type==="float"?"0.01":"1"}
+           placeholder="Default" value={value??""}
+           onChange={e=>set(e.target.value===""?null:(num?Number(e.target.value):e.target.value))}/>{H}</div>;
+}
+
+function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
+  const [br,setBr]=useState(null);
+  const [q,setQ]=useState("");
+  const [openG,setOpenG]=useState({});
+  const [preview,setPreview]=useState(null);
+  const [py,setPy]=useState(null);
+  const setT=(k,v)=>setCfg(c=>({...c,[k]:v}));
+  const setO=(k,v)=>setCfg(c=>({...c,driver_options:{...c.driver_options,[k]:v}}));
+  const sorting=!cfg.driver_options.skip_spikesorting;
+  const ql=q.trim().toLowerCase();
+  const groups=schema.groups.map(g=>({...g,fields:g.fields.filter(f=>!ql||f.key.includes(ql)||f.flag.includes(ql)||(f.help||"").toLowerCase().includes(ql))})).filter(g=>g.fields.length);
+  const doPreview=async()=>{try{setPreview(await api("/api/preview",{method:"POST",body:JSON.stringify(onSave.payload())}));}
+    catch(e){toast("No preview",e.message,"error");}};
+  const testPy=async()=>{try{setPy(await api("/api/driver-python",{method:"POST",body:JSON.stringify({python:cfg.driver_python||""})}));}
+    catch(e){toast("Test failed",e.message,"error");}};
+
+  return (<div className="rise">
+    {locked&&<div style={{marginBottom:18}}><Callout kind="amber" icon={<Alert s={17}/>}>
+      <b>Settings are locked while analyses are running.</b> Changing them now could disturb the running work.
+      They unlock as soon as the current analyses finish.</Callout></div>}
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Where things are</div></div>
+      <div className="card"><div className="card-b">
+        <div className="f"><label className="f-l" htmlFor="in">Recordings come from</label>
+          <div className="f-row"><input id="in" className="inp mono" value={cfg.watch_dir} disabled={locked} onChange={e=>setT("watch_dir",e.target.value)}/>
+            <button className="btn" disabled={locked} onClick={()=>setBr(br==="in"?null:"in")}><Folder s={15}/> Choose</button></div>
+          <span className="hint-s">The project folder that contains the date folders. It is only ever read, never changed.</span>
+          {br==="in"&&<Browser initial={cfg.watch_dir} onClose={()=>setBr(null)} onPick={p=>setT("watch_dir",p)}/>}
+        </div>
+        <div className="f" style={{marginBottom:0}}><label className="f-l" htmlFor="out">Results go to</label>
+          <div className="f-row"><input id="out" className="inp mono" value={cfg.driver_options.output_dir??""} disabled={locked}
+                 onChange={e=>setO("output_dir",e.target.value||null)}/>
+            <button className="btn" disabled={locked} onClick={()=>setBr(br==="out"?null:"out")}><Folder s={15}/> Choose</button></div>
+          <span className="hint-s">Each project gets its own folder here, with its results, scans, logs and reports.</span>
+          {br==="out"&&<Browser initial={cfg.driver_options.output_dir||""} onClose={()=>setBr(null)} onPick={p=>setO("output_dir",p)}/>}
+        </div>
+      </div></div>
+    </div>
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">What to analyse</div></div>
+      <div className="card"><div className="card-b">
+        <Switch id="net" checked={cfg.run_network} disabled={locked} onChange={v=>setT("run_network",v)}
+                label="Network analysis" hint="Spikes and network bursts from each well's network recording."/>
+        <Switch id="sort" checked={sorting} disabled={locked||!cfg.run_network} onChange={v=>setO("skip_spikesorting",!v)}
+                label="Spike sorting (slow — about an hour per well)"
+                hint={sorting?"On: separates individual neurons with the graphics card. Much slower.":
+                  "Off (recommended): counts spikes on each electrode. A few minutes per well, no graphics card needed."}/>
+        <Switch id="act" checked={cfg.run_activity} disabled={locked} onChange={v=>setT("run_activity",v)}
+                label="Activity scan" hint="Whole-chip activity maps and quality checks. Takes seconds."/>
+        <Switch id="stg" checked={!!cfg.stage_locally} disabled={locked} onChange={v=>setT("stage_locally",v)}
+                label="Use the fast local disk while working"
+                hint="Keeps big temporary files on the computer's fast disk and deletes them afterwards. Several times faster."/>
+      </div></div>
+    </div>
+
+    <details className="adv">
+      <summary><span className="chev"><Chev s={14}/></span>Advanced settings — for whoever maintains the pipeline</summary>
+      <div className="card" style={{marginTop:8}}><div className="card-b">
+        <div className="row2">
+          <div className="f"><label className="f-l">Confirm a copy has finished after (seconds)</label>
+            <input className="inp tnum" type="number" min="1" value={cfg.settle_seconds} disabled={locked} onChange={e=>setT("settle_seconds",e.target.value)}/></div>
+          <div className="f"><label className="f-l">Check for new recordings every (seconds)</label>
+            <input className="inp tnum" type="number" min="1" value={cfg.poll_seconds} disabled={locked} onChange={e=>setT("poll_seconds",e.target.value)}/></div>
+          <div className="f"><label className="f-l">Network analyses at once</label>
+            <input className="inp tnum" type="number" min="1" max="8" value={cfg.max_concurrent_network??1} disabled={locked} onChange={e=>setT("max_concurrent_network",e.target.value)}/></div>
+          <div className="f"><label className="f-l">Activity scans at once</label>
+            <input className="inp tnum" type="number" min="1" max="16" value={cfg.max_concurrent_activity??2} disabled={locked} onChange={e=>setT("max_concurrent_activity",e.target.value)}/></div>
+          <div className="f"><label className="f-l">Fast-disk folder</label>
+            <input className="inp mono" value={cfg.scratch_dir||""} disabled={locked} onChange={e=>setT("scratch_dir",e.target.value)}/></div>
+          <div className="f"><label className="f-l">Always keep this much free on it (GB)</label>
+            <input className="inp tnum" type="number" min="0" value={cfg.stage_min_free_gb??200} disabled={locked} onChange={e=>setT("stage_min_free_gb",e.target.value)}/></div>
+        </div>
+        <Switch id="mk" checked={cfg.require_finished_marker} disabled={locked} onChange={v=>setT("require_finished_marker",v)}
+                label="Wait for MaxWell's 'finished' mark" hint="Also require the recording software to have marked the recording complete."/>
+        <Switch id="ex" checked={cfg.skip_settle_for_existing} disabled={locked} onChange={v=>setT("skip_settle_for_existing",v)}
+                label="Folders already here are ready" hint="Skip the copy check for folders present when watching starts."/>
+        <Switch id="dry" checked={cfg.dry_run} disabled={locked} onChange={v=>setT("dry_run",v)}
+                label="Test mode" hint="Find recordings and show what would run, without running anything."/>
+        <Switch id="lio" checked={cfg.logs_in_output!==false} disabled={locked} onChange={v=>setT("logs_in_output",v)}
+                label="Keep logs beside the results"/>
+        <div className="f" style={{marginTop:12}}><label className="f-l">Pipeline Python</label>
+          <div className="f-row"><input className="inp mono" placeholder="(detected automatically)" value={cfg.driver_python??""} disabled={locked}
+                 onChange={e=>setT("driver_python",e.target.value)}/><button className="btn" onClick={testPy}>Test</button></div>
+          {py&&<Callout kind={py.ok?"green":"red"} icon={py.ok?<Check s={17}/>:<Alert s={17}/>}>
+            <span className="mono">{py.python}</span> — {py.ok?"has everything the pipeline needs.":`missing ${(py.missing||[]).join(", ")||py.error}.`}</Callout>}
+        </div>
+
+        <div className="sec-h" style={{marginTop:22}}><div className="sec-t" style={{fontSize:20}}>Pipeline options</div>
+          <div className="sec-d">Passed to MEA-Analysis</div></div>
+        <input className="inp" placeholder="Search options…" value={q} onChange={e=>setQ(e.target.value)} aria-label="Search options"/>
+        {groups.map(g=>{const o=!!ql||!!openG[g.group];return(
+          <div className="grp" key={g.group}>
+            <button className="grp-h" aria-expanded={o} onClick={()=>setOpenG(x=>({...x,[g.group]:!x[g.group]}))}>
+              <span style={{display:"inline-flex",transform:o?"rotate(90deg)":"none",transition:"transform .2s"}}><Chev s={13}/></span>
+              {g.group}<span className="hint-s" style={{marginLeft:"auto"}}>{g.fields.length}</span></button>
+            {o&&<div className="grp-b">{g.fields.map(f=><Field key={f.key} spec={f} value={cfg.driver_options[f.key]} onChange={locked?()=>{}:setO}/>)}</div>}
+          </div>);})}
+        <div style={{marginTop:16}}><button className="btn" onClick={doPreview}><Lines s={14}/> Show the exact command</button></div>
+        {preview&&(preview.commands||[]).map(c=><div key={c.job} style={{marginTop:10}}>
+          <div className="hint-s" style={{marginBottom:4}}>{c.job_label}{preview.example_run?` · for ${preview.example_run}`:""}</div><Code text={c.command}/></div>)}
+      </div></div>
+    </details>
+
+    <div className="sticky" style={{background:"var(--sheet)",color:"var(--ink)",border:"1px solid var(--rule-2)"}}>
+      <div style={{flex:1}} className="hint">Changes apply to analyses started after you save.</div>
+      <button className="btn ink" disabled={locked||busy} onClick={()=>onSave()}>{busy?<span className="spin"/>:<Check s={14}/>} Save settings</button>
+    </div>
+  </div>);
+}
+
+/* ── App ──────────────────────────────────────────────────────────────── */
 function App(){
   const [schema,setSchema]=useState(null);
   const [cfg,setCfg]=useState(null);
   const [status,setStatus]=useState(null);
   const [fatal,setFatal]=useState("");
-  const [preview,setPreview]=useState(null);
-  const [browsing,setBrowsing]=useState(null);
+  const [tab,setTab]=useState(()=>{const h=location.hash.slice(1);
+    if(["progress","add","reports","settings"].includes(h))return h;
+    try{return localStorage.getItem("mea-tab")||"progress";}catch(e){return"progress";}});
+  const [reports,setReports]=useState({});
+  const [wells,setWells]=useState({});
+  const [openW,setOpenW]=useState({});
   const [log,setLog]=useState(null);
-  const [q,setQ]=useState("");
-  const [open,setOpen]=useState({});
-  const [theme,setTheme]=useState(()=>localStorage.getItem("mea-theme")||"auto");
+  const [feed,setFeed]=useState([]);
   const [toasts,setToasts]=useState([]);
   const [busy,setBusy]=useState(false);
-  const [act,setAct]=useState([]);
-  const [follow,setFollow]=useState(true);
-  const [showCfg,setShowCfg]=useState(true);
-  /* Never leave the operator stopped with no way back to setup: the only
-     control that reveals it is hidden while running, so a panel collapsed
-     before a run could not be reopened after one.
+  const [confirmAsk,setConfirmAsk]=useState(null);
+  const tid=useRef(0),seq=useRef(0),polling=useRef(false),openWRef=useRef({}),confirmRes=useRef(null);
 
-     Must sit with the other hooks, above App's early returns. Placing it
-     lower meant the first render (no config yet) bailed out before it and
-     later renders ran it — "rendered more hooks than during the previous
-     render", which blanks the page. Reads status directly because the
-     `running` const is declared further down. */
-  useEffect(()=>{if(!status?.running)setShowCfg(true);},[status?.running]);
-  const [picker,setPicker]=useState(null);
-  const [pyCheck,setPyCheck]=useState(null);
-  const [busyNative,setBusyNative]=useState(false);
-  const [clearing,setClearing]=useState(false);
-  const [wells,setWells]=useState({});      // run key -> checkpoint payload
-  const [openWells,setOpenWells]=useState({});
-  const tid=useRef(0), seq=useRef(0), openWellsRef=useRef({});
+  const toast=useCallback((t,m,k="ok")=>{const id=++tid.current;setToasts(x=>[...x,{id,t,m,k}]);
+    setTimeout(()=>setToasts(x=>x.filter(y=>y.id!==id)),k==="error"?9000:4500);},[]);
+  const ask=useCallback(a=>new Promise(res=>{confirmRes.current=res;setConfirmAsk(a);}),[]);
+  const closeAsk=v=>{setConfirmAsk(null);confirmRes.current&&confirmRes.current(v);};
 
-  const toast=useCallback((t,m,k="info")=>{const id=++tid.current;
-    setToasts(x=>[...x,{id,t,m,k}]);
-    setTimeout(()=>setToasts(x=>x.filter(y=>y.id!==id)),k==="error"?9000:4200);},[]);
-
-  useEffect(()=>{openWellsRef.current=openWells;},[openWells]);
-
-  useEffect(()=>{document.documentElement.dataset.theme=theme;
-    localStorage.setItem("mea-theme",theme);},[theme]);
+  useEffect(()=>{try{localStorage.setItem("mea-tab",tab);}catch(e){}
+    if(location.hash.slice(1)!==tab)history.replaceState(null,"","#"+tab);},[tab]);
+  useEffect(()=>{const h=()=>{const t=location.hash.slice(1);
+    if(["progress","add","reports","settings"].includes(t))setTab(t);};
+    addEventListener("hashchange",h);return()=>removeEventListener("hashchange",h);},[]);
+  useEffect(()=>{openWRef.current=openW;},[openW]);
 
   useEffect(()=>{(async()=>{try{
-    const s=await api("/api/schema"),c=await api("/api/config");
-    setSchema(s);setCfg(c);
-    const o={};s.groups.forEach((g,i)=>o[g.group]=!g.group.toLowerCase().includes("advanced"));
-    setOpen(o);
-    try{ setPicker(await api("/api/picker")); }catch(e){ setPicker({available:false}); }
+    const [s,c]=await Promise.all([api("/api/schema"),api("/api/config")]);setSchema(s);setCfg(c);
   }catch(e){setFatal(e.message);}})();},[]);
 
-  // One poll at a time: a slow answer used to let polls pile up behind each
-  // other. Nothing is polled while the tab is hidden, and the per-well
-  // checkpoints (the expensive read) refresh every fifth tick, not every tick.
-  const polling=useRef(false), tick=useRef(0);
-  const refresh=useCallback(async(force)=>{
-    if(polling.current) return;
-    if(!force&&typeof document!=="undefined"&&document.hidden) return;
+  const loadReports=useCallback(()=>api("/api/reports").then(d=>{
+    const m={};(d.reports||[]).forEach(r=>{m[`${r.project}/${r.label}`]=r;});setReports(m);}).catch(()=>{}),[]);
+
+  // Status every 3 s, one request at a time, never while the tab is hidden.
+  const refresh=useCallback(async force=>{
+    if(polling.current||(!force&&document.hidden))return;
     polling.current=true;
     try{
-      const wellsDue=force||(tick.current++%5===0);
-      const keys=wellsDue?Object.keys(openWellsRef.current||{}).filter(k=>openWellsRef.current[k]):[];
       await Promise.all([
-        api("/api/status").then(s=>{setStatus(s);setShowCfg(v=>s.running?false:v);}).catch(()=>{}),
-        api(`/api/logs?since=${seq.current}`).then(d=>{
-          if(d.lines?.length){seq.current=d.last_seq;setAct(a=>[...a,...d.lines].slice(-400));}}).catch(()=>{}),
-        ...keys.map(k=>api(`/api/runs/checkpoints?path=${encodeURIComponent(k)}`)
-          .then(d=>setWells(w=>({...w,[k]:d}))).catch(()=>{})),
+        api("/api/status").then(setStatus).catch(()=>{}),
+        api(`/api/logs?since=${seq.current}`).then(d=>{if(d.lines?.length){seq.current=d.last_seq;
+          setFeed(a=>[...a,...d.lines].slice(-60));}}).catch(()=>{}),
       ]);
-    }finally{ polling.current=false; }
+    }finally{polling.current=false;}
   },[]);
   useEffect(()=>{
-    refresh(true);
-    const t=setInterval(()=>refresh(false),2000);
-    const vis=()=>{ if(!document.hidden) refresh(true); };
-    document.addEventListener("visibilitychange",vis);
-    return()=>{clearInterval(t);document.removeEventListener("visibilitychange",vis);};
-  },[refresh]);
+    refresh(true);loadReports();
+    const t=setInterval(()=>refresh(false),3000), r=setInterval(loadReports,60000);
+    const v=()=>{if(!document.hidden){refresh(true);loadReports();}};
+    document.addEventListener("visibilitychange",v);
+    return()=>{clearInterval(t);clearInterval(r);document.removeEventListener("visibilitychange",v);};
+  },[refresh,loadReports]);
 
-  useEffect(()=>{
-    if(!log?.path)return;
-    const live=(status?.runs||[]).some(r=>r.log===log.path&&(r.status==="running"||r.status==="dispatched"));
-    if(!live)return;
-    const t=setInterval(async()=>{try{
-      const d=await api(`/api/runs/log?path=${encodeURIComponent(log.path)}`);
-      setLog(l=>l&&l.path===log.path?{...l,lines:d.lines}:l);}catch(e){}},3000);
-    return()=>clearInterval(t);
-  },[log?.path,status]);
-
-  const payload=useCallback(()=>({
-    watch_dir:cfg.watch_dir, driver_options:cfg.driver_options, h5_glob:cfg.h5_glob,
-    assay_subfolder:cfg.assay_subfolder,
-    run_network:!!cfg.run_network, run_activity:!!cfg.run_activity,
-    activity_subfolder:cfg.activity_subfolder, activity_output_dir:cfg.activity_output_dir||"",
-    activity_active_hz:Number(cfg.activity_active_hz), activity_figures:!!cfg.activity_figures,
-    max_concurrent_network:Number(cfg.max_concurrent_network)||1,
-    max_concurrent_activity:Number(cfg.max_concurrent_activity)||1,
-    gpu_cooldown_seconds:Number(cfg.gpu_cooldown_seconds)||0,
-    queue_poll_seconds:Number(cfg.queue_poll_seconds)||1,
-    settle_seconds:Number(cfg.settle_seconds), poll_seconds:Number(cfg.poll_seconds),
-    require_finished_marker:!!cfg.require_finished_marker,
-    skip_settle_for_existing:!!cfg.skip_settle_for_existing,
-    driver_python:cfg.driver_python||"", logs_in_output:cfg.logs_in_output!==false,
-    stage_locally:!!cfg.stage_locally, scratch_dir:cfg.scratch_dir||"",
-    stage_min_free_gb:Number(cfg.stage_min_free_gb)||200,
-    dry_run:!!cfg.dry_run,
-    ai_requirements:cfg.ai_requirements||"", auto_handoff:cfg.auto_handoff!==false,
-  }),[cfg]);
-
-  const act_=useCallback(async(fn,t,m)=>{setBusy(true);
-    try{await fn();if(t)toast(t,m,"success");refresh();}
-    catch(e){toast("Something went wrong",e.message,"error");}
-    finally{setBusy(false);}},[toast,refresh]);
-
-  if(fatal) return (
-    <div className="shell"><div className="page" style={{maxWidth:640,paddingTop:96}}>
-      <div className="panel">
-        <div className="panel-h"><div>
-          <div className="panel-t" style={{color:"var(--bad)"}}>Cannot reach the backend</div>
-          <div className="panel-d">This page is the interface only — the Python server reads
-            folders and runs the pipeline, so it must serve this page.</div>
-        </div></div>
-        <div className="panel-b"><Code text={fatal}/></div>
-        <div className="panel-b" style={{paddingTop:0}}>
-          <button className="btn btn-pri" onClick={()=>location.reload()}><Sync s={13}/> Retry</button>
-        </div>
-      </div>
-    </div></div>);
-
-  if(!schema||!cfg) return (
-    <div className="shell"><div className="page"><div className="stack">
-      <div className="skel" style={{height:38,width:280}}/>
-      <div className="metrics">{[0,1,2,3].map(i=>(
-        <div className="metric" key={i}>
-          <div className="skel" style={{height:12,width:"55%"}}/>
-          <div className="skel" style={{height:30,width:"38%",marginTop:8}}/>
-        </div>))}</div>
-      <div className="panel"><div className="panel-b">
-        <div className="skel" style={{height:16,width:190}}/>
-        <div className="skel" style={{height:38,marginTop:16}}/>
-        <div className="skel" style={{height:38,marginTop:10}}/>
-      </div></div>
-    </div></div></div>);
-
-  const running=!!status?.running;
-  const setO=(k,v)=>setCfg(c=>({...c,driver_options:{...c.driver_options,[k]:v}}));
-  const setT=(k,v)=>setCfg(c=>({...c,[k]:v}));
-  const counts=status?.counts||{}, runs=status?.runs||[];
-  const failedCount=runs.filter(r=>r.status==="failed").length;
-
-  const save   =()=>act_(async()=>{await api("/api/config",{method:"POST",body:JSON.stringify(payload())});},"Configuration saved");
-  /* A start resumes jobs a previous run left unfinished. Doing that
-     silently made the whole previous queue reappear with no explanation,
-     so it is stated and can be declined. */
-  const start  =()=>{
-    const n=status?.resumable||0;
-    if(n&&!window.confirm(`${n} job(s) from a previous run were left unfinished `
-      +"and will be picked up again.\n\nFinished wells are skipped, so this repeats "
-      +"only unfinished work. Clear them first if you want a fresh start.")) return;
-    act_(async()=>{
-      await api("/api/config",{method:"POST",body:JSON.stringify(payload())});
-      await api("/api/watcher/start",{method:"POST"});},
-      "Watcher started",cfg.dry_run?"Dry run — nothing will be launched.":
-        n?`Resuming ${n} unfinished job(s); new folders will be analyzed too.`
-         :"Completed runs will be analyzed automatically.");
-  };
-  const stop   =()=>act_(async()=>{await api("/api/watcher/stop",{method:"POST"});},
-                    "Stopped scanning","Jobs already running carry on. Use Stop &amp; cancel to end them.");
-  /* Stop on its own leaves drivers running for hours, which left the
-     terminal as the only way to actually stop work — and killing a
-     driver by hand orphans its per-well subprocesses. */
-  const cancel =()=>{
-    const n=(status?.counts?.running||0)+(status?.counts?.dispatched||0);
-    if(!window.confirm(`Stop scanning and cancel ${n} job(s) in flight?\n\n`
-      +"Wells already finished keep their checkpoints, so re-running repeats "
-      +"only the well that was in progress.")) return;
-    act_(async()=>{await api("/api/watcher/stop?cancel_running=true",{method:"POST"});},
-         "Stopped","Running jobs were cancelled.");
-  };
-  const doPrev =()=>act_(async()=>{setPreview(await api("/api/preview",{method:"POST",body:JSON.stringify(payload())}));});
-  const onReset=r=>act_(async()=>{await api("/api/runs/reset",{method:"POST",body:JSON.stringify({path:r.path})});},
-                    "Run reset",`${r.run} will be processed again.`);
-  const onLog  =r=>act_(async()=>{const d=await api(`/api/runs/log?path=${encodeURIComponent(r.log)}`);
-                    setLog({run:r.run,lines:d.lines,path:r.log});});
-
-  // Clearing runs one at a time is unusable after a failed batch, so offer the
-  // two cases that actually come up: forget the failures, or start fresh.
-  const onClearAll=async which=>{
-    const all=(status?.runs)||[];
-    const n=which==="failed"?all.filter(r=>r.status==="failed").length:all.length;
-    if(which==="all"&&n>0&&!window.confirm(
-        `Forget all ${n} run(s)?\n\nAnalysed output on disk is not touched — the `
-        +`watcher will simply treat these folders as unseen.`)) return;
-    setClearing(true);
+  // Wells: fetched when opened; refreshed every 20 s only while that date is running.
+  // One read per date at a time: on a busy results disk a read can take a
+  // minute, and stacking more behind it only makes every one slower.
+  const inFlight=useRef({});
+  const fetchWells=useCallback(async(folder,logPath)=>{
+    if(inFlight.current[folder])return;
+    inFlight.current[folder]=true;
     try{
-      const r=await api("/api/runs/reset-all",{method:"POST",
-        body:JSON.stringify({which})});
-      toast("Cleared",`${r.cleared} run(s) forgotten`
-        +(r.skipped?.length?` · ${r.skipped.length} still running, left alone`:""),"ok");
-      refresh();
-    }catch(e){ toast("Could not clear",e.message,"error"); }
-    finally{ setClearing(false); }
+      const [d,lg]=await Promise.all([
+        api(`/api/runs/checkpoints?path=${encodeURIComponent(folder)}`),
+        logPath?api(`/api/runs/log?path=${encodeURIComponent(logPath)}&tail=1000000`).catch(()=>null):null]);
+      setWells(w=>({...w,[folder]:{...d,notes:lg?parseWellNotes(lg.lines||[]):{}}}));}
+    catch(e){setWells(w=>({...w,[folder]:{error:e.message}}));}
+    finally{delete inFlight.current[folder];}
+  },[]);
+  const runningNet=useMemo(()=>(status?.runs||[]).filter(r=>r.job==="network"&&r.status==="running")
+    .map(r=>[r.folder,r.log]),[status]);
+  useEffect(()=>{
+    runningNet.forEach(([f,l])=>fetchWells(f,l));
+    const t=setInterval(()=>{if(!document.hidden)runningNet.forEach(([f,l])=>fetchWells(f,l));},20000);
+    return()=>clearInterval(t);
+  },[runningNet.map(x=>x[0]).join("|"),fetchWells]);
+
+  // Log drawer: follows live while that job runs.
+  const loadLog=useCallback(async(l)=>{
+    try{const d=await api(`/api/runs/log?path=${encodeURIComponent(l.path)}&tail=600`);
+        setLog(x=>x&&x.path===l.path?{...x,lines:d.lines,error:null}:x);}
+    catch(e){setLog(x=>x&&x.path===l.path?{...x,error:e.message}:x);}
+  },[]);
+  const logLive=!!log&&(status?.runs||[]).some(r=>r.log===log.path&&r.status==="running");
+  useEffect(()=>{if(!log||!logLive)return;const t=setInterval(()=>loadLog(log),4000);return()=>clearInterval(t);},[log?.path,logLive,loadLog]);
+
+  const folders=useMemo(()=>{
+    const m={};
+    (status?.runs||[]).forEach(r=>{(m[r.folder]=m[r.folder]||{folder:r.folder,date:r.run,project:projectOf(r.folder),jobs:[]}).jobs.push(r);});
+    return Object.values(m).sort((a,b)=>a.project.localeCompare(b.project)||b.date.localeCompare(a.date));
+  },[status]);
+
+  /* ------- early returns: every hook is above this line ------- */
+  if(fatal) return (
+    <div className="wrap"><div className="card rise" style={{maxWidth:560,margin:"12vh auto"}}><div className="card-b">
+      <div className="sec-t" style={{color:"var(--red)"}}>Can’t reach the analysis server</div>
+      <p className="hint">{fatal}</p><button className="btn ink" onClick={()=>location.reload()}>Try again</button>
+    </div></div></div>);
+  if(!schema||!cfg) return (
+    <div className="wrap"><div className="skel" style={{height:50,width:300}}/>
+      <div className="skel" style={{height:96,marginTop:30}}/><div className="skel" style={{height:260,marginTop:20}}/></div>);
+
+  const runs=status?.runs||[];
+  const active=(status?.active_jobs?.network||0)+(status?.active_jobs?.activity||0);
+  const watching=!!status?.running;
+  const tally={
+    wait:folders.filter(f=>["dispatched","waiting","interrupted","detected"].includes(folderState(f.jobs))).length,
+    run:folders.filter(f=>folderState(f.jobs)==="running").length,
+    done:folders.filter(f=>folderState(f.jobs)==="done").length,
+    bad:folders.filter(f=>folderState(f.jobs)==="failed").length,
   };
-  const testPython=()=>act_(async()=>{
-    setPyCheck(await api("/api/driver-python",{method:"POST",
-      body:JSON.stringify({python:cfg.driver_python||""})}));
+
+  const payload=()=>({
+    watch_dir:cfg.watch_dir,driver_options:cfg.driver_options,h5_glob:cfg.h5_glob,assay_subfolder:cfg.assay_subfolder,
+    run_network:!!cfg.run_network,run_activity:!!cfg.run_activity,activity_subfolder:cfg.activity_subfolder,
+    activity_output_dir:cfg.activity_output_dir||"",activity_active_hz:Number(cfg.activity_active_hz),
+    activity_figures:!!cfg.activity_figures,max_concurrent_network:Number(cfg.max_concurrent_network)||1,
+    max_concurrent_activity:Number(cfg.max_concurrent_activity)||1,gpu_cooldown_seconds:Number(cfg.gpu_cooldown_seconds)||0,
+    queue_poll_seconds:Number(cfg.queue_poll_seconds)||1,settle_seconds:Number(cfg.settle_seconds),
+    poll_seconds:Number(cfg.poll_seconds),require_finished_marker:!!cfg.require_finished_marker,
+    skip_settle_for_existing:!!cfg.skip_settle_for_existing,driver_python:cfg.driver_python||"",
+    logs_in_output:cfg.logs_in_output!==false,stage_locally:!!cfg.stage_locally,scratch_dir:cfg.scratch_dir||"",
+    stage_min_free_gb:Number(cfg.stage_min_free_gb)||200,dry_run:!!cfg.dry_run,
+    ai_requirements:cfg.ai_requirements||"",auto_handoff:cfg.auto_handoff!==false,
   });
+  const run_=async(fn,ok,m)=>{setBusy(true);try{await fn();if(ok)toast(ok,m);refresh(true);}
+    catch(e){toast("That didn’t work",e.message,"error");}finally{setBusy(false);}};
 
-  const pickNative=(start,title,apply)=>{
-    setBusyNative(true);
-    act_(async()=>{
-      try{
-        const d=await api("/api/picker",{method:"POST",
-          body:JSON.stringify({start:start||"",title})});
-        if(!d.cancelled&&d.path) apply(d.path);
-      } finally { setBusyNative(false); }
-    });
+  // Saving replaces the server's scheduler, so never while work is running.
+  const save=()=>run_(()=>api("/api/config",{method:"POST",body:JSON.stringify(payload())}),"Settings saved");
+  save.payload=payload;
+  const startWatch=()=>run_(async()=>{
+    if(!active) await api("/api/config",{method:"POST",body:JSON.stringify(payload())});
+    await api("/api/watcher/start",{method:"POST"});},
+    "Watching for new recordings","New dates are picked up automatically once copied.");
+  const pauseWatch=()=>run_(()=>api("/api/watcher/stop",{method:"POST"}),
+    "Paused","No new dates will be started. Analyses already running carry on.");
+  const stopAll=async()=>{
+    if(!(await ask({title:"Stop all analyses?",danger:true,ok:"Stop everything",
+      body:`${active} analysis job${active===1?"":"s"} will be stopped now. Dates that were in progress will need to be analysed again.`})))return;
+    run_(()=>api("/api/watcher/stop?cancel_running=true",{method:"POST"}),"Stopped","All analyses were stopped.");
+  };
+  const onWells=f=>{const o=!openW[f.folder];setOpenW(x=>({...x,[f.folder]:o}));
+    const settled=folderState(f.jobs)==="done"&&wells[f.folder]&&!wells[f.folder].error;
+    if(o&&!settled)fetchWells(f.folder,f.jobs.find(j=>j.job==="network")?.log);};
+  const onLog=f=>{const j=f.jobs.find(x=>x.job==="network"&&x.log)||f.jobs.find(x=>x.log);if(!j)return;
+    const dt=prettyDate(f.date);const l={path:j.log,title:`${dt.big} ${dt.year} · ${j.job_label||j.job}`,lines:[]};
+    setLog(l);loadLog(l);};
+  const onAgain=async f=>{
+    const dt=prettyDate(f.date);
+    if(!(await ask({title:`Analyse ${dt.big} again?`,ok:"Analyse again",
+      body:"Its results will be computed again from the recordings and replaced. This can take a while."})))return;
+    run_(async()=>{for(const j of f.jobs)await api("/api/runs/reset",{method:"POST",body:JSON.stringify({path:j.path})});
+      await api("/api/queue",{method:"POST",body:JSON.stringify({folders:[f.folder],rerun:true})});},
+      "Added again",`${dt.big} will be analysed again.`);
   };
 
-  const onWells=r=>{
-    const isOpen=!!openWells[r.path];
-    setOpenWells(o=>({...o,[r.path]:!isOpen}));
-    if(isOpen) return;
-    act_(async()=>{
-      const d=await api(`/api/runs/checkpoints?path=${encodeURIComponent(r.path)}`);
-      setWells(w=>({...w,[r.path]:d}));
-    });
-  };
-
-  const ql=q.trim().toLowerCase();
-  const groups=schema.groups.map(g=>({...g,fields:g.fields.filter(f=>!ql||
-    f.key.toLowerCase().includes(ql)||f.flag.toLowerCase().includes(ql)||
-    (f.help||"").toLowerCase().includes(ql))})).filter(g=>g.fields.length);
-  const modified=Object.entries(cfg.driver_options).filter(([k,v])=>{
-    const s=schema.groups.flatMap(g=>g.fields).find(f=>f.key===k);
-    return s&&v!==s.default&&v!==null&&v!==""&&v!==false;}).length;
-
-  const active=(counts.running||0)+(counts.dispatched||0);
-  const heroTitle = running
-    ? (active?`Analyzing ${active} job${active>1?"":""}`:"Watching for recordings")
-    : (runs.length?"Watcher stopped":"Ready to watch");
-  const jobsOn=[cfg.run_network&&"Network",cfg.run_activity&&"Activity scan"].filter(Boolean);
-
+  const TABS=[["progress","Progress",folders.length],["add","Add recordings"],["reports","AI report",Object.keys(reports).length],["settings","Settings"]];
   return (
-    <div className="shell">
-      <h1 className="sr">MEA pipeline control</h1>
-
-      <div className="bar"><div className="bar-in">
-        <div className="mark"><Wave s={15}/></div>
-        <div className="wordmark">MEA Pipeline</div>
-        <div className="grow"/>
-        <span className={"pill "+(running?"p-o":"p-n")}>
-          <span className={"dot"+(running?" dot-l":"")}/>
-          {running?(cfg.dry_run?"Dry run":"Watching"):"Stopped"}
-        </span>
-        <button className="btn btn-q btn-i" onClick={()=>setTheme(t=>t==="dark"?"light":"dark")}
-                aria-label="Toggle theme">{theme==="dark"?<Sun s={15}/>:<Moon s={15}/>}</button>
-        {running
-          ? <><button className="btn" onClick={stop} disabled={busy}><Stop s={12}/> Stop scanning</button>
-            <button className="btn btn-dan" onClick={cancel} disabled={busy}><Stop s={12}/> Stop &amp; cancel</button></>
-          : <button className="btn btn-pri" onClick={start} disabled={busy}><Play s={12}/> Start watching</button>}
-      </div></div>
-
-      <div className="page"><div className="stack">
-
-        <div className="hero">
-          <div>
-            <div className="hero-h">{heroTitle}</div>
-            <div className="hero-sub">
-              {cfg.watch_dir
-                ? <>Monitoring <span className="mono">{cfg.watch_dir}</span>
-                    {jobsOn.length?<> · {jobsOn.join(" + ")}</>:null}</>
-                : "No input folder set yet"}
-            </div>
-          </div>
-          <div className="btns">
-            {!running&&<button className="btn" onClick={()=>setShowCfg(s=>!s)}>
-              <Slide s={13}/> {showCfg?"Hide setup":"Show setup"}</button>}
-            <button className="btn" onClick={refresh}><Sync s={13}/> Refresh</button>
-          </div>
+    <div className="wrap">
+      <h1 className="sr">MEA Bench — analysis control</h1>
+      <header className="top rise" style={{"--i":0}}>
+        <div>
+          <div className="brand">MEA <i>Bench</i></div>
+          <div className="brand-sub">Ben-Shalom Lab · recordings in, reports out</div>
         </div>
+        <div className="grow"/>
+        <div className="ctrl">
+          <span className="livechip">
+            <i className={"dot "+(active?"run":watching?"ok":"wait")}/>
+            {active?<><b>{active}</b> analysing now</>:watching?"Watching for new recordings":"Idle"}
+          </span>
+          {watching
+            ? <button className="btn" disabled={busy} onClick={pauseWatch}><Pause s={14}/> Pause watching</button>
+            : <button className="btn" disabled={busy} onClick={startWatch} title="Automatically analyse new dates as they are copied in"><Play s={12}/> Watch for new</button>}
+          {active>0&&<button className="btn red" disabled={busy} onClick={stopAll}><Stop s={12}/> Stop all</button>}
+        </div>
+      </header>
 
-        {cfg.env?.in_container&&(
-          <div className="note n-a"><span className="n-i"><Info s={15}/></span>
-            <div>Running in a container. Mounted paths are identical inside and out
-              {cfg.env.suggested_input&&<> — input <code>{cfg.env.suggested_input}</code> (read-only)</>}
-              {cfg.env.suggested_output&&<>, output <code>{cfg.env.suggested_output}</code></>}.
-              The input path must be the folder <b>containing</b> your run folders, not a single run.
-            </div></div>)}
+      <nav className="tabs" role="tablist">
+        {TABS.map(([k,l,n])=>(
+          <button key={k} role="tab" className="tab" aria-selected={tab===k} onClick={()=>setTab(k)}>
+            {l}{n?<span className="n">{n}</span>:null}</button>))}
+      </nav>
+      <div className="tabline"/>
 
-        <div className="metrics">
-          {[{k:"waiting",l:"Waiting",i:<Clock s={12}/>},
-            {k:"running",l:"Analyzing",i:<Wave s={12}/>},
-            {k:"done",l:"Complete",i:<Check s={12}/>},
-            {k:"failed",l:"Failed",i:<Alert s={12}/>}].map(s=>(
-            <div className="metric" key={s.k}
-                 data-live={s.k==="running"&&(counts.running||0)>0}
-                 data-bad={s.k==="failed"&&(counts.failed||0)>0}>
-              <div className="metric-k">{s.i}{s.l}</div>
-              <div className="metric-v tnum">{counts[s.k]||0}</div>
+      {tab==="progress"&&<>
+        <div className="tally rise" style={{"--i":1}}>
+          {[["wait","Waiting"],["run","Analysing"],["done","Done"],["bad","Need attention"]].map(([k,l])=>(
+            <div className="tal" key={k} data-k={k} data-on={tally[k]>0}>
+              <div className="tal-v">{status?tally[k]:"–"}</div><div className="tal-k">{l} <span className="hint-s">dates</span></div>
             </div>))}
         </div>
+        <Progress folders={folders} reports={reports} wells={wells} openW={openW}
+                  onWells={onWells} onLog={onLog} onAgain={onAgain} feed={feed} goAdd={()=>setTab("add")}/>
+      </>}
+      {tab==="add"&&<AddRecordings cfg={cfg} toast={toast} ask={ask} onQueued={()=>{refresh(true);setTab("progress");}}/>}
+      {tab==="reports"&&<AiReport cfg={cfg} reports={reports} toast={toast}/>}
+      {tab==="settings"&&<Settings cfg={cfg} setCfg={setCfg} schema={schema} locked={active>0} onSave={save} busy={busy} toast={toast}/>}
 
-        <div>
-          <div className="sec-h">
-            <div className="sec-t">Runs</div>
-            <div className="sec-d">
-              {running?"Scanning for completed recordings":"Watcher is stopped"}
-              {status?.scanning
-                ? " · reading the input folder…"
-                : (status?.candidates?.length?` · ${status.candidates.length} folder${status.candidates.length>1?"s":""} in scope`:"")}
-            </div>
-            <div className="grow"/>
-            {failedCount>0&&
-              <button className="btn btn-q btn-s" disabled={clearing}
-                      onClick={()=>onClearAll("failed")}>
-                Clear {failedCount} failed
-              </button>}
-            {runs.length>0&&
-              <button className="btn btn-q btn-s" disabled={clearing}
-                      onClick={()=>onClearAll("all")}>
-                Clear all
-              </button>}
-          </div>
-          <div className="panel">
-            {runs.length===0
-              ? <div className="empty">
-                  <div className="empty-i"><Inbox s={21}/></div>
-                  <div className="empty-t">No runs yet</div>
-                  <div className="empty-d">
-                    {status?.candidates?.length
-                      ? <>Found <b>{status.candidates.join(", ")}</b> in the input folder.
-                          Start the watcher to begin checking whether they have finished copying.</>
-                      : <>Set an input folder below, then start the watcher. Run folders containing
-                          a recording will appear here as they are detected.</>}
-                  </div>
-                </div>
-              : <div className="rows">{runs.map(r=>
-                  <RunBlock key={r.path} run={r} onLog={onLog} onReset={onReset}
-                            onWells={onWells} wells={wells[r.path]}
-                            expanded={!!openWells[r.path]}/>)}</div>}
-          </div>
-        </div>
+      <div className="foot"><span>Orchestration-MEA</span><span>·</span><span>recordings are only ever read, never changed</span></div>
 
-        <QueuePanel cfg={cfg} toast={toast}/>
-
-        <AiHandoff cfg={cfg} toast={toast}/>
-
-        {log&&(
-          <div>
-            <div className="sec-h">
-              <div className="sec-t">Pipeline log</div>
-              <div className="sec-d">{log.run} · last {log.lines.length} lines
-                {(status?.runs||[]).some(r=>r.log===log.path&&(r.status==="running"||r.status==="dispatched"))&&" · following live"}</div>
-              <div className="grow"/>
-              <button className="btn btn-q btn-s btn-i" onClick={()=>setLog(null)} aria-label="Close"><Ex s={14}/></button>
-            </div>
-            <div className="panel"><div className="panel-b"><Code text={log.lines.join("\n")} scroll/></div></div>
-          </div>)}
-
-        <div>
-          <div className="sec-h">
-            <div className="sec-t">Activity</div>
-            <div className="sec-d">Live watcher output — detection, settle windows, dispatches</div>
-          </div>
-          <div className="panel"><div className="panel-b">
-            <LiveLog lines={act} follow={follow} setFollow={setFollow} onClear={()=>setAct([])}/>
-          </div></div>
-        </div>
-
-        {running&&(
-          <div className="panel"><div className="strip">
-            <span>Settle <b className="tnum">{cfg.settle_seconds}s</b></span>
-            <span>Poll <b className="tnum">{cfg.poll_seconds}s</b></span>
-            <span>Analyses <b>{jobsOn.join(" + ")||"none"}</b></span>
-            <span>Output <b className="mono">{cfg.driver_options.output_dir||"—"}</b></span>
-            <div className="grow"/>
-            <span style={{color:"var(--ink-3)"}}>Stop the watcher to edit</span>
-          </div></div>)}
-
-        {showCfg&&!running&&(<>
-          <div>
-            <div className="sec-h">
-              <div className="sec-t">Setup</div>
-              <div className="sec-d">Where recordings arrive, and what runs when they do</div>
-            </div>
-            <div className="grid2">
-              <div className="panel">
-                <div className="panel-h"><div><div className="panel-t">Folders</div></div></div>
-                <div className="panel-b" style={{display:"flex",flexDirection:"column",gap:"var(--s5)"}}>
-                  <div className="f">
-                    <label className="f-l" htmlFor="in">Input</label>
-                    <div className="f-row">
-                      <input id="in" className="inp mono" value={cfg.watch_dir}
-                             placeholder="/home/user/MEA" onChange={e=>setT("watch_dir",e.target.value)}/>
-                      <button className="btn" onClick={()=>setBrowsing(browsing==="in"?null:"in")}>
-                        <Folder s={13}/></button>
-                    </div>
-                    <span className="f-h">Folder containing run folders such as <code className="mono">000041</code>.</span>
-                    {browsing==="in"&&<Browser initial={cfg.watch_dir} onClose={()=>setBrowsing(null)}
-                                               onPick={p=>setT("watch_dir",p)}
-                                               picker={picker} busyNative={busyNative}
-                                               onNative={()=>pickNative(cfg.watch_dir,"Select input folder",
-                                                 p=>setT("watch_dir",p))}/>}
-                  </div>
-                  <div className="f">
-                    <label className="f-l" htmlFor="out">Output</label>
-                    <div className="f-row">
-                      <input id="out" className="inp mono" value={cfg.driver_options.output_dir??""}
-                             placeholder="/home/user/AnalyzedData"
-                             onChange={e=>setO("output_dir",e.target.value||null)}/>
-                      <button className="btn" onClick={()=>setBrowsing(browsing==="out"?null:"out")}>
-                        <Folder s={13}/></button>
-                    </div>
-                    <span className="f-h">Passed as <code className="mono">--output-dir</code>.</span>
-                    {browsing==="out"&&<Browser initial={cfg.driver_options.output_dir||""} onClose={()=>setBrowsing(null)}
-                                                onPick={p=>setO("output_dir",p)}
-                                                picker={picker} busyNative={busyNative}
-                                                onNative={()=>pickNative(cfg.driver_options.output_dir,"Select output folder",
-                                                  p=>setO("output_dir",p))}/>}
-                  </div>
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="panel-h"><div><div className="panel-t">Detection</div></div></div>
-                <div className="panel-b">
-                  <div className="grid2">
-                    <div className="f">
-                      <label className="f-l" htmlFor="set">Settle window</label>
-                      <input id="set" className="inp tnum" type="number" min="1"
-                             value={cfg.settle_seconds} onChange={e=>setT("settle_seconds",e.target.value)}/>
-                      <span className="f-h">Seconds of no change before a run counts as complete.</span>
-                    </div>
-                    <div className="f">
-                      <label className="f-l" htmlFor="pol">Poll interval</label>
-                      <input id="pol" className="inp tnum" type="number" min="1"
-                             value={cfg.poll_seconds} onChange={e=>setT("poll_seconds",e.target.value)}/>
-                      <span className="f-h">How often the folder is checked.</span>
-                    </div>
-                  </div>
-                  <div className="sep"/>
-                  <Switch id="mk" checked={cfg.require_finished_marker}
-                          onChange={v=>setT("require_finished_marker",v)}
-                          label="Require MaxWell completion marker"
-                          hint="Also wait for finished= in mxassay.metadata."/>
-                  <Switch id="skip" checked={cfg.skip_settle_for_existing}
-                          onChange={v=>setT("skip_settle_for_existing",v)}
-                          label="Folders already here are ready"
-                          hint="Start analyzing existing folders immediately, skipping the settle window. Use when the copy already finished. Folders arriving later still wait the full window."/>
-                  <Switch id="dry" checked={cfg.dry_run} onChange={v=>setT("dry_run",v)}
-                          label="Dry run"
-                          hint="Detect and record the command, but never launch."/>
-                  {cfg.dry_run&&<div className="note n-w" style={{marginTop:"var(--s3)"}}>
-                    <span className="n-i"><Info s={15}/></span>
-                    <div>Runs will stop at <b>Detected</b>. Turn this off and save to run for real —
-                      already-detected runs are cleared automatically.</div></div>}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-h"><div>
-              <div className="panel-t">Analyses</div>
-              <div className="panel-d">Independent jobs — separate outputs, separate status</div>
-            </div></div>
-            <div className="panel-b">
-              <div className="grid2">
-                <Switch id="net" checked={cfg.run_network} onChange={v=>setT("run_network",v)}
-                        label="Network — spike sorting"
-                        hint="Kilosort4, curation, burst analysis. Needs a GPU; hours per chip."/>
-                <Switch id="ac" checked={cfg.run_activity} onChange={v=>setT("run_activity",v)}
-                        label="Activity scan — whole-array maps"
-                        hint="Activity maps, QC metrics, network bursts. CPU only; seconds per chip."/>
-              </div>
-              {cfg.run_network&&(<>
-                <div className="sep"/>
-                <div className="f">
-                  <label className="f-l" htmlFor="dpy">Pipeline interpreter</label>
-                  <div className="f-row">
-                    <input id="dpy" className="inp mono"
-                           placeholder="(auto-detect — the environment MEA-Analysis is installed in)"
-                           value={cfg.driver_python??""}
-                           onChange={e=>setT("driver_python",e.target.value)}/>
-                    <button className="btn" onClick={testPython} disabled={busy}>Test</button>
-                  </div>
-                  <span className="f-h">
-                    Must have the pipeline's dependencies (pandas, spikeinterface, kilosort, torch).
-                    This tool's own virtualenv does not — launching the driver with it fails at
-                    <code className="mono"> import pandas</code>.
-                  </span>
-                  {pyCheck&&(
-                    <div className={"note "+(pyCheck.ok?"n-a":"n-b")} style={{marginTop:8}}>
-                      <span className="n-i">{pyCheck.ok?<Check s={15}/>:<Alert s={15}/>}</span>
-                      <div style={{minWidth:0}}>
-                        <div><b className="mono">{pyCheck.python}</b>
-                          {pyCheck.version&&<> · Python {pyCheck.version}</>}
-                          {pyCheck.source&&<> · {pyCheck.source}</>}</div>
-                        {pyCheck.ok
-                          ? <div style={{marginTop:3}}>All pipeline dependencies present.</div>
-                          : <div style={{marginTop:3}}>
-                              Missing: <b>{(pyCheck.missing||[]).join(", ")||pyCheck.error}</b>.
-                              Set the path to the environment MEA-Analysis runs in.
-                            </div>}
-                      </div>
-                    </div>)}
-                </div>
-              </>)}
-
-              {cfg.run_activity&&(<>
-                <div className="sep"/>
-                <div className="grid2">
-                  <div className="f">
-                    <label className="f-l" htmlFor="ao">Activity output</label>
-                    <input id="ao" className="inp mono" placeholder="(defaults to <output>/ActivityScan)"
-                           value={cfg.activity_output_dir??""}
-                           onChange={e=>setT("activity_output_dir",e.target.value)}/>
-                    <span className="f-h">Kept separate from spike-sorting output.</span>
-                  </div>
-                  <div className="grid2">
-                    <div className="f">
-                      <label className="f-l" htmlFor="ah">Active threshold</label>
-                      <input id="ah" className="inp tnum" type="number" step="0.01" min="0"
-                             value={cfg.activity_active_hz}
-                             onChange={e=>setT("activity_active_hz",e.target.value)}/>
-                      <span className="f-h">Hz</span>
-                    </div>
-                    <div className="f">
-                      <label className="f-l" htmlFor="as">Assay folder</label>
-                      <input id="as" className="inp mono" value={cfg.activity_subfolder??""}
-                             onChange={e=>setT("activity_subfolder",e.target.value)}/>
-                      <span className="f-h">Holds the scans</span>
-                    </div>
-                  </div>
-                </div>
-                <Switch id="af" checked={cfg.activity_figures} onChange={v=>setT("activity_figures",v)}
-                        label="Generate figures"
-                        hint="Activity maps, rasters, connectivity, plate overview."/>
-              </>)}
-              <div className="sep"/>
-              <div className="grid2">
-                <div className="f">
-                  <label className="f-l" htmlFor="cn">Concurrent Network jobs</label>
-                  <input id="cn" className="inp tnum" type="number" min="1" max="8"
-                         value={cfg.max_concurrent_network??1}
-                         onChange={e=>setT("max_concurrent_network",e.target.value)}/>
-                  <span className="f-h">Extra jobs queue rather than starting. Whether more than
-                    one fits depends on the card: measure peak VRAM during the sorting phase with
-                    <code> nvidia-smi</code> and allow that much per job. Sorting also leaves the GPU
-                    idle much of the time while it waits on data, so a second job often fills those
-                    gaps rather than competing — and overlaps its own CPU-only analyzer stage with
-                    the first job's GPU work.</span>
-                </div>
-                <div className="f">
-                  <label className="f-l" htmlFor="ca">Concurrent Activity jobs</label>
-                  <input id="ca" className="inp tnum" type="number" min="1" max="16"
-                         value={cfg.max_concurrent_activity??2}
-                         onChange={e=>setT("max_concurrent_activity",e.target.value)}/>
-                  <span className="f-h">CPU only, so this can be higher. Never waits behind
-                    spike sorting.</span>
-                </div>
-                <div className="f">
-                  <label className="f-l" htmlFor="cool">GPU cooldown</label>
-                  <input id="cool" className="inp tnum" type="number" min="0" max="600"
-                         value={cfg.gpu_cooldown_seconds??5}
-                         onChange={e=>setT("gpu_cooldown_seconds",e.target.value)}/>
-                  <span className="f-h">Seconds to wait before starting the next queued Network
-                    job. CUDA memory is not always released the moment a process exits.</span>
-                </div>
-                <div className="f">
-                  <label className="f-l" htmlFor="qp">Queue check interval</label>
-                  <input id="qp" className="inp tnum" type="number" min="1" max="120"
-                         value={cfg.queue_poll_seconds??2}
-                         onChange={e=>setT("queue_poll_seconds",e.target.value)}/>
-                  <span className="f-h">How often a queued job looks for a free slot.</span>
-                </div>
-              </div>
-              <div className="sep"/>
-              <Switch id="lio" checked={cfg.logs_in_output!==false}
-                      onChange={v=>setT("logs_in_output",v)}
-                      label="Write logs beside the results"
-                      hint="Per-run logs go to <output>/orchestration_logs/ as well, so the log lives with the output it describes. Falls back to the work directory if that is not writable."/>
-              <div className="sep"/>
-              <Switch id="stg" checked={!!cfg.stage_locally}
-                      onChange={v=>setT("stage_locally",v)}
-                      label="Run against local disk, then copy results"
-                      hint="Spike sorting writes a float32 copy of each recording and reads it back many times — tens of GB per well. On a network output directory that traffic, not the GPU, decides how long a run takes. Input and final output paths are unchanged; only the working files move."/>
-              {cfg.stage_locally&&<>
-                <div className="grid2" style={{marginTop:"var(--s3)"}}>
-                  <div className="f">
-                    <label className="f-l" htmlFor="scr">Scratch directory</label>
-                    <input id="scr" className="inp" type="text" spellCheck="false"
-                           placeholder="<work dir>/scratch"
-                           value={cfg.scratch_dir||""}
-                           onChange={e=>setT("scratch_dir",e.target.value)}/>
-                    <span className="f-h">A local disk with room to spare. Leave blank to use the
-                      work directory — check that it is not the same volume you are short of space on.</span>
-                  </div>
-                  <div className="f">
-                    <label className="f-l" htmlFor="smf">Keep free (GB)</label>
-                    <input id="smf" className="inp tnum" type="number" min="0" max="10000"
-                           value={cfg.stage_min_free_gb??200}
-                           onChange={e=>setT("stage_min_free_gb",e.target.value)}/>
-                    <span className="f-h">Staging is skipped, and the job runs against the output
-                      directory instead, if it would take the volume below this. Never fills a disk
-                      to run faster.</span>
-                  </div>
-                </div>
-                <div className="note n-b" style={{marginTop:"var(--s3)"}}>
-                  <span className="n-i"><Alert s={15}/></span>
-                  <div>Results for a folder appear in the output directory when that folder
-                    finishes, rather than well by well. Per-well progress and logs are unaffected.</div>
-                </div>
-              </>}
-              {!cfg.run_network&&!cfg.run_activity&&
-                <div className="note n-b" style={{marginTop:"var(--s3)"}}>
-                  <span className="n-i"><Alert s={15}/></span>
-                  <div>Enable at least one analysis, or nothing will run.</div></div>}
-            </div>
-          </div>
-
-          <div>
-            <div className="sec-h">
-              <div className="sec-t">Pipeline options</div>
-              <div className="sec-d">
-                Passed to run_pipeline_driver.py · {modified} changed from default
-              </div>
-            </div>
-            <div className="panel"><div className="panel-b">
-              <div className="opt-bar">
-                <div className="srch">
-                  <span className="srch-i"><Search s={14}/></span>
-                  <input className="inp" placeholder="Search options…" value={q}
-                         onChange={e=>setQ(e.target.value)} aria-label="Search options"/>
-                </div>
-                {q&&<button className="btn btn-q btn-s" onClick={()=>setQ("")}>Clear</button>}
-              </div>
-              {groups.length===0
-                ? <div className="empty" style={{padding:"36px 0"}}>
-                    <div className="empty-t">No matching options</div>
-                    <div className="empty-d">Try a different search term.</div></div>
-                : <div className="groups">{groups.map(g=>{
-                    const o=ql?true:!!open[g.group];
-                    return (
-                      <div className="grp" key={g.group}>
-                        <button className="grp-h" onClick={()=>setOpen(x=>({...x,[g.group]:!x[g.group]}))}
-                                aria-expanded={o}>
-                          <span className="chev" data-o={o}><Chev s={12}/></span>
-                          <span className="grp-n">{g.group}</span>
-                          <span className="grp-c">{g.fields.length}</span>
-                        </button>
-                        {o&&<div className="grp-b">{g.fields.map(f=>
-                          <Field key={f.key} spec={f} value={cfg.driver_options[f.key]} onChange={setO}/>)}</div>}
-                      </div>);})}</div>}
-            </div></div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-b" style={{display:"flex",gap:"var(--s2)",flexWrap:"wrap",alignItems:"center"}}>
-              <button className="btn btn-pri" onClick={start} disabled={busy}>
-                <Play s={12}/> Start watching</button>
-              <button className="btn" onClick={save} disabled={busy}>Save configuration</button>
-              <button className="btn" onClick={doPrev} disabled={busy}><Term s={13}/> Preview command</button>
-            </div>
-          </div>
-
-          {preview&&(
-            <div>
-              <div className="sec-h">
-                <div className="sec-t">Command preview</div>
-                <div className="sec-d">
-                  {preview.detected_runs?.length
-                    ? <>For <b>{preview.example_run}</b> · detected: {preview.detected_runs.join(", ")}</>
-                    : "No run folders detected yet"}
-                </div>
-              </div>
-              <div className="panel"><div className="panel-b"
-                   style={{display:"flex",flexDirection:"column",gap:"var(--s5)"}}>
-                {(preview.commands?.length?preview.commands:
-                  [{job:"network",job_label:"Command",command:preview.command}]).map(c=>(
-                  <div key={c.job}>
-                    <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}>
-                      <span className="dot" style={{background:c.job==="activity"?"var(--ok)":"var(--accent)"}}/>
-                      <span style={{fontSize:12.5,fontWeight:600,letterSpacing:"-.01em"}}>{c.job_label}</span>
-                    </div>
-                    <Code text={c.command}/>
-                  </div>))}
-                {preview.commands&&preview.commands.length===0&&
-                  <div className="f-h">No analyses enabled.</div>}
-              </div></div>
-            </div>)}
-        </>)}
-      </div></div>
-
+      {log&&<LogDrawer log={log} live={logLive} onClose={()=>setLog(null)}/>}
+      <Confirm ask={confirmAsk} onClose={closeAsk}/>
       <Toasts items={toasts} close={id=>setToasts(t=>t.filter(x=>x.id!==id))}/>
-    </div>
-  );
+    </div>);
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);

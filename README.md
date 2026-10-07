@@ -7,6 +7,10 @@ ActivityScan extraction that the pipeline itself does not perform.
 Drives [`MEA-Analysis`](https://github.com/hiteshkumar18/MEA-Analysis) without
 modifying it.
 
+**New lab member, not a programmer?** Start with the step-by-step
+[user guide](docs/USER-GUIDE.md): installing, opening the control page,
+analysing recordings and getting reports from an AI.
+
 **Running this on real data?** Read
 [docs/FIELD-NOTES.md](docs/FIELD-NOTES.md) first. It covers where the time
 actually goes, the failure modes seen in production and why each fix is shaped
@@ -237,6 +241,33 @@ folder is read-only) are not overridden by requirements.
 ```bash
 python orchestration/handoff.py /path/to/output --folder /input/260903 --requirements @req.md
 ```
+
+### Reports for lab users (any AI on the server)
+
+Lab members get reports by giving an AI that runs on the analysis computer
+(Claude Code, or ChatGPT's Codex CLI) two things: the instructions file and the
+output folder.
+
+```
+Instructions: <output folder>/AI_REPORT_INSTRUCTIONS.md — output folder: <output folder>.
+Please make me a report on <project> for <dates>.
+```
+
+Every time watching starts or dates are queued, the server writes a small kit
+into the current output folder:
+
+```
+AI_REPORT_INSTRUCTIONS.md   what the AI must do — contains no paths
+report_tools/make_report    launcher: this machine's Python + orchestration/report/make_report.py
+report_tools/skills.md      what every measurement means
+```
+
+Edit only the masters in `orchestration/skills/`. The AI runs, from the output
+folder, `report_tools/make_report --project-dir <project> --list`, then
+`--dates …` or `--all`. One date gives the standard two-tab report
+(`orchestration/report/build_report.py`); several dates give it per date plus an
+overview with trends. Reports go to `<project>/AI_HANDOFF/<stamp>_<label>/report/`
+and appear in the UI's **AI report** tab.
 
 ### Queue
 
