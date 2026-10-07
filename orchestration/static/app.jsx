@@ -99,13 +99,41 @@ function plainNote(job){
   return d?{t:d.slice(0,160),k:""}:null;
 }
 
-function plainWellError(r){
-  const e=String(r.error||"");
+function plainWellError(r,note){
+  const e=String(r.error||note?.fail||"");
   if(/stream_id well\d+ is not in/.test(e))return"Not in this recording file — nothing to analyse.";
   if(/n_samples=\d+ should be >= n_clusters/.test(e))return"Almost no activity in this well.";
   if(/out of memory/i.test(e))return"Ran out of memory.";
   if(r.status!=="complete"&&!e)return"Stopped without an error message.";
   return (e.split("\n").find(Boolean)||"Unknown problem").slice(0,180);
+}
+
+// What the driver log says about each well: failures and silent wells are
+// only recorded there, not in the checkpoint files. Key: chip|recording|well.
+function parseWellNotes(lines){
+  const notes={};let cur=null;
+  for(const l of lines){
+    let m=/Processing : (\S+) recording : \S+ well_id : (well\d+)/.exec(l);
+    if(m){const p=m[1].split("/");cur=`${p[p.length-4]}|${p[p.length-2]}|${m[2]}`;continue;}
+    if(!cur)continue;
+    m=/CRITICAL FAILURE in (well\d+): (.*)/.exec(l);
+    if(m&&cur.endsWith("|"+m[1])){notes[cur]={...notes[cur],fail:m[2].trim()};continue;}
+    if(/Detected 0 total spikes|returned error: no_spikes/.test(l))notes[cur]={...notes[cur],silent:true};
+  }
+  return notes;
+}
+// complete | silent | absent | failed | running
+function wellClass(r,note,finished){
+  if(r.status==="complete")return note?.silent?"silent":"complete";
+  if(note?.fail&&/stream_id well\d+ is not in/.test(note.fail))return"absent";
+  if(note?.silent)return"silent";
+  if(r.status==="failed"||note?.fail||finished)return"failed";
+  return"running";
+}
+function wellCounts(data,finished){
+  const c={complete:0,silent:0,absent:0,failed:0,running:0};
+  (data?.wells||[]).forEach(r=>{c[wellClass(r,data.notes?.[`${r.chip_id}|${r.run_id}|${r.well}`],finished)]++;});
+  return c;
 }
 
 // Log lines worth reading: drop progress bars, keep the story.
@@ -198,7 +226,7 @@ function Browser({initial,onPick,onClose}){
 }
 
 /* ── Wells: a plate map per chip ──────────────────────────────────────── */
-function Plates({data}){
+function Plates({data,finished}){
   if(!data) return <div className="hint" style={{paddingTop:10,display:"flex",gap:10,alignItems:"center"}}>
     <span className="spin"/> Reading well results… While analyses are running the results disk is busy,
     so this can take a minute or two. You can keep using the page.</div>;
@@ -206,30 +234,42 @@ function Plates({data}){
   const rows=data.wells||[];
   if(!rows.length) return <div className="hint" style={{paddingTop:10}}>
     No wells have started yet. They appear here as the analysis reaches them.</div>;
+  const note=r=>data.notes?.[`${r.chip_id}|${r.run_id}|${r.well}`];
   const chips={};
   rows.forEach(r=>{const k=`${r.chip_id||"?"}·${r.run_id||""}`;(chips[k]=chips[k]||{chip:r.chip_id,run:r.run_id,wells:{}}).wells[r.well]=r;});
-  const s=data.summary||{};
-  const probs=rows.filter(r=>r.status==="failed"||(r.status!=="complete"&&r.error));
+  const c=wellCounts(data,finished);
+  const probs=rows.filter(r=>wellClass(r,note(r),finished)==="failed");
+  const tips={complete:"finished",silent:"finished, but no spikes were detected",
+    absent:"not in this recording file — nothing to analyse",running:"in progress"};
   let i=0;
   return (<>
     <div className="legend">
-      <span><b>{s.complete||0}</b>&nbsp;of {s.wells||rows.length} wells finished</span>
-      <span><i className="dot ok"/> finished</span><span><i className="dot run"/> in progress</span>
-      <span><i className="dot bad"/> problem</span>
+      <span><b>{c.complete}</b>&nbsp;finished</span>
+      {c.silent>0&&<span><b>{c.silent}</b>&nbsp;no activity</span>}
+      {c.absent>0&&<span><b>{c.absent}</b>&nbsp;not in the recording file</span>}
+      {c.running>0&&<span><b>{c.running}</b>&nbsp;in progress</span>}
+      {c.failed>0&&<span style={{color:"var(--red)"}}><b>{c.failed}</b>&nbsp;problem{c.failed===1?"":"s"}</span>}
+    </div>
+    <div className="legend" style={{marginTop:6}}>
+      <span><i className="well-k complete"/>finished</span><span><i className="well-k silent"/>no activity</span>
+      {!finished&&<span><i className="well-k running"/>in progress</span>}
+      <span><i className="well-k failed"/>problem</span><span><i className="well-k absent"/>not in the recording file</span>
+      <span><i className="well-k none"/>not recorded</span>
     </div>
     <div className="plates">
-      {Object.values(chips).map(c=>{
-        const ids=Object.keys(c.wells).map(w=>+w.replace(/\D/g,""));
+      {Object.values(chips).map(ch=>{
+        const ids=Object.keys(ch.wells).map(w=>+w.replace(/\D/g,""));
         const n=Math.max(6,Math.ceil((Math.max(...ids)+1)/6)*6);
         return (
-          <div className="plate" key={c.chip+c.run}>
-            <div className="plate-h">Chip <b>{c.chip||"?"}</b><span className="hint-s">recording {c.run}</span></div>
+          <div className="plate" key={ch.chip+ch.run}>
+            <div className="plate-h">Chip <b>{ch.chip||"?"}</b><span className="hint-s">recording {ch.run}</span></div>
             <div className="wells">
               {Array.from({length:n},(_,k)=>{
-                const r=c.wells[`well${String(k).padStart(3,"0")}`];
-                const cls=!r?"none":r.status==="complete"?"complete":r.status==="failed"?"failed":"running";
-                const tip=!r?"Not part of this recording":r.status==="complete"?`Well ${k+1}: finished`
-                  :r.status==="failed"?`Well ${k+1}: ${plainWellError(r)}`:`Well ${k+1}: ${r.stage_name||"in progress"}`;
+                const r=ch.wells[`well${String(k).padStart(3,"0")}`];
+                const cls=r?wellClass(r,note(r),finished):"none";
+                const tip=!r?`Well ${k+1}: not recorded in this run`
+                  :cls==="failed"?`Well ${k+1}: ${plainWellError(r,note(r))}`
+                  :cls==="running"?`Well ${k+1}: ${r.stage_name||"in progress"}`:`Well ${k+1}: ${tips[cls]}`;
                 return <div key={k} className={"well "+cls} style={{"--i":i++}} title={tip}>{k+1}</div>;
               })}
             </div>
@@ -237,7 +277,7 @@ function Plates({data}){
     </div>
     {probs.length>0&&<div className="probs">
       {probs.map((r,j)=><div className="prob" key={j}><span className="w">{r.chip_id} · well {+r.well.replace(/\D/g,"")+1}</span>
-        <span>{plainWellError(r)}</span></div>)}
+        <span>{plainWellError(r,note(r))}</span></div>)}
     </div>}
   </>);
 }
@@ -277,6 +317,11 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,i}){
   const note=net?plainNote(net):null;
   const busy=st==="running";
   const sum=wells?.summary;
+  const netDone=net&&(net.status==="done"||net.status==="failed");
+  const wc=netDone&&wells?.wells&&wells.notes?wellCounts(wells,true):null;
+  const refined=wc&&{t:[`${wc.complete} wells finished`,wc.silent&&`${wc.silent} with no activity`,
+    wc.absent&&`${wc.absent} not in the recording file`,wc.failed&&`${wc.failed} with problems`].filter(Boolean).join(" · "),
+    k:wc.failed?"bad":""};
   return (<>
     <div className="line rise" style={{"--i":i}}>
       <div>
@@ -287,7 +332,7 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,i}){
         <div className="say">
           <span className={"stamp "+ji.k}>{ji.say}</span>
           {busy&&sum?.wells>0&&<span className="note-l">{sum.complete} wells finished so far</span>}
-          {note&&<span className={"note-l "+note.k}>{note.t}</span>}
+          {(refined||note)&&<span className={"note-l "+(refined||note).k}>{(refined||note).t}</span>}
         </div>
         <div className="lanes">
           {[["Network",net],["Activity scan",scan]].filter(x=>x[1]).map(([n,j])=>{
@@ -305,7 +350,7 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,i}){
         <button className="btn ghost sm" title="Analyse this date again" aria-label="Analyse again" onClick={()=>onAgain(f)}><Again s={14}/></button>
       </div>
     </div>
-    {open&&<div className="plate-wrap"><Plates data={wells}/></div>}
+    {open&&<div className="plate-wrap"><Plates data={wells} finished={!!netDone}/></div>}
   </>);
 }
 
@@ -714,19 +759,24 @@ function App(){
   // One read per date at a time: on a busy results disk a read can take a
   // minute, and stacking more behind it only makes every one slower.
   const inFlight=useRef({});
-  const fetchWells=useCallback(async folder=>{
+  const fetchWells=useCallback(async(folder,logPath)=>{
     if(inFlight.current[folder])return;
     inFlight.current[folder]=true;
-    try{const d=await api(`/api/runs/checkpoints?path=${encodeURIComponent(folder)}`);setWells(w=>({...w,[folder]:d}));}
+    try{
+      const [d,lg]=await Promise.all([
+        api(`/api/runs/checkpoints?path=${encodeURIComponent(folder)}`),
+        logPath?api(`/api/runs/log?path=${encodeURIComponent(logPath)}&tail=1000000`).catch(()=>null):null]);
+      setWells(w=>({...w,[folder]:{...d,notes:lg?parseWellNotes(lg.lines||[]):{}}}));}
     catch(e){setWells(w=>({...w,[folder]:{error:e.message}}));}
     finally{delete inFlight.current[folder];}
   },[]);
-  const runningFolders=useMemo(()=>[...new Set((status?.runs||[]).filter(r=>r.job==="network"&&r.status==="running").map(r=>r.folder))],[status]);
+  const runningNet=useMemo(()=>(status?.runs||[]).filter(r=>r.job==="network"&&r.status==="running")
+    .map(r=>[r.folder,r.log]),[status]);
   useEffect(()=>{
-    runningFolders.forEach(fetchWells);
-    const t=setInterval(()=>{if(!document.hidden)runningFolders.forEach(fetchWells);},20000);
+    runningNet.forEach(([f,l])=>fetchWells(f,l));
+    const t=setInterval(()=>{if(!document.hidden)runningNet.forEach(([f,l])=>fetchWells(f,l));},20000);
     return()=>clearInterval(t);
-  },[runningFolders.join("|"),fetchWells]);
+  },[runningNet.map(x=>x[0]).join("|"),fetchWells]);
 
   // Log drawer: follows live while that job runs.
   const loadLog=useCallback(async(l)=>{
@@ -795,7 +845,7 @@ function App(){
   };
   const onWells=f=>{const o=!openW[f.folder];setOpenW(x=>({...x,[f.folder]:o}));
     const settled=folderState(f.jobs)==="done"&&wells[f.folder]&&!wells[f.folder].error;
-    if(o&&!settled)fetchWells(f.folder);};
+    if(o&&!settled)fetchWells(f.folder,f.jobs.find(j=>j.job==="network")?.log);};
   const onLog=f=>{const j=f.jobs.find(x=>x.job==="network"&&x.log)||f.jobs.find(x=>x.log);if(!j)return;
     const dt=prettyDate(f.date);const l={path:j.log,title:`${dt.big} ${dt.year} · ${j.job_label||j.job}`,lines:[]};
     setLog(l);loadLog(l);};

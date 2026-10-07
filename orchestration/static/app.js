@@ -353,13 +353,59 @@ function plainNote(job) {
     k: ""
   } : null;
 }
-function plainWellError(r) {
-  const e = String(r.error || "");
+function plainWellError(r, note) {
+  const e = String(r.error || note?.fail || "");
   if (/stream_id well\d+ is not in/.test(e)) return "Not in this recording file — nothing to analyse.";
   if (/n_samples=\d+ should be >= n_clusters/.test(e)) return "Almost no activity in this well.";
   if (/out of memory/i.test(e)) return "Ran out of memory.";
   if (r.status !== "complete" && !e) return "Stopped without an error message.";
   return (e.split("\n").find(Boolean) || "Unknown problem").slice(0, 180);
+}
+function parseWellNotes(lines) {
+  const notes = {};
+  let cur = null;
+  for (const l of lines) {
+    let m = /Processing : (\S+) recording : \S+ well_id : (well\d+)/.exec(l);
+    if (m) {
+      const p = m[1].split("/");
+      cur = `${p[p.length - 4]}|${p[p.length - 2]}|${m[2]}`;
+      continue;
+    }
+    if (!cur) continue;
+    m = /CRITICAL FAILURE in (well\d+): (.*)/.exec(l);
+    if (m && cur.endsWith("|" + m[1])) {
+      notes[cur] = {
+        ...notes[cur],
+        fail: m[2].trim()
+      };
+      continue;
+    }
+    if (/Detected 0 total spikes|returned error: no_spikes/.test(l)) notes[cur] = {
+      ...notes[cur],
+      silent: true
+    };
+  }
+  return notes;
+}
+function wellClass(r, note, finished) {
+  if (r.status === "complete") return note?.silent ? "silent" : "complete";
+  if (note?.fail && /stream_id well\d+ is not in/.test(note.fail)) return "absent";
+  if (note?.silent) return "silent";
+  if (r.status === "failed" || note?.fail || finished) return "failed";
+  return "running";
+}
+function wellCounts(data, finished) {
+  const c = {
+    complete: 0,
+    silent: 0,
+    absent: 0,
+    failed: 0,
+    running: 0
+  };
+  (data?.wells || []).forEach(r => {
+    c[wellClass(r, data.notes?.[`${r.chip_id}|${r.run_id}|${r.well}`], finished)]++;
+  });
+  return c;
 }
 function cleanLog(lines) {
   return lines.filter(l => l && !/\d+%\|/.test(l) && !/it\/s\]/.test(l) && !/^\s*write_binary_recording\s*$/.test(l) && !/^engine=process/.test(l) && !/libcompression\.so/.test(l) && !/UserWarning|warnings\.warn\(/.test(l));
@@ -574,7 +620,8 @@ function Browser({
   }, x.recordings, " recording", x.recordings === 1 ? "" : "s")))));
 }
 function Plates({
-  data
+  data,
+  finished
 }) {
   if (!data) return React.createElement("div", {
     className: "hint",
@@ -601,6 +648,7 @@ function Plates({
       paddingTop: 10
     }
   }, "No wells have started yet. They appear here as the analysis reaches them.");
+  const note = r => data.notes?.[`${r.chip_id}|${r.run_id}|${r.well}`];
   const chips = {};
   rows.forEach(r => {
     const k = `${r.chip_id || "?"}·${r.run_id || ""}`;
@@ -610,37 +658,58 @@ function Plates({
       wells: {}
     }).wells[r.well] = r;
   });
-  const s = data.summary || {};
-  const probs = rows.filter(r => r.status === "failed" || r.status !== "complete" && r.error);
+  const c = wellCounts(data, finished);
+  const probs = rows.filter(r => wellClass(r, note(r), finished) === "failed");
+  const tips = {
+    complete: "finished",
+    silent: "finished, but no spikes were detected",
+    absent: "not in this recording file — nothing to analyse",
+    running: "in progress"
+  };
   let i = 0;
   return React.createElement(React.Fragment, null, React.createElement("div", {
     className: "legend"
-  }, React.createElement("span", null, React.createElement("b", null, s.complete || 0), "\xA0of ", s.wells || rows.length, " wells finished"), React.createElement("span", null, React.createElement("i", {
-    className: "dot ok"
-  }), " finished"), React.createElement("span", null, React.createElement("i", {
-    className: "dot run"
-  }), " in progress"), React.createElement("span", null, React.createElement("i", {
-    className: "dot bad"
-  }), " problem")), React.createElement("div", {
+  }, React.createElement("span", null, React.createElement("b", null, c.complete), "\xA0finished"), c.silent > 0 && React.createElement("span", null, React.createElement("b", null, c.silent), "\xA0no activity"), c.absent > 0 && React.createElement("span", null, React.createElement("b", null, c.absent), "\xA0not in the recording file"), c.running > 0 && React.createElement("span", null, React.createElement("b", null, c.running), "\xA0in progress"), c.failed > 0 && React.createElement("span", {
+    style: {
+      color: "var(--red)"
+    }
+  }, React.createElement("b", null, c.failed), "\xA0problem", c.failed === 1 ? "" : "s")), React.createElement("div", {
+    className: "legend",
+    style: {
+      marginTop: 6
+    }
+  }, React.createElement("span", null, React.createElement("i", {
+    className: "well-k complete"
+  }), "finished"), React.createElement("span", null, React.createElement("i", {
+    className: "well-k silent"
+  }), "no activity"), !finished && React.createElement("span", null, React.createElement("i", {
+    className: "well-k running"
+  }), "in progress"), React.createElement("span", null, React.createElement("i", {
+    className: "well-k failed"
+  }), "problem"), React.createElement("span", null, React.createElement("i", {
+    className: "well-k absent"
+  }), "not in the recording file"), React.createElement("span", null, React.createElement("i", {
+    className: "well-k none"
+  }), "not recorded")), React.createElement("div", {
     className: "plates"
-  }, Object.values(chips).map(c => {
-    const ids = Object.keys(c.wells).map(w => +w.replace(/\D/g, ""));
+  }, Object.values(chips).map(ch => {
+    const ids = Object.keys(ch.wells).map(w => +w.replace(/\D/g, ""));
     const n = Math.max(6, Math.ceil((Math.max(...ids) + 1) / 6) * 6);
     return React.createElement("div", {
       className: "plate",
-      key: c.chip + c.run
+      key: ch.chip + ch.run
     }, React.createElement("div", {
       className: "plate-h"
-    }, "Chip ", React.createElement("b", null, c.chip || "?"), React.createElement("span", {
+    }, "Chip ", React.createElement("b", null, ch.chip || "?"), React.createElement("span", {
       className: "hint-s"
-    }, "recording ", c.run)), React.createElement("div", {
+    }, "recording ", ch.run)), React.createElement("div", {
       className: "wells"
     }, Array.from({
       length: n
     }, (_, k) => {
-      const r = c.wells[`well${String(k).padStart(3, "0")}`];
-      const cls = !r ? "none" : r.status === "complete" ? "complete" : r.status === "failed" ? "failed" : "running";
-      const tip = !r ? "Not part of this recording" : r.status === "complete" ? `Well ${k + 1}: finished` : r.status === "failed" ? `Well ${k + 1}: ${plainWellError(r)}` : `Well ${k + 1}: ${r.stage_name || "in progress"}`;
+      const r = ch.wells[`well${String(k).padStart(3, "0")}`];
+      const cls = r ? wellClass(r, note(r), finished) : "none";
+      const tip = !r ? `Well ${k + 1}: not recorded in this run` : cls === "failed" ? `Well ${k + 1}: ${plainWellError(r, note(r))}` : cls === "running" ? `Well ${k + 1}: ${r.stage_name || "in progress"}` : `Well ${k + 1}: ${tips[cls]}`;
       return React.createElement("div", {
         key: k,
         className: "well " + cls,
@@ -657,7 +726,7 @@ function Plates({
     key: j
   }, React.createElement("span", {
     className: "w"
-  }, r.chip_id, " \xB7 well ", +r.well.replace(/\D/g, "") + 1), React.createElement("span", null, plainWellError(r))))));
+  }, r.chip_id, " \xB7 well ", +r.well.replace(/\D/g, "") + 1), React.createElement("span", null, plainWellError(r, note(r)))))));
 }
 function LogDrawer({
   log,
@@ -738,6 +807,12 @@ function Line({
   const note = net ? plainNote(net) : null;
   const busy = st === "running";
   const sum = wells?.summary;
+  const netDone = net && (net.status === "done" || net.status === "failed");
+  const wc = netDone && wells?.wells && wells.notes ? wellCounts(wells, true) : null;
+  const refined = wc && {
+    t: [`${wc.complete} wells finished`, wc.silent && `${wc.silent} with no activity`, wc.absent && `${wc.absent} not in the recording file`, wc.failed && `${wc.failed} with problems`].filter(Boolean).join(" · "),
+    k: wc.failed ? "bad" : ""
+  };
   return React.createElement(React.Fragment, null, React.createElement("div", {
     className: "line rise",
     style: {
@@ -755,9 +830,9 @@ function Line({
     className: "stamp " + ji.k
   }, ji.say), busy && sum?.wells > 0 && React.createElement("span", {
     className: "note-l"
-  }, sum.complete, " wells finished so far"), note && React.createElement("span", {
-    className: "note-l " + note.k
-  }, note.t)), React.createElement("div", {
+  }, sum.complete, " wells finished so far"), (refined || note) && React.createElement("span", {
+    className: "note-l " + (refined || note).k
+  }, (refined || note).t)), React.createElement("div", {
     className: "lanes"
   }, [["Network", net], ["Activity scan", scan]].filter(x => x[1]).map(([n, j]) => {
     const x = jobInfo(j.status);
@@ -801,7 +876,8 @@ function Line({
   })))), open && React.createElement("div", {
     className: "plate-wrap"
   }, React.createElement(Plates, {
-    data: wells
+    data: wells,
+    finished: !!netDone
   })));
 }
 function Progress({
@@ -1894,14 +1970,17 @@ function App() {
     };
   }, [refresh, loadReports]);
   const inFlight = useRef({});
-  const fetchWells = useCallback(async folder => {
+  const fetchWells = useCallback(async (folder, logPath) => {
     if (inFlight.current[folder]) return;
     inFlight.current[folder] = true;
     try {
-      const d = await api(`/api/runs/checkpoints?path=${encodeURIComponent(folder)}`);
+      const [d, lg] = await Promise.all([api(`/api/runs/checkpoints?path=${encodeURIComponent(folder)}`), logPath ? api(`/api/runs/log?path=${encodeURIComponent(logPath)}&tail=1000000`).catch(() => null) : null]);
       setWells(w => ({
         ...w,
-        [folder]: d
+        [folder]: {
+          ...d,
+          notes: lg ? parseWellNotes(lg.lines || []) : {}
+        }
       }));
     } catch (e) {
       setWells(w => ({
@@ -1914,14 +1993,14 @@ function App() {
       delete inFlight.current[folder];
     }
   }, []);
-  const runningFolders = useMemo(() => [...new Set((status?.runs || []).filter(r => r.job === "network" && r.status === "running").map(r => r.folder))], [status]);
+  const runningNet = useMemo(() => (status?.runs || []).filter(r => r.job === "network" && r.status === "running").map(r => [r.folder, r.log]), [status]);
   useEffect(() => {
-    runningFolders.forEach(fetchWells);
+    runningNet.forEach(([f, l]) => fetchWells(f, l));
     const t = setInterval(() => {
-      if (!document.hidden) runningFolders.forEach(fetchWells);
+      if (!document.hidden) runningNet.forEach(([f, l]) => fetchWells(f, l));
     }, 20000);
     return () => clearInterval(t);
-  }, [runningFolders.join("|"), fetchWells]);
+  }, [runningNet.map(x => x[0]).join("|"), fetchWells]);
   const loadLog = useCallback(async l => {
     try {
       const d = await api(`/api/runs/log?path=${encodeURIComponent(l.path)}&tail=600`);
@@ -2081,7 +2160,7 @@ function App() {
       [f.folder]: o
     }));
     const settled = folderState(f.jobs) === "done" && wells[f.folder] && !wells[f.folder].error;
-    if (o && !settled) fetchWells(f.folder);
+    if (o && !settled) fetchWells(f.folder, f.jobs.find(j => j.job === "network")?.log);
   };
   const onLog = f => {
     const j = f.jobs.find(x => x.job === "network" && x.log) || f.jobs.find(x => x.log);
