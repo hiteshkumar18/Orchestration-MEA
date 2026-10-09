@@ -232,6 +232,16 @@ class JobConfig:
     # Prepare a handoff automatically when a queued batch finishes.
     auto_handoff: bool = True
 
+    # --- NWB ----------------------------------------------------------------
+    # Convert each Network recording to NWB (one file per well) under
+    # <output>/<project>/NWB/<project>/<date>/..., then analyse from the NWB
+    # instead of the raw .h5. Off by default. See docs/NWB.md.
+    nwb_convert: bool = False
+    # Interpreter with NeuroConv/PyNWB. Blank = <repo>/.venv-nwb/bin/python.
+    nwb_python: str = ""
+    # "gzip" (portable: DANDI and any reader) or "maxwell" (needs MaxWell's plugin).
+    nwb_compression: str = "gzip"
+
     @property
     def output_dir(self) -> Optional[str]:
         return self.driver_options.get("output_dir")
@@ -251,6 +261,16 @@ class JobConfig:
         """<output>/<project> — where everything for this project lands, next
         to the pipeline's own <output>/<project>/<date>/... results."""
         return Path(self.output_dir) / self.project_of(run_dir) if self.output_dir else None
+
+    def nwb_root_for(self, run_dir: Path | str) -> Optional[Path]:
+        """<output>/<project>/NWB — the project name repeats inside it so that
+        MEA-Analysis, which reads the project from the folder layout, files the
+        results under <output>/<project>/<date>/... exactly as for raw files."""
+        pd_ = self.project_dir(run_dir)
+        return pd_ / "NWB" if pd_ else None
+
+    def resolve_nwb_python(self) -> str:
+        return self.nwb_python or str(Path(__file__).resolve().parent.parent / ".venv-nwb" / "bin" / "python")
 
     def activity_out_for(self, run_dir: Path | str) -> Optional[str]:
         """Activity-scan output for one recording folder.
@@ -334,6 +354,10 @@ class JobConfig:
             errs.append(
                 f"run_pipeline_driver.py not found at: {self.driver}. "
                 "Set MEA_REPO (or --mea-repo) to your MEA-Analysis checkout.")
+        if self.run_network and self.nwb_convert and not Path(self.resolve_nwb_python()).exists():
+            errs.append(
+                f"NWB conversion is on, but its Python environment was not found at "
+                f"{self.resolve_nwb_python()}. Run ./setup-nwb.sh once, or turn NWB conversion off.")
         if self.run_activity and not ACTIVITY_SCRIPT.exists():
             errs.append(f"activity_scan.py not found at: {ACTIVITY_SCRIPT}")
         # The input directory is read-only, always. Anything this tool or the
@@ -1258,6 +1282,8 @@ class Watcher:
         Fall back to single-file mode for flattened layouts, where no recording
         sits under the assay subfolder and directory mode would find nothing.
         """
+        if self.cfg.nwb_convert:
+            return self._build_nwb_network_command(run_dir)
         qualifying = find_recordings(run_dir, self.cfg.h5_glob, self.cfg.assay_subfolder)
         if qualifying:
             target = str(run_dir)
@@ -1266,6 +1292,25 @@ class Watcher:
             target = str(recording) if recording else str(run_dir)
         return [self.cfg.resolve_driver_python(), str(self.cfg.driver), target,
                 *build_driver_args(self.cfg.driver_options)]
+
+    def _build_nwb_network_command(self, run_dir: Path) -> list[str]:
+        """Convert to NWB, then analyse from it (orchestration/nwb/nwb_job.py).
+
+        --output-dir is passed as its own argument so local staging can swap it
+        for scratch; the NWB files go to --nwb-root on the output disk directly.
+        """
+        script = Path(__file__).resolve().parent / "nwb" / "nwb_job.py"
+        return [self.cfg.python, str(script), str(run_dir),
+                "--output-dir", str(self.cfg.output_dir),
+                "--nwb-root", str(self.cfg.nwb_root_for(run_dir)),
+                "--nwb-python", self.cfg.resolve_nwb_python(),
+                "--mea-python", self.cfg.resolve_driver_python(),
+                "--mea-repo", str(Path(self.cfg.driver).parent),
+                "--scratch", str(self._scratch_root()),
+                "--compression", self.cfg.nwb_compression,
+                "--assay-subfolder", self.cfg.assay_subfolder or "Network",
+                "--driver-options", json.dumps({k: v for k, v in self.cfg.driver_options.items()
+                                                if k != "output_dir"})]
 
     def _build_activity_command(self, run_dir: Path) -> list[str]:
         """Whole-array activity extraction (``activity_scan.py``).
@@ -1335,10 +1380,17 @@ class Watcher:
             name=f"mea-{job}-{run_dir.name}", daemon=True,
         ).start()
 
-    def _env_banner(self, cmd: list[str], env: dict) -> list[str]:
+    def _analysis_python(self, cmd: list[str], job: str) -> str:
+        """The interpreter that runs the analysis. On the NWB route the job's
+        first program is our own job script's Python, not MEA-Analysis's."""
+        if job == JOB_NETWORK and self.cfg.nwb_convert:
+            return self.cfg.resolve_driver_python()
+        return cmd[0] if cmd else ""
+
+    def _env_banner(self, cmd: list[str], env: dict, interp: str = "") -> list[str]:
         """What will actually run, resolved — written at the top of each log."""
         out = [f"# {_now()}  {JOB_LABELS.get('network', '')}".rstrip(),
-               f"# driver interpreter : {cmd[0] if cmd else '?'}"]
+               f"# driver interpreter : {interp or (cmd[0] if cmd else '?')}"]
         try:
             which = subprocess.run(["bash", "-lc", "command -v python3"], env=env,
                                    capture_output=True, text=True, timeout=30)
@@ -1528,7 +1580,10 @@ class Watcher:
         except OSError:
             return None
         launched = text.count("[DRIVER] Launching:")
-        failed = text.count("Subprocess failed for")
+        # NWB route: a well that could not be converted was never launched.
+        conv_failed = text.count("NWB conversion failed for")
+        launched += conv_failed
+        failed = text.count("Subprocess failed for") + conv_failed
         if launched and failed >= launched:
             return (f"the driver exited 0 but all {launched} well subprocess(es) "
                     "failed — see the driver log")
@@ -1920,7 +1975,7 @@ class Watcher:
         # driver must not block it.
         sorting = not self.cfg.driver_options.get("skip_spikesorting")
         if job == JOB_NETWORK and sorting and not self.cfg.dry_run:
-            gpu = self.check_gpu(cmd[0] if cmd else "")
+            gpu = self.check_gpu(self._analysis_python(cmd, job))
             if not gpu.get("ok"):
                 msg = ("the GPU is not usable, so spike sorting was not started — "
                        + str(gpu.get("error", "unknown reason")))
@@ -2007,10 +2062,11 @@ class Watcher:
             # a virtualenv may expose only "python" or "python3.11", and then
             # "python3" still falls through to /usr/bin. So point a shim
             # directory's "python3" at the exact interpreter and put that first.
-            shim = self._python3_shim(cmd[0] if cmd else "")
+            interp = self._analysis_python(cmd, job)
+            shim = self._python3_shim(interp)
             if shim:
                 env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
-                venv = Path(cmd[0]).expanduser().parent.parent
+                venv = Path(interp).expanduser().parent.parent
                 if (venv / "pyvenv.cfg").is_file():
                     env["VIRTUAL_ENV"] = str(venv)
                     env.pop("PYTHONHOME", None)
@@ -2018,7 +2074,7 @@ class Watcher:
             with open(log_path, "w") as fh:
                 # Header first: every failure so far has come down to which
                 # interpreter ran what, and that was invisible in every log.
-                for line in self._env_banner(cmd, env):
+                for line in self._env_banner(cmd, env, interp):
                     fh.write(line + "\n")
                 fh.write("-" * 72 + "\n")
                 fh.flush()

@@ -634,6 +634,10 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
                 label="Spike sorting (slow — about an hour per well)"
                 hint={sorting?"On: separates individual neurons with the graphics card. Much slower.":
                   "Off (recommended): counts spikes on each electrode. A few minutes per well, no graphics card needed."}/>
+        <Switch id="nwb" checked={!!cfg.nwb_convert} disabled={locked||!cfg.run_network} onChange={v=>setT("nwb_convert",v)}
+                label="Convert to NWB first (for sharing on DANDI)"
+                hint={cfg.nwb_convert?"On: each well is saved as an NWB file in the results folder, and the analysis reads it from there. Conversion adds a few seconds per well and about one more copy of the data on disk.":
+                  "Off: the analysis reads the original recordings directly. Turn on to also keep a standard NWB copy of every well."}/>
         <Switch id="act" checked={cfg.run_activity} disabled={locked} onChange={v=>setT("run_activity",v)}
                 label="Activity scan" hint="Whole-chip activity maps and quality checks. Takes seconds."/>
         <Switch id="stg" checked={!!cfg.stage_locally} disabled={locked} onChange={v=>setT("stage_locally",v)}
@@ -656,6 +660,11 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
             <input className="inp tnum" type="number" min="1" max="16" value={cfg.max_concurrent_activity??2} disabled={locked} onChange={e=>setT("max_concurrent_activity",e.target.value)}/></div>
           <div className="f"><label className="f-l">Fast-disk folder</label>
             <input className="inp mono" value={cfg.scratch_dir||""} disabled={locked} onChange={e=>setT("scratch_dir",e.target.value)}/></div>
+          <div className="f"><label className="f-l">NWB compression</label>
+            <select className="sel" value={cfg.nwb_compression||"gzip"} disabled={locked} onChange={e=>setT("nwb_compression",e.target.value)}>
+              <option value="gzip">Standard (gzip) — any reader and DANDI can open it</option>
+              <option value="maxwell">MaxWell's own — smaller, needs MaxWell's plugin to read</option>
+            </select></div>
           <div className="f"><label className="f-l">Always keep this much free on it (GB)</label>
             <input className="inp tnum" type="number" min="0" value={cfg.stage_min_free_gb??200} disabled={locked} onChange={e=>setT("stage_min_free_gb",e.target.value)}/></div>
         </div>
@@ -825,6 +834,7 @@ function App(){
     logs_in_output:cfg.logs_in_output!==false,stage_locally:!!cfg.stage_locally,scratch_dir:cfg.scratch_dir||"",
     stage_min_free_gb:Number(cfg.stage_min_free_gb)||200,dry_run:!!cfg.dry_run,
     ai_requirements:cfg.ai_requirements||"",auto_handoff:cfg.auto_handoff!==false,
+    nwb_convert:!!cfg.nwb_convert,nwb_python:cfg.nwb_python||"",nwb_compression:cfg.nwb_compression||"gzip",
   });
   const run_=async(fn,ok,m)=>{setBusy(true);try{await fn();if(ok)toast(ok,m);refresh(true);}
     catch(e){toast("That didn’t work",e.message,"error");}finally{setBusy(false);}};

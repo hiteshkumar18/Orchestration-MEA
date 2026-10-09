@@ -1615,6 +1615,13 @@ function Settings({
     label: "Spike sorting (slow \u2014 about an hour per well)",
     hint: sorting ? "On: separates individual neurons with the graphics card. Much slower." : "Off (recommended): counts spikes on each electrode. A few minutes per well, no graphics card needed."
   }), React.createElement(Switch, {
+    id: "nwb",
+    checked: !!cfg.nwb_convert,
+    disabled: locked || !cfg.run_network,
+    onChange: v => setT("nwb_convert", v),
+    label: "Convert to NWB first (for sharing on DANDI)",
+    hint: cfg.nwb_convert ? "On: each well is saved as an NWB file in the results folder, and the analysis reads it from there. Conversion adds a few seconds per well and about one more copy of the data on disk." : "Off: the analysis reads the original recordings directly. Turn on to also keep a standard NWB copy of every well."
+  }), React.createElement(Switch, {
     id: "act",
     checked: cfg.run_activity,
     disabled: locked,
@@ -1699,6 +1706,19 @@ function Settings({
     disabled: locked,
     onChange: e => setT("scratch_dir", e.target.value)
   })), React.createElement("div", {
+    className: "f"
+  }, React.createElement("label", {
+    className: "f-l"
+  }, "NWB compression"), React.createElement("select", {
+    className: "sel",
+    value: cfg.nwb_compression || "gzip",
+    disabled: locked,
+    onChange: e => setT("nwb_compression", e.target.value)
+  }, React.createElement("option", {
+    value: "gzip"
+  }, "Standard (gzip) \u2014 any reader and DANDI can open it"), React.createElement("option", {
+    value: "maxwell"
+  }, "MaxWell's own \u2014 smaller, needs MaxWell's plugin to read"))), React.createElement("div", {
     className: "f"
   }, React.createElement("label", {
     className: "f-l"
@@ -2111,7 +2131,10 @@ function App() {
     stage_min_free_gb: Number(cfg.stage_min_free_gb) || 200,
     dry_run: !!cfg.dry_run,
     ai_requirements: cfg.ai_requirements || "",
-    auto_handoff: cfg.auto_handoff !== false
+    auto_handoff: cfg.auto_handoff !== false,
+    nwb_convert: !!cfg.nwb_convert,
+    nwb_python: cfg.nwb_python || "",
+    nwb_compression: cfg.nwb_compression || "gzip"
   });
   const run_ = async (fn, ok, m) => {
     setBusy(true);

@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from checkpoints import read_checkpoints, summarise  # noqa: E402
+from checkpoints import read_checkpoints, recording_in_folder, summarise  # noqa: E402
 
 LOG = logging.getLogger("mea.handoff")
 HERE = Path(__file__).resolve().parent
@@ -52,7 +52,7 @@ def _within(child: Path, parent: Path) -> bool:
 
 
 def _under_any(path: str, folders: list[Path]) -> bool:
-    return not folders or any(_within(Path(path), f) for f in folders)
+    return not folders or any(_within(Path(path), f) or recording_in_folder(path, f) for f in folders)
 
 
 def collect_network(output_dir: Path, folders: list[Path]) -> list[dict]:

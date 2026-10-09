@@ -210,6 +210,7 @@ Open the **Settings** tab.
 | Spike sorting (slow — about an hour per well) | **Off** | Off counts spikes on each electrode in minutes. Turn on only if you need individual neurons and have discussed it with the lab — it uses the graphics card for hours. |
 | Activity scan | **On** | Whole-chip activity maps and quality checks; takes seconds. |
 | Use the fast local disk while working | **On** | Several times faster. Temporary files go on the computer's fast disk and are deleted after each job. |
+| Convert to NWB first (for sharing on DANDI) | Off, unless you need NWB files | On: every well is also saved as a standard NWB file in your results folder (`<project>/NWB/…`), and the analysis reads it from there. Needs a one-time `./setup-nwb.sh` in your Orchestration-MEA folder (ask for help the first time). |
 
 If you turn on the fast disk, open **Advanced settings** and set **Fast-disk
 folder** to `/home/<your-user>/mea_scratch` (it is created and cleaned up for you).

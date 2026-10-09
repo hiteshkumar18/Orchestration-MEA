@@ -242,6 +242,16 @@ folder is read-only) are not overridden by requirements.
 python orchestration/handoff.py /path/to/output --folder /input/260903 --requirements @req.md
 ```
 
+### NWB (for DANDI)
+
+With **Settings → Convert to NWB first** on (off by default), each Network
+recording is converted to NWB, one file per well, under
+`<output>/<project>/NWB/<project>/<date>/…`, and MEA-Analysis then analyses the
+NWB files instead of the raw `.h5`. Results land where they always do. NWB files
+are validated against the source, reused on re-analysis, and use standard gzip
+compression so DANDI and any NWB reader can open them. One-time setup:
+`./setup-nwb.sh`. Details, layout and limitations: [docs/NWB.md](docs/NWB.md).
+
 ### Reports for lab users (any AI on the server)
 
 Lab members get reports by giving an AI that runs on the analysis computer

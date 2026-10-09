@@ -24,3 +24,4 @@ venv/
 .vscode/
 .idea/
 tests/node_modules/
+.venv-nwb/

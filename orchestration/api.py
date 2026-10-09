@@ -187,6 +187,9 @@ class ConfigPayload(BaseModel):
     driver_python: str = ""
     ai_requirements: str = ""
     auto_handoff: bool = True
+    nwb_convert: bool = False
+    nwb_python: str = ""
+    nwb_compression: str = "gzip"
     logs_in_output: bool = True
     stage_locally: bool = False
     scratch_dir: str = ""
@@ -285,6 +288,9 @@ def api_get_config():
         "work_dir": cfg.work_dir,
         "ai_requirements": cfg.ai_requirements,
         "auto_handoff": cfg.auto_handoff,
+        "nwb_convert": cfg.nwb_convert,
+        "nwb_python": cfg.nwb_python,
+        "nwb_compression": cfg.nwb_compression,
     }
 
 
@@ -329,6 +335,9 @@ def api_set_config(payload: ConfigPayload):
         dry_run=payload.dry_run,
         ai_requirements=payload.ai_requirements,
         auto_handoff=payload.auto_handoff,
+        nwb_convert=payload.nwb_convert,
+        nwb_python=payload.nwb_python,
+        nwb_compression=payload.nwb_compression if payload.nwb_compression in ("gzip", "maxwell") else "gzip",
     )
     errors = cfg.validate()
     if errors:
@@ -477,6 +486,12 @@ def api_preview(payload: ConfigPayload):
         activity_active_hz=payload.activity_active_hz,
         activity_figures=payload.activity_figures,
         work_dir=str(WORK_DIR),
+        nwb_convert=payload.nwb_convert,
+        nwb_python=payload.nwb_python,
+        nwb_compression=payload.nwb_compression,
+        driver_python=payload.driver_python,
+        stage_locally=payload.stage_locally,
+        scratch_dir=payload.scratch_dir,
     )
     probe = Watcher(cfg, on_event=lambda *_: None, reconcile=False)
 
