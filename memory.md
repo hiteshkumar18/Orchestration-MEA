@@ -32,13 +32,13 @@ The users are non-technical lab members.
 
 ## Branches
 
-| Branch | Head | Based on | Pushed |
-|---|---|---|---|
-| `main` | `4f3eedf` | — | yes (54 commits behind `feat/ui-redesign`) |
-| `feat/ai-reports` | `3c16281` | `main` | yes |
-| `feat/ui-redesign` | `1ea9e72` + this file | `feat/ai-reports` | yes |
-| `feat/nwb-conversion` | `cd55259` | `feat/ui-redesign` at `1ea9e72` | yes (2026-10-12) |
-| `feat/dashboard` | `43563b4` | `feat/nwb-conversion` | yes (2026-10-12) |
+| Branch | Head | Merged into `main` |
+|---|---|---|
+| `main` | `fdfba83` | — |
+| `feat/ai-reports` | `3c16281` | yes (PRs #1, #2) |
+| `feat/ui-redesign` | `5523956` | yes (PRs #3, #4) |
+| `feat/nwb-conversion` | `cd55259` | yes (through PR #5, since `feat/dashboard` is built on it) |
+| `feat/dashboard` | `43563b4` | yes (PR #5) |
 
 Worktrees on the lab machine:
 
@@ -46,9 +46,10 @@ Worktrees on the lab machine:
 - `Orchestration-MEA-nwb` → `feat/nwb-conversion`
 - `Orchestration-MEA-dash` → `feat/dashboard`
 
-Nothing has been merged to `main` and there are no open pull requests yet.
-This file lives only on `feat/ui-redesign`; the NWB and dashboard branches were
-cut before it was written.
+As of 2026-10-12, everything is merged into `main` (`fdfba83`) and there are
+no open pull requests. The lab worktrees can switch to `main`.
+On the merged `main`, all 51 stdlib unittests in `tests/python` pass (11 are
+skipped because they need a test server on 8766 or `h5py`), and so does `npm test`.
 
 ## What has been done
 
@@ -141,8 +142,9 @@ The machine was rebooted to fix a GPU "Driver/library version mismatch".
 
 On the lab machine (a cloud session cannot reach it — see below):
 
-1. Start `mea-ui` on port 8000 with `OOMPolicy=continue`. Open question: run it
-   from `feat/ui-redesign` (as before) or `feat/dashboard`.
+1. Start `mea-ui` on port 8000 with `OOMPolicy=continue`. `main` now has both
+   the UI redesign and the dashboard, so the natural choice is to run it from
+   `main`. Confirm with the user first.
 2. Reset the failed `261003::network` step with `POST /api/runs/reset`, then queue
    260919, 260930 and 261003 with `POST /api/queue` (`rerun=false`). Hold 260903.
 3. Delete the test outputs `dash_test` and `nwb_test`. The user approved this
@@ -152,7 +154,7 @@ On the lab machine (a cloud session cannot reach it — see below):
 
 In the repository:
 
-5. Open pull requests and merge towards `main`, which is 54 commits behind.
+5. ~~Open pull requests and merge towards `main`.~~ Done 2026-10-12 (PRs #1–#5).
 6. A guard against the 260903 failure — for example a spike-count ceiling before
    network-burst analysis — has been discussed as a need but not designed or built.
 7. DANDI upload: the subject and lab metadata must come from the user.
@@ -167,4 +169,8 @@ the live server.
   and the stdlib unittests in `tests/python` need none of the lab data.
 - It cannot do items 1 to 4, or any run on real recordings. Those need a session
   on `benshalom-labtower1`.
-- It only sees branches that are pushed. All five branches above are on GitHub.
+- It only sees branches that are pushed. Everything is on `main` as of 2026-10-12.
+- Item 6 cannot be built safely from here. The spike count is only known
+  inside MEA-Analysis's per-well routine, which must not be changed. A guard
+  at the orchestrator level, such as a per-well memory cap through a cgroup or
+  `systemd-run`, is a design choice and has to be tested on the lab machine.
