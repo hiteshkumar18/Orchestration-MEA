@@ -117,6 +117,26 @@ def _cached_norm(fp: Path) -> Optional[dict]:
     return dict(rec)
 
 
+def recording_in_folder(data_dir: str, folder: str | Path) -> bool:
+    """Whether a well's recording belongs to an input date folder.
+
+    Raw route: the recording lies inside the folder. NWB route: the recording is
+    <output>/<project>/NWB/<project>/<date>/..., matched by project and date.
+    """
+    if not data_dir:
+        return False
+    f = Path(folder)
+    if str(f) in data_dir:
+        return True
+    try:
+        if str(f.resolve()) in str(Path(data_dir).resolve()):
+            return True
+    except (OSError, RuntimeError):
+        pass
+    project, date = f.parent.name, f.name
+    return bool(project and date) and f"/{project}/NWB/{project}/{date}/" in data_dir
+
+
 def read_checkpoints(search_roots: list[Path], run_dir: Optional[Path] = None,
                      limit: int = 4000) -> list[dict]:
     """Collect checkpoints under ``search_roots``, optionally for one run folder.
@@ -139,14 +159,8 @@ def read_checkpoints(search_roots: list[Path], run_dir: Optional[Path] = None,
             rec = _cached_norm(fp)
             if rec is None:
                 continue
-            if wanted:
-                d = rec.get("data_dir") or ""
-                try:
-                    if wanted not in str(Path(d).resolve()):
-                        continue
-                except (OSError, RuntimeError):
-                    if wanted not in d:
-                        continue
+            if wanted and not recording_in_folder(rec.get("data_dir") or "", wanted):
+                continue
             out.append(rec)
             if len(out) >= limit:
                 LOG.warning("Checkpoint scan hit the %d-file limit", limit)

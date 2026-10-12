@@ -23,6 +23,7 @@ Your raw recordings are **only ever read**, never changed or moved.
 - [Part 3 — First-time settings](#part-3--first-time-settings)
 - [Part 4 — Analyse recordings](#part-4--analyse-recordings)
 - [Part 5 — Follow progress](#part-5--follow-progress)
+- [Part 5b — The Dashboard](#part-5b--the-dashboard)
 - [Part 6 — Get a report from an AI](#part-6--get-a-report-from-an-ai)
 - [Part 7 — Everyday tasks](#part-7--everyday-tasks)
 - [Rules for sharing the computer](#rules-for-sharing-the-computer)
@@ -183,8 +184,8 @@ connection from your computer.
    http://localhost:<your-port>
    ```
 
-You see **MEA Bench** with four tabs: **Progress**, **Add recordings**,
-**AI report**, **Settings**.
+You see **MEA Bench** with five tabs: **Dashboard** (opens first),
+**Progress**, **Add recordings**, **AI report**, **Settings**.
 
 When you are done, close the browser tab and close the terminal window (or
 press **Ctrl + C** in it). The analyses keep running on the analysis computer.
@@ -210,6 +211,7 @@ Open the **Settings** tab.
 | Spike sorting (slow — about an hour per well) | **Off** | Off counts spikes on each electrode in minutes. Turn on only if you need individual neurons and have discussed it with the lab — it uses the graphics card for hours. |
 | Activity scan | **On** | Whole-chip activity maps and quality checks; takes seconds. |
 | Use the fast local disk while working | **On** | Several times faster. Temporary files go on the computer's fast disk and are deleted after each job. |
+| Convert to NWB first (for sharing on DANDI) | Off, unless you need NWB files | On: every well is also saved as a standard NWB file in your results folder (`<project>/NWB/…`), and the analysis reads it from there. Needs a one-time `./setup-nwb.sh` in your Orchestration-MEA folder (ask for help the first time). |
 
 If you turn on the fast disk, open **Advanced settings** and set **Fast-disk
 folder** to `/home/<your-user>/mea_scratch` (it is created and cleaned up for you).
@@ -274,10 +276,50 @@ The four numbers at the top count recording dates: **Waiting**, **Analysing**,
 - **Log** — what the analysis did, step by step, in a side panel. Errors are
   highlighted in red. **Show everything** shows the raw log.
 - **Report** — opens the newest report for that date (appears once a report exists).
+- **Details** — the full page for this analysis run (see Part 5b).
 - **↻** — analyse this date again.
 
 Typical times with spike sorting off: a few minutes per well, so roughly
 30 minutes to 2 hours per recording date depending on its size.
+
+---
+
+## Part 5b — The Dashboard
+
+The **Dashboard** tab answers "is everything all right?" at a glance. It
+updates by itself every few seconds; you never need to reload.
+
+**From top to bottom:**
+
+- **Status line** — whether the page is watching for new recordings, and how
+  many analyses are running out of how many are allowed at once.
+- **Needs attention** — only shown when something needs you: a failed date, an
+  analysis that has written nothing for a long time (it may be stuck), or a
+  problem with the computer (memory almost full, a disk nearly full, the
+  graphics card needing a restart). Click a red line to open that run.
+- **Running now** — one card per analysis in progress: how many wells are done
+  out of how many, a progress bar, and an estimate of the time left. The
+  estimate improves as more wells finish; it is only a guide.
+- **The computer** — how busy the processors are, how much memory is free, the
+  graphics card, and the free space on each disk. **Analysis programs running
+  now** lists the programs working on recordings, including other people's.
+- **Run history** — every analysis ever run, newest first. Filter by project,
+  by analysis, or by outcome. Click a row to open it.
+
+**A run's page** (from the history, a card, or **Details** on Progress):
+
+| Section | What it shows |
+|---|---|
+| Top | The date, project, outcome, and **Report** / **Log** buttons. "Run 2 for this date" means it was analysed before. |
+| Steps | What happened, in order: queued, started, converted to NWB, analysed, finished — with the time of each. |
+| Wells | Every well with its outcome, the step it reached, how many spikes were found, how long it took, and why it failed if it did. |
+| NWB conversion | Only when NWB conversion was on: one line per well converted. |
+| What it produced | Where the results, NWB files, report and log were written, and how big they are. |
+| Settings it ran with | The settings used for *this* run, even if Settings has changed since. |
+
+Press **← Back** (or your browser's back button) to return. Runs from before
+the dashboard existed show "imported from before history was kept" and have
+no step or settings record — that is expected.
 
 ---
 
@@ -387,6 +429,8 @@ The analysis computer is shared. Please:
 | *Can't reach the analysis server* on the page | The tool is restarting or stopped. Wait a minute and reload; otherwise restart it (Part 7). |
 | A date says **Needs attention** | Press **Log** and look for red lines; ask for help with a screenshot. |
 | **Wells** says *Reading well results…* for a long time | The results disk is busy with running analyses; it can take a minute or two. You can keep using the page. |
+| **Needs attention** says an analysis has written nothing for a long time | Open it and press **Log**. If the last lines are old, it may be stuck; it is stopped automatically after the time limit and can be run again with **↻**. |
+| The Dashboard says the graphics card needs a restart | Detection-only analysis (the default) still works. Ask the administrator to restart the computer when nothing is running. |
 | A date stays **In line** for hours | Dates run one (or two) at a time; the others wait their turn. |
 | The AI says `report_tools/make_report: not found` | Start analysing once from the page (it writes the report tools into your results folder), then ask again. |
 | The AI says a date is *not finished yet* | Wait until **Progress** shows it as **Done**, then ask again. |

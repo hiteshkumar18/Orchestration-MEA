@@ -1,0 +1,13 @@
+# NWB conversion environment (.venv-nwb), created by ./setup-nwb.sh.
+# Kept separate from the MEA-Analysis environment so its pinned scientific stack
+# is never touched. Versions tested end to end on 2026-10-08.
+neuroconv[maxwell]==0.10.2
+pynwb==4.2.0
+hdmf==6.2.0
+neo==0.14.5
+spikeinterface==0.105.0
+probeinterface==0.4.0
+h5py==3.16.0
+numpy==2.2.6
+nwbinspector==0.7.2
+tenacity==9.1.2
