@@ -232,6 +232,16 @@ class JobConfig:
     # Prepare a handoff automatically when a queued batch finishes.
     auto_handoff: bool = True
 
+    # --- NWB ----------------------------------------------------------------
+    # Convert each Network recording to NWB (one file per well) under
+    # <output>/<project>/NWB/<project>/<date>/..., then analyse from the NWB
+    # instead of the raw .h5. Off by default. See docs/NWB.md.
+    nwb_convert: bool = False
+    # Interpreter with NeuroConv/PyNWB. Blank = <repo>/.venv-nwb/bin/python.
+    nwb_python: str = ""
+    # "gzip" (portable: DANDI and any reader) or "maxwell" (needs MaxWell's plugin).
+    nwb_compression: str = "gzip"
+
     @property
     def output_dir(self) -> Optional[str]:
         return self.driver_options.get("output_dir")
@@ -251,6 +261,16 @@ class JobConfig:
         """<output>/<project> — where everything for this project lands, next
         to the pipeline's own <output>/<project>/<date>/... results."""
         return Path(self.output_dir) / self.project_of(run_dir) if self.output_dir else None
+
+    def nwb_root_for(self, run_dir: Path | str) -> Optional[Path]:
+        """<output>/<project>/NWB — the project name repeats inside it so that
+        MEA-Analysis, which reads the project from the folder layout, files the
+        results under <output>/<project>/<date>/... exactly as for raw files."""
+        pd_ = self.project_dir(run_dir)
+        return pd_ / "NWB" if pd_ else None
+
+    def resolve_nwb_python(self) -> str:
+        return self.nwb_python or str(Path(__file__).resolve().parent.parent / ".venv-nwb" / "bin" / "python")
 
     def activity_out_for(self, run_dir: Path | str) -> Optional[str]:
         """Activity-scan output for one recording folder.
@@ -334,6 +354,10 @@ class JobConfig:
             errs.append(
                 f"run_pipeline_driver.py not found at: {self.driver}. "
                 "Set MEA_REPO (or --mea-repo) to your MEA-Analysis checkout.")
+        if self.run_network and self.nwb_convert and not Path(self.resolve_nwb_python()).exists():
+            errs.append(
+                f"NWB conversion is on, but its Python environment was not found at "
+                f"{self.resolve_nwb_python()}. Run ./setup-nwb.sh once, or turn NWB conversion off.")
         if self.run_activity and not ACTIVITY_SCRIPT.exists():
             errs.append(f"activity_scan.py not found at: {ACTIVITY_SCRIPT}")
         # The input directory is read-only, always. Anything this tool or the
@@ -389,6 +413,9 @@ class StateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._data: dict[str, dict] = {}
+        # Called after every update with (key, merged entry, changed fields);
+        # the run history hangs off this. Must never break an update.
+        self.on_update = None
         if self.path.exists():
             try:
                 self._data = json.loads(self.path.read_text())
@@ -415,6 +442,13 @@ class StateStore:
             entry = self._data.setdefault(key, {"run": Path(key).name})
             entry.update(fields)
             self._flush()
+            snapshot = dict(entry)
+        hook = self.on_update
+        if hook is not None:
+            try:
+                hook(key, snapshot, fields)
+            except Exception:  # noqa: BLE001
+                LOG.exception("State update hook failed for %s", key)
 
     def all(self) -> dict[str, dict]:
         """Deep-enough copy for a consistent snapshot while jobs are running."""
@@ -613,6 +647,23 @@ class Watcher:
         self.state = StateStore(self.work_dir / "watcher_state.json")
         self.on_event = on_event or (lambda *_: None)
 
+        # Permanent run history (see history.py). Only the real watcher keeps
+        # it; a throwaway Watcher (command preview) must not write. Attached
+        # before _reconcile_state so runs left in flight are closed properly.
+        self.history = None
+        if reconcile:
+            try:
+                from history import RunHistory
+                self.history = RunHistory(self.work_dir / "run_history.sqlite",
+                                          settings_snapshot=self._settings_snapshot)
+                imported = self.history.import_state(self.state.all())
+                if imported:
+                    LOG.info("Run history started with %d run(s) from the state file", imported)
+                self.state.on_update = self.history.record
+            except Exception:  # noqa: BLE001
+                LOG.exception("Run history unavailable; analyses are unaffected")
+                self.history = None
+
         # Two separate signals. `_stop` ends the scan loop; `_halt` ends the
         # worker threads. Stopping the watcher should stop it looking for new
         # folders, not abandon work already queued — a queued Kilosort job that
@@ -662,6 +713,21 @@ class Watcher:
         self._stage_reserved: dict[str, float] = {}
         self._stage_lock = threading.Lock()
         self.on_batch_done: Optional[Callable[[dict], None]] = None
+
+    def _settings_snapshot(self) -> dict:
+        """What a run is launched with — stored with each run in the history."""
+        c = self.cfg
+        return {
+            "watch_dir": c.watch_dir, "output_dir": c.output_dir,
+            "run_network": c.run_network, "run_activity": c.run_activity,
+            "spike_sorting": not c.driver_options.get("skip_spikesorting"),
+            "nwb_convert": c.nwb_convert, "nwb_compression": c.nwb_compression,
+            "stage_locally": c.stage_locally, "scratch_dir": c.scratch_dir,
+            "max_concurrent_network": c.max_concurrent_network,
+            "max_concurrent_activity": c.max_concurrent_activity,
+            "driver_options": {k: v for k, v in c.driver_options.items()
+                               if v not in (None, False, "")},
+        }
 
     # -- lifecycle ---------------------------------------------------------- #
     IN_FLIGHT = ("detected", "dispatched", "queued", "running")
@@ -1258,6 +1324,8 @@ class Watcher:
         Fall back to single-file mode for flattened layouts, where no recording
         sits under the assay subfolder and directory mode would find nothing.
         """
+        if self.cfg.nwb_convert:
+            return self._build_nwb_network_command(run_dir)
         qualifying = find_recordings(run_dir, self.cfg.h5_glob, self.cfg.assay_subfolder)
         if qualifying:
             target = str(run_dir)
@@ -1266,6 +1334,25 @@ class Watcher:
             target = str(recording) if recording else str(run_dir)
         return [self.cfg.resolve_driver_python(), str(self.cfg.driver), target,
                 *build_driver_args(self.cfg.driver_options)]
+
+    def _build_nwb_network_command(self, run_dir: Path) -> list[str]:
+        """Convert to NWB, then analyse from it (orchestration/nwb/nwb_job.py).
+
+        --output-dir is passed as its own argument so local staging can swap it
+        for scratch; the NWB files go to --nwb-root on the output disk directly.
+        """
+        script = Path(__file__).resolve().parent / "nwb" / "nwb_job.py"
+        return [self.cfg.python, str(script), str(run_dir),
+                "--output-dir", str(self.cfg.output_dir),
+                "--nwb-root", str(self.cfg.nwb_root_for(run_dir)),
+                "--nwb-python", self.cfg.resolve_nwb_python(),
+                "--mea-python", self.cfg.resolve_driver_python(),
+                "--mea-repo", str(Path(self.cfg.driver).parent),
+                "--scratch", str(self._scratch_root()),
+                "--compression", self.cfg.nwb_compression,
+                "--assay-subfolder", self.cfg.assay_subfolder or "Network",
+                "--driver-options", json.dumps({k: v for k, v in self.cfg.driver_options.items()
+                                                if k != "output_dir"})]
 
     def _build_activity_command(self, run_dir: Path) -> list[str]:
         """Whole-array activity extraction (``activity_scan.py``).
@@ -1335,10 +1422,17 @@ class Watcher:
             name=f"mea-{job}-{run_dir.name}", daemon=True,
         ).start()
 
-    def _env_banner(self, cmd: list[str], env: dict) -> list[str]:
+    def _analysis_python(self, cmd: list[str], job: str) -> str:
+        """The interpreter that runs the analysis. On the NWB route the job's
+        first program is our own job script's Python, not MEA-Analysis's."""
+        if job == JOB_NETWORK and self.cfg.nwb_convert:
+            return self.cfg.resolve_driver_python()
+        return cmd[0] if cmd else ""
+
+    def _env_banner(self, cmd: list[str], env: dict, interp: str = "") -> list[str]:
         """What will actually run, resolved — written at the top of each log."""
         out = [f"# {_now()}  {JOB_LABELS.get('network', '')}".rstrip(),
-               f"# driver interpreter : {cmd[0] if cmd else '?'}"]
+               f"# driver interpreter : {interp or (cmd[0] if cmd else '?')}"]
         try:
             which = subprocess.run(["bash", "-lc", "command -v python3"], env=env,
                                    capture_output=True, text=True, timeout=30)
@@ -1528,7 +1622,10 @@ class Watcher:
         except OSError:
             return None
         launched = text.count("[DRIVER] Launching:")
-        failed = text.count("Subprocess failed for")
+        # NWB route: a well that could not be converted was never launched.
+        conv_failed = text.count("NWB conversion failed for")
+        launched += conv_failed
+        failed = text.count("Subprocess failed for") + conv_failed
         if launched and failed >= launched:
             return (f"the driver exited 0 but all {launched} well subprocess(es) "
                     "failed — see the driver log")
@@ -1920,7 +2017,7 @@ class Watcher:
         # driver must not block it.
         sorting = not self.cfg.driver_options.get("skip_spikesorting")
         if job == JOB_NETWORK and sorting and not self.cfg.dry_run:
-            gpu = self.check_gpu(cmd[0] if cmd else "")
+            gpu = self.check_gpu(self._analysis_python(cmd, job))
             if not gpu.get("ok"):
                 msg = ("the GPU is not usable, so spike sorting was not started — "
                        + str(gpu.get("error", "unknown reason")))
@@ -2007,10 +2104,11 @@ class Watcher:
             # a virtualenv may expose only "python" or "python3.11", and then
             # "python3" still falls through to /usr/bin. So point a shim
             # directory's "python3" at the exact interpreter and put that first.
-            shim = self._python3_shim(cmd[0] if cmd else "")
+            interp = self._analysis_python(cmd, job)
+            shim = self._python3_shim(interp)
             if shim:
                 env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
-                venv = Path(cmd[0]).expanduser().parent.parent
+                venv = Path(interp).expanduser().parent.parent
                 if (venv / "pyvenv.cfg").is_file():
                     env["VIRTUAL_ENV"] = str(venv)
                     env.pop("PYTHONHOME", None)
@@ -2018,7 +2116,7 @@ class Watcher:
             with open(log_path, "w") as fh:
                 # Header first: every failure so far has come down to which
                 # interpreter ran what, and that was invisible in every log.
-                for line in self._env_banner(cmd, env):
+                for line in self._env_banner(cmd, env, interp):
                     fh.write(line + "\n")
                 fh.write("-" * 72 + "\n")
                 fh.flush()

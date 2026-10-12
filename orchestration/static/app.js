@@ -866,7 +866,13 @@ function Line({
     onClick: () => onLog(f)
   }, React.createElement(Lines, {
     s: 14
-  }), " Log"), React.createElement("button", {
+  }), " Log"), (net?.run_id || scan?.run_id) && React.createElement("button", {
+    className: "btn sm",
+    title: "Steps, wells, outputs and settings of this run",
+    onClick: () => goRun(net?.run_id || scan?.run_id)
+  }, React.createElement(Chev, {
+    s: 14
+  }), " Details"), React.createElement("button", {
     className: "btn ghost sm",
     title: "Analyse this date again",
     "aria-label": "Analyse again",
@@ -1615,6 +1621,13 @@ function Settings({
     label: "Spike sorting (slow \u2014 about an hour per well)",
     hint: sorting ? "On: separates individual neurons with the graphics card. Much slower." : "Off (recommended): counts spikes on each electrode. A few minutes per well, no graphics card needed."
   }), React.createElement(Switch, {
+    id: "nwb",
+    checked: !!cfg.nwb_convert,
+    disabled: locked || !cfg.run_network,
+    onChange: v => setT("nwb_convert", v),
+    label: "Convert to NWB first (for sharing on DANDI)",
+    hint: cfg.nwb_convert ? "On: each well is saved as an NWB file in the results folder, and the analysis reads it from there. Conversion adds a few seconds per well and about one more copy of the data on disk." : "Off: the analysis reads the original recordings directly. Turn on to also keep a standard NWB copy of every well."
+  }), React.createElement(Switch, {
     id: "act",
     checked: cfg.run_activity,
     disabled: locked,
@@ -1699,6 +1712,19 @@ function Settings({
     disabled: locked,
     onChange: e => setT("scratch_dir", e.target.value)
   })), React.createElement("div", {
+    className: "f"
+  }, React.createElement("label", {
+    className: "f-l"
+  }, "NWB compression"), React.createElement("select", {
+    className: "sel",
+    value: cfg.nwb_compression || "gzip",
+    disabled: locked,
+    onChange: e => setT("nwb_compression", e.target.value)
+  }, React.createElement("option", {
+    value: "gzip"
+  }, "Standard (gzip) \u2014 any reader and DANDI can open it"), React.createElement("option", {
+    value: "maxwell"
+  }, "MaxWell's own \u2014 smaller, needs MaxWell's plugin to read"))), React.createElement("div", {
     className: "f"
   }, React.createElement("label", {
     className: "f-l"
@@ -1857,20 +1883,790 @@ function Settings({
     s: 14
   }), " Save settings")));
 }
+const fmtBytes = b => {
+  if (b == null) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0,
+    v = b;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 && i ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
+};
+const pct = (a, b) => b ? Math.round(100 * a / b) : 0;
+const WELL_OUT = {
+  complete: ["finished", "ok"],
+  silent: ["no activity", "queue"],
+  not_recorded: ["not in the recording file", "wait"],
+  failed: ["problem", "bad"],
+  stopped: ["stopped", "bad"],
+  running: ["in progress", "run"]
+};
+const RUN_SAY = {
+  done: ["Done", "ok"],
+  failed: ["Failed", "bad"],
+  interrupted: ["Interrupted", "wait"],
+  running: ["Analysing", "run"],
+  dispatched: ["Starting", "queue"],
+  queued: ["In line", "queue"],
+  detected: ["Found (test mode)", "wait"]
+};
+const runSay = st => RUN_SAY[st] || [st || "—", "wait"];
+const jobName = j => j === "activity" ? "Activity scan" : "Network analysis";
+const HEARTBEAT = /^running .+ · last log output .+ ago$/;
+const goRun = id => {
+  if (id) location.hash = "run/" + id;
+};
+function Meter({
+  value,
+  max,
+  label,
+  sub,
+  danger
+}) {
+  const f = max ? Math.min(100, 100 * value / max) : 0;
+  return React.createElement("div", {
+    className: "meter-row"
+  }, React.createElement("div", {
+    className: "meter-top"
+  }, React.createElement("span", null, label), React.createElement("span", {
+    className: "hint-s"
+  }, sub)), React.createElement("div", {
+    className: "meter"
+  }, React.createElement("i", {
+    style: {
+      width: `${f}%`
+    },
+    "data-k": danger ? "bad" : f > 85 ? "warn" : "ok"
+  })));
+}
+function SysHealth({
+  sys
+}) {
+  if (!sys?.ready) return React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b hint",
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center"
+    }
+  }, React.createElement("span", {
+    className: "spin"
+  }), " Measuring the computer\u2026"));
+  const c = sys.cpu || {},
+    m = sys.memory || {},
+    g = sys.gpu || {};
+  const mine = (sys.processes || []).filter(p => p.mine),
+    others = (sys.processes || []).filter(p => !p.mine);
+  const byUser = {};
+  others.forEach(p => {
+    byUser[p.user] = (byUser[p.user] || 0) + 1;
+  });
+  return React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("div", {
+    className: "health"
+  }, React.createElement("div", {
+    className: "hcell"
+  }, React.createElement("div", {
+    className: "h-k"
+  }, "Processors"), React.createElement("div", {
+    className: "h-v tnum"
+  }, c.percent == null ? "…" : `${Math.round(c.percent)}%`), React.createElement("div", {
+    className: "hint-s"
+  }, c.cores, " cores \xB7 load ", (c.load || [])[0], c.iowait_percent ? ` · waiting on disks ${Math.round(c.iowait_percent)}%` : "")), React.createElement("div", {
+    className: "hcell"
+  }, React.createElement("div", {
+    className: "h-k"
+  }, "Memory"), React.createElement("div", {
+    className: "h-v tnum"
+  }, m.total ? `${pct(m.used, m.total)}%` : "—"), React.createElement("div", {
+    className: "hint-s"
+  }, fmtBytes(m.available), " free of ", fmtBytes(m.total))), React.createElement("div", {
+    className: "hcell"
+  }, React.createElement("div", {
+    className: "h-k"
+  }, "Graphics card"), g.ok ? (g.gpus || []).map((x, i) => React.createElement(React.Fragment, {
+    key: i
+  }, React.createElement("div", {
+    className: "h-v tnum"
+  }, Math.round(x.util), "%"), React.createElement("div", {
+    className: "hint-s"
+  }, x.name, " \xB7 ", Math.round(x.mem_used_mb / 1024), " of ", Math.round(x.mem_total_mb / 1024), " GB \xB7 ", Math.round(x.temp_c), "\xB0C"))) : React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "h-v",
+    style: {
+      color: "var(--red)",
+      fontSize: 22
+    }
+  }, "Not usable"), React.createElement("div", {
+    className: "hint-s",
+    style: {
+      color: "var(--red)"
+    }
+  }, g.error)))), React.createElement("div", {
+    className: "disks"
+  }, React.createElement(Meter, {
+    label: "Memory in use",
+    value: m.used || 0,
+    max: m.total,
+    sub: `${fmtBytes(m.used)} / ${fmtBytes(m.total)}`
+  }), Object.entries(sys.disks || {}).map(([k, d]) => d.error ? React.createElement("div", {
+    className: "meter-row",
+    key: k
+  }, React.createElement("div", {
+    className: "meter-top"
+  }, React.createElement("span", null, k), React.createElement("span", {
+    className: "hint-s",
+    style: {
+      color: "var(--red)"
+    }
+  }, d.error))) : React.createElement(Meter, {
+    key: k,
+    label: k,
+    value: d.used,
+    max: d.total,
+    sub: `${fmtBytes(d.free)} free of ${fmtBytes(d.total)}`
+  }))), React.createElement("div", {
+    className: "sub-h"
+  }, "Analysis programs running now"), mine.length === 0 ? React.createElement("div", {
+    className: "hint"
+  }, "None of yours.") : React.createElement("div", {
+    className: "tw"
+  }, React.createElement("table", {
+    className: "tbl"
+  }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "What"), React.createElement("th", null, "Working on"), React.createElement("th", {
+    className: "n"
+  }, "Processor"), React.createElement("th", {
+    className: "n"
+  }, "Memory"), React.createElement("th", {
+    className: "n"
+  }, "Running for"))), React.createElement("tbody", null, mine.map(p => React.createElement("tr", {
+    key: p.pid
+  }, React.createElement("td", null, p.kind), React.createElement("td", {
+    className: "mono"
+  }, p.target || "—"), React.createElement("td", {
+    className: "n"
+  }, p.cpu_percent == null ? "…" : `${Math.round(p.cpu_percent)}%`), React.createElement("td", {
+    className: "n"
+  }, fmtBytes(p.rss)), React.createElement("td", {
+    className: "n"
+  }, dur(p.elapsed_s))))))), others.length > 0 && React.createElement("div", {
+    className: "hint-s",
+    style: {
+      marginTop: 8
+    }
+  }, "Also on this computer: ", Object.entries(byUser).map(([u, n]) => `${n} analysis program${n === 1 ? "" : "s"} of ${u}`).join(", "), ".")));
+}
+function RunCard({
+  r
+}) {
+  const p = r.progress || {},
+    [say, k] = runSay(r.status),
+    dt = prettyDate(r.date);
+  return React.createElement("button", {
+    className: "runcard rise",
+    onClick: () => goRun(r.id)
+  }, React.createElement("div", {
+    className: "rc-top"
+  }, React.createElement("span", {
+    className: "rc-date"
+  }, dt.big, " ", dt.year), React.createElement("span", {
+    className: "stamp " + k
+  }, say)), React.createElement("div", {
+    className: "hint-s"
+  }, prettyProject(r.project), " \xB7 ", jobName(r.job)), r.job === "network" && React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "bar"
+  }, React.createElement("i", {
+    style: {
+      width: `${p.fraction ? Math.round(100 * p.fraction) : 3}%`
+    }
+  })), React.createElement("div", {
+    className: "rc-meta"
+  }, p.total ? React.createElement("b", null, p.done, " of ", p.total, " wells") : React.createElement("b", null, p.done || 0, " wells finished"), p.seconds_left != null && React.createElement("span", null, " \xB7 about ", dur(p.seconds_left), " left"))), React.createElement("div", {
+    className: "hint-s"
+  }, "Running for ", dur(r.elapsed_s), r.last_output_age_s != null && ` · last activity ${dur(r.last_output_age_s)} ago`), r.conversion_summary && React.createElement("div", {
+    className: "hint-s"
+  }, "NWB: ", r.conversion_summary.converted, " converted, ", r.conversion_summary.reused, " reused"));
+}
+function HistoryTable({
+  fixedLimit
+}) {
+  const [f, setF] = useState({
+    project: "",
+    job: "",
+    status: ""
+  });
+  const [data, setData] = useState(null);
+  const [limit, setLimit] = useState(fixedLimit || 25);
+  const load = useCallback(() => {
+    const q = new URLSearchParams({
+      ...f,
+      limit: String(limit)
+    }).toString();
+    api("/api/history?" + q).then(setData).catch(() => setData({
+      runs: [],
+      total: 0,
+      projects: []
+    }));
+  }, [f, limit]);
+  useEffect(() => {
+    load();
+    const t = setInterval(() => {
+      if (!document.hidden) load();
+    }, 15000);
+    return () => clearInterval(t);
+  }, [load]);
+  if (!data) return React.createElement("div", {
+    className: "skel",
+    style: {
+      height: 120
+    }
+  });
+  return React.createElement(React.Fragment, null, !fixedLimit && React.createElement("div", {
+    className: "filters"
+  }, React.createElement("select", {
+    className: "sel",
+    value: f.project,
+    onChange: e => setF({
+      ...f,
+      project: e.target.value
+    }),
+    "aria-label": "Project"
+  }, React.createElement("option", {
+    value: ""
+  }, "All projects"), (data.projects || []).map(p => React.createElement("option", {
+    key: p,
+    value: p
+  }, prettyProject(p)))), React.createElement("select", {
+    className: "sel",
+    value: f.job,
+    onChange: e => setF({
+      ...f,
+      job: e.target.value
+    }),
+    "aria-label": "Analysis"
+  }, React.createElement("option", {
+    value: ""
+  }, "Both analyses"), React.createElement("option", {
+    value: "network"
+  }, "Network analysis"), React.createElement("option", {
+    value: "activity"
+  }, "Activity scan")), React.createElement("select", {
+    className: "sel",
+    value: f.status,
+    onChange: e => setF({
+      ...f,
+      status: e.target.value
+    }),
+    "aria-label": "Outcome"
+  }, React.createElement("option", {
+    value: ""
+  }, "Any outcome"), React.createElement("option", {
+    value: "done"
+  }, "Done"), React.createElement("option", {
+    value: "failed"
+  }, "Failed"), React.createElement("option", {
+    value: "interrupted"
+  }, "Interrupted"), React.createElement("option", {
+    value: "running,dispatched,queued"
+  }, "Running or starting")), React.createElement("span", {
+    className: "hint-s"
+  }, data.total, " run", data.total === 1 ? "" : "s")), data.runs.length === 0 ? React.createElement("div", {
+    className: "hint",
+    style: {
+      padding: "10px 2px"
+    }
+  }, "No runs match.") : React.createElement("div", {
+    className: "tw"
+  }, React.createElement("table", {
+    className: "tbl hover"
+  }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Recording date"), React.createElement("th", null, "Project"), React.createElement("th", null, "Analysis"), React.createElement("th", null, "Outcome"), React.createElement("th", {
+    className: "n"
+  }, "Took"), React.createElement("th", null, "Finished"))), React.createElement("tbody", null, data.runs.map(r => {
+    const [say, k] = runSay(r.status),
+      dt = prettyDate(r.date);
+    return React.createElement("tr", {
+      key: r.id,
+      onClick: () => goRun(r.id),
+      tabIndex: 0,
+      onKeyDown: e => e.key === "Enter" && goRun(r.id)
+    }, React.createElement("td", null, React.createElement("b", null, dt.big), " ", React.createElement("span", {
+      className: "hint-s"
+    }, dt.year)), React.createElement("td", null, prettyProject(r.project)), React.createElement("td", null, jobName(r.job)), React.createElement("td", null, React.createElement("span", {
+      className: "stamp " + k
+    }, say)), React.createElement("td", {
+      className: "n"
+    }, r.duration_s != null ? dur(r.duration_s) : "—"), React.createElement("td", {
+      className: "hint-s"
+    }, r.completed_at ? ago(r.completed_at) : "—"));
+  })))), !fixedLimit && data.total > data.runs.length && React.createElement("div", {
+    style: {
+      marginTop: 10
+    }
+  }, React.createElement("button", {
+    className: "btn sm",
+    onClick: () => setLimit(l => l + 50)
+  }, "Show more")));
+}
+function Dashboard() {
+  const [ov, setOv] = useState(null);
+  const [sys, setSys] = useState(null);
+  useEffect(() => {
+    const load = () => {
+      if (document.hidden) return;
+      api("/api/overview").then(setOv).catch(() => {});
+      api("/api/system").then(setSys).catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+  if (!ov) return React.createElement("div", {
+    className: "skel",
+    style: {
+      height: 240
+    }
+  });
+  const lim = ov.limits || {},
+    act = ov.active_jobs || {};
+  return React.createElement("div", {
+    className: "rise"
+  }, React.createElement("div", {
+    className: "slots"
+  }, React.createElement("span", {
+    className: "dot " + (ov.watching ? "ok" : "wait")
+  }), ov.watching ? "Watching for new recordings" : "Not watching for new recordings", React.createElement("span", {
+    className: "hint-s"
+  }, "\xB7 Network analyses running ", act.network || 0, " of ", lim.network || 1, " \xB7 Activity scans ", act.activity || 0, " of ", lim.activity || 1)), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Needs attention")), ov.attention.length === 0 ? React.createElement(Callout, {
+    kind: "green",
+    icon: React.createElement(Check, {
+      s: 17
+    })
+  }, "Nothing needs attention.") : React.createElement("div", {
+    className: "att"
+  }, ov.attention.map((a, i) => React.createElement("div", {
+    key: i,
+    className: "att-i " + (a.level || "warn"),
+    onClick: () => a.run_id && goRun(a.run_id),
+    style: {
+      cursor: a.run_id ? "pointer" : "default"
+    }
+  }, React.createElement("span", {
+    className: "ic"
+  }, a.level === "bad" ? React.createElement(Alert, {
+    s: 17
+  }) : React.createElement(Info, {
+    s: 17
+  })), React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, a.date && React.createElement("b", null, prettyDate(a.date).big, " ", prettyDate(a.date).year, " \xB7 ", jobName(a.job), " \u2014 "), a.text), a.run_id && React.createElement(Chev, {
+    s: 15
+  }))))), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Running now"), React.createElement("div", {
+    className: "sec-d"
+  }, ov.running.length ? "Click a run for its wells, steps and log" : "Nothing is analysing at the moment")), ov.running.length > 0 && React.createElement("div", {
+    className: "runcards"
+  }, ov.running.map(r => React.createElement(RunCard, {
+    key: r.id,
+    r: r
+  })))), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "The computer"), React.createElement("div", {
+    className: "sec-d"
+  }, "Updates every few seconds")), React.createElement(SysHealth, {
+    sys: sys
+  })), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Run history"), React.createElement("div", {
+    className: "sec-d"
+  }, "Every analysis run, newest first")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement(HistoryTable, null)))));
+}
+function RunDetail({
+  id,
+  onLog,
+  onBack
+}) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    let t;
+    setD(null);
+    setErr("");
+    const load = () => api("/api/history/" + id).then(x => {
+      setD(x);
+      if (!["done", "failed", "interrupted", "detected"].includes(x.status) && !t) t = setInterval(() => {
+        if (!document.hidden) load();
+      }, 5000);else if (["done", "failed", "interrupted", "detected"].includes(x.status) && t) {
+        clearInterval(t);
+        t = null;
+      }
+    }).catch(e => setErr(e.message));
+    load();
+    return () => t && clearInterval(t);
+  }, [id]);
+  if (err) return React.createElement("div", {
+    className: "rise"
+  }, React.createElement("button", {
+    className: "btn sm",
+    onClick: onBack
+  }, "\u2190 Back"), React.createElement("div", {
+    style: {
+      marginTop: 16
+    }
+  }, React.createElement(Callout, {
+    kind: "red",
+    icon: React.createElement(Alert, {
+      s: 17
+    })
+  }, err)));
+  if (!d) return React.createElement("div", {
+    className: "skel",
+    style: {
+      height: 300
+    }
+  });
+  const [say, k] = runSay(d.status),
+    dt = prettyDate(d.date),
+    ls = d.log_summary || {},
+    p = d.progress || {};
+  const wells = ls.wells || [],
+    conv = ls.conversion || [];
+  const probs = wells.filter(w => ["failed", "stopped"].includes(w.outcome));
+  const shown = showAll ? wells : wells.slice(0, 60);
+  const st = d.settings || {};
+  const report = (d.outputs || []).find(o => o.report);
+  return React.createElement("div", {
+    className: "rise"
+  }, React.createElement("button", {
+    className: "btn sm",
+    onClick: onBack
+  }, "\u2190 Back"), React.createElement("div", {
+    className: "rd-h"
+  }, React.createElement("div", null, React.createElement("div", {
+    className: "rd-t"
+  }, dt.big, " ", dt.year), React.createElement("div", {
+    className: "hint"
+  }, prettyProject(d.project), " \xB7 ", jobName(d.job), " \xB7 folder ", React.createElement("span", {
+    className: "mono"
+  }, d.date), d.attempt > 1 && ` · run ${d.attempt} for this date`, d.imported ? " · imported from before history was kept" : "")), React.createElement("div", {
+    className: "acts",
+    style: {
+      alignItems: "center"
+    }
+  }, React.createElement("span", {
+    className: "stamp " + k,
+    style: {
+      fontSize: 13
+    }
+  }, say), report && React.createElement("a", {
+    className: "btn ink sm",
+    target: "_blank",
+    rel: "noopener",
+    href: `/api/reports/view?path=${encodeURIComponent(report.path)}`
+  }, React.createElement(Doc, {
+    s: 14
+  }), " Report"), d.log && React.createElement("button", {
+    className: "btn sm",
+    onClick: () => onLog(d.log, `${dt.big} ${dt.year} · ${jobName(d.job)}`)
+  }, React.createElement(Lines, {
+    s: 14
+  }), " Log"))), React.createElement("div", {
+    className: "tally",
+    style: {
+      marginBottom: 22
+    }
+  }, React.createElement("div", {
+    className: "tal"
+  }, React.createElement("div", {
+    className: "tal-k"
+  }, "Started"), React.createElement("div", {
+    className: "rd-v"
+  }, d.started_at ? ago(d.started_at) : "—")), React.createElement("div", {
+    className: "tal"
+  }, React.createElement("div", {
+    className: "tal-k"
+  }, ["done", "failed", "interrupted"].includes(d.status) ? "Took" : "Running for"), React.createElement("div", {
+    className: "rd-v"
+  }, d.elapsed_s != null ? dur(d.elapsed_s) : "—")), React.createElement("div", {
+    className: "tal"
+  }, React.createElement("div", {
+    className: "tal-k"
+  }, "Finished"), React.createElement("div", {
+    className: "rd-v"
+  }, d.completed_at ? ago(d.completed_at) : "not yet")), React.createElement("div", {
+    className: "tal"
+  }, React.createElement("div", {
+    className: "tal-k"
+  }, "Wells"), React.createElement("div", {
+    className: "rd-v"
+  }, d.job === "network" ? `${(ls.counts || {}).complete || 0} finished${probs.length ? ` · ${probs.length} problem${probs.length === 1 ? "" : "s"}` : ""}` : (ls.summary || {}).wells ?? "—"))), d.error && React.createElement("div", {
+    style: {
+      marginBottom: 18
+    }
+  }, React.createElement(Callout, {
+    kind: "red",
+    icon: React.createElement(Alert, {
+      s: 17
+    })
+  }, React.createElement("b", null, "What went wrong:"), " ", d.error)), d.live_detail && React.createElement("div", {
+    style: {
+      marginBottom: 18
+    }
+  }, React.createElement(Callout, {
+    kind: "blue"
+  }, d.live_detail)), d.job === "network" && !["done", "failed", "interrupted"].includes(d.status) && React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Progress")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("div", {
+    className: "bar",
+    style: {
+      height: 10
+    }
+  }, React.createElement("i", {
+    style: {
+      width: `${p.fraction ? Math.round(100 * p.fraction) : 3}%`
+    }
+  })), React.createElement("div", {
+    style: {
+      marginTop: 8
+    }
+  }, p.total ? React.createElement("b", null, p.done, " of ", p.total, " wells done") : React.createElement("b", null, p.done || 0, " wells done"), p.seconds_left != null && React.createElement("span", null, " \xB7 about ", dur(p.seconds_left), " left"), !p.expected_known && React.createElement("span", {
+    className: "hint-s"
+  }, " \xB7 counting this date's wells\u2026"), d.last_output_age_s != null && React.createElement("span", {
+    className: "hint-s"
+  }, " \xB7 last activity ", dur(d.last_output_age_s), " ago"))))), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Steps"), React.createElement("div", {
+    className: "sec-d"
+  }, "What happened, in order")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("ol", {
+    className: "tl"
+  }, (d.events || []).length === 0 && React.createElement("li", {
+    className: "hint"
+  }, "No step record \u2014 this run happened before history was kept."), (d.events || []).filter(e => e.status || !HEARTBEAT.test(e.message || "")).map((e, i) => React.createElement("li", {
+    key: i,
+    "data-k": runSay(e.status)[1]
+  }, React.createElement("span", {
+    className: "tl-t"
+  }, e.time ? new Date(e.time).toLocaleString() : ""), React.createElement("span", null, e.status ? React.createElement("b", null, runSay(e.status)[0]) : null, e.status && e.message ? " — " : "", e.message))), ls.conversion_summary && React.createElement("li", {
+    "data-k": "ok"
+  }, React.createElement("span", {
+    className: "tl-t"
+  }, "NWB"), React.createElement("span", null, React.createElement("b", null, "Converted to NWB"), " \u2014 ", ls.conversion_summary.converted, " converted,", " ", ls.conversion_summary.reused, " reused, ", ls.conversion_summary.failed, " failed in ", dur(ls.conversion_summary.seconds))), ls.driver_seconds != null && React.createElement("li", {
+    "data-k": "ok"
+  }, React.createElement("span", {
+    className: "tl-t"
+  }, "Analysis"), React.createElement("span", null, React.createElement("b", null, "All wells analysed"), " in ", dur(ls.driver_seconds))))))), d.job === "network" && React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Wells"), React.createElement("div", {
+    className: "sec-d"
+  }, wells.length, " well", wells.length === 1 ? "" : "s", " in the log")), wells.length === 0 ? React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b hint"
+  }, "No wells started yet.")) : React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("div", {
+    className: "tw"
+  }, React.createElement("table", {
+    className: "tbl"
+  }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Chip"), React.createElement("th", null, "Recording"), React.createElement("th", null, "Well"), React.createElement("th", null, "Outcome"), React.createElement("th", null, "Step reached"), React.createElement("th", {
+    className: "n"
+  }, "Spikes"), React.createElement("th", {
+    className: "n"
+  }, "Took"), React.createElement("th", null, "Why"))), React.createElement("tbody", null, shown.map((w, i) => {
+    const [s2, k2] = WELL_OUT[w.outcome] || [w.outcome, "wait"];
+    return React.createElement("tr", {
+      key: i
+    }, React.createElement("td", {
+      className: "mono"
+    }, w.chip), React.createElement("td", {
+      className: "mono"
+    }, w.run), React.createElement("td", null, +String(w.well).replace(/\D/g, "") + 1), React.createElement("td", null, React.createElement("span", {
+      className: "stamp " + k2
+    }, s2)), React.createElement("td", {
+      className: "hint-s"
+    }, w.phase), React.createElement("td", {
+      className: "n"
+    }, w.spikes != null ? w.spikes.toLocaleString() : "—"), React.createElement("td", {
+      className: "n"
+    }, w.seconds != null ? dur(w.seconds) : "—"), React.createElement("td", {
+      className: "hint-s",
+      style: {
+        whiteSpace: "normal",
+        maxWidth: 320
+      }
+    }, w.reason ? plainWellError({
+      error: w.reason,
+      status: "failed"
+    }) : ""));
+  })))), wells.length > 60 && React.createElement("button", {
+    className: "btn sm",
+    style: {
+      marginTop: 10
+    },
+    onClick: () => setShowAll(x => !x)
+  }, showAll ? "Show fewer" : `Show all ${wells.length}`)))), conv.length > 0 && React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "NWB conversion")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("div", {
+    className: "tw"
+  }, React.createElement("table", {
+    className: "tbl"
+  }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Chip"), React.createElement("th", null, "Recording"), React.createElement("th", null, "Well"), React.createElement("th", null, "Result"), React.createElement("th", {
+    className: "n"
+  }, "Took"), React.createElement("th", null, "Why"))), React.createElement("tbody", null, conv.map((c, i) => React.createElement("tr", {
+    key: i
+  }, React.createElement("td", {
+    className: "mono"
+  }, c.chip), React.createElement("td", {
+    className: "mono"
+  }, c.run), React.createElement("td", null, +String(c.well).replace(/\D/g, "") + 1), React.createElement("td", null, React.createElement("span", {
+    className: "stamp " + (c.outcome === "failed" ? "bad" : c.outcome === "not_recorded" ? "wait" : "ok")
+  }, c.outcome === "not_recorded" ? "not in the file" : c.outcome)), React.createElement("td", {
+    className: "n"
+  }, c.seconds ? dur(c.seconds) : "—"), React.createElement("td", {
+    className: "hint-s"
+  }, c.reason || ""))))))))), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "What it produced")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, (d.outputs || []).length === 0 ? React.createElement("div", {
+    className: "hint"
+  }, "Nothing yet.") : React.createElement("div", {
+    className: "outs"
+  }, d.outputs.map((o, i) => React.createElement("div", {
+    className: "out",
+    key: i
+  }, React.createElement("div", null, React.createElement("b", null, o.label), " ", React.createElement("span", {
+    className: "hint-s"
+  }, o.count, " ", o.unit, o.bytes != null ? ` · ${fmtBytes(o.bytes)}` : "")), React.createElement("div", {
+    className: "mono hint-s",
+    style: {
+      wordBreak: "break-all"
+    }
+  }, o.path), o.report && React.createElement("a", {
+    className: "btn sm",
+    target: "_blank",
+    rel: "noopener",
+    href: `/api/reports/view?path=${encodeURIComponent(o.path)}`
+  }, React.createElement(Ext, {
+    s: 13
+  }), " Open"), o.log && React.createElement("button", {
+    className: "btn sm",
+    onClick: () => onLog(o.path, `${dt.big} ${dt.year} · ${jobName(d.job)}`)
+  }, React.createElement(Lines, {
+    s: 13
+  }), " Open"))))))), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Settings it ran with")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, Object.keys(st).length === 0 ? React.createElement("div", {
+    className: "hint"
+  }, "Not recorded for this run (it happened before history was kept).") : React.createElement("dl", {
+    className: "kv"
+  }, React.createElement("dt", null, "Spike sorting"), React.createElement("dd", null, st.spike_sorting ? "On" : "Off (spike detection only)"), React.createElement("dt", null, "Converted to NWB first"), React.createElement("dd", null, st.nwb_convert ? `Yes (${st.nwb_compression === "maxwell" ? "MaxWell compression" : "standard compression"})` : "No"), React.createElement("dt", null, "Fast local disk"), React.createElement("dd", null, st.stage_locally ? `Yes — ${st.scratch_dir || "default folder"}` : "No"), React.createElement("dt", null, "Analyses at once"), React.createElement("dd", null, "Network ", st.max_concurrent_network, " \xB7 Activity scan ", st.max_concurrent_activity), React.createElement("dt", null, "Recordings from"), React.createElement("dd", {
+    className: "mono"
+  }, st.watch_dir), React.createElement("dt", null, "Results to"), React.createElement("dd", {
+    className: "mono"
+  }, st.output_dir)), d.command && React.createElement("details", {
+    className: "adv"
+  }, React.createElement("summary", null, React.createElement("span", {
+    className: "chev"
+  }, React.createElement(Chev, {
+    s: 14
+  })), "Exact command"), React.createElement(Code, {
+    text: d.command
+  }))))));
+}
 function App() {
   const [schema, setSchema] = useState(null);
   const [cfg, setCfg] = useState(null);
   const [status, setStatus] = useState(null);
   const [fatal, setFatal] = useState("");
+  const VIEWS = ["dashboard", "progress", "add", "reports", "settings"];
   const [tab, setTab] = useState(() => {
     const h = location.hash.slice(1);
-    if (["progress", "add", "reports", "settings"].includes(h)) return h;
+    if (VIEWS.includes(h)) return h;
     try {
-      return localStorage.getItem("mea-tab") || "progress";
+      const t = localStorage.getItem("mea-tab");
+      return VIEWS.includes(t) ? t : "dashboard";
     } catch (e) {
-      return "progress";
+      return "dashboard";
     }
   });
+  const [runId, setRunId] = useState(() => location.hash.startsWith("#run/") ? location.hash.slice(5) : null);
   const [reports, setReports] = useState({});
   const [wells, setWells] = useState({});
   const [openW, setOpenW] = useState({});
@@ -1906,15 +2702,25 @@ function App() {
     try {
       localStorage.setItem("mea-tab", tab);
     } catch (e) {}
-    if (location.hash.slice(1) !== tab) history.replaceState(null, "", "#" + tab);
-  }, [tab]);
+    if (!runId && location.hash.slice(1) !== tab) history.replaceState(null, "", "#" + tab);
+  }, [tab, runId]);
   useEffect(() => {
     const h = () => {
       const t = location.hash.slice(1);
-      if (["progress", "add", "reports", "settings"].includes(t)) setTab(t);
+      if (t.startsWith("run/")) {
+        setRunId(t.slice(4));
+        window.scrollTo(0, 0);
+        return;
+      }
+      setRunId(null);
+      if (VIEWS.includes(t)) setTab(t);
     };
     addEventListener("hashchange", h);
-    return () => removeEventListener("hashchange", h);
+    addEventListener("popstate", h);
+    return () => {
+      removeEventListener("hashchange", h);
+      removeEventListener("popstate", h);
+    };
   }, []);
   useEffect(() => {
     openWRef.current = openW;
@@ -2111,7 +2917,10 @@ function App() {
     stage_min_free_gb: Number(cfg.stage_min_free_gb) || 200,
     dry_run: !!cfg.dry_run,
     ai_requirements: cfg.ai_requirements || "",
-    auto_handoff: cfg.auto_handoff !== false
+    auto_handoff: cfg.auto_handoff !== false,
+    nwb_convert: !!cfg.nwb_convert,
+    nwb_python: cfg.nwb_python || "",
+    nwb_compression: cfg.nwb_compression || "gzip"
   });
   const run_ = async (fn, ok, m) => {
     setBusy(true);
@@ -2197,7 +3006,21 @@ function App() {
       });
     }, "Added again", `${dt.big} will be analysed again.`);
   };
-  const TABS = [["progress", "Progress", folders.length], ["add", "Add recordings"], ["reports", "AI report", Object.keys(reports).length], ["settings", "Settings"]];
+  const openLogPath = (path, title) => {
+    const l = {
+      path,
+      title,
+      lines: []
+    };
+    setLog(l);
+    loadLog(l);
+  };
+  const pickTab = k => {
+    setRunId(null);
+    setTab(k);
+    history.pushState(null, "", "#" + k);
+  };
+  const TABS = [["dashboard", "Dashboard"], ["progress", "Progress", folders.length], ["add", "Add recordings"], ["reports", "AI report", Object.keys(reports).length], ["settings", "Settings"]];
   return React.createElement("div", {
     className: "wrap"
   }, React.createElement("h1", {
@@ -2245,13 +3068,19 @@ function App() {
     key: k,
     role: "tab",
     className: "tab",
-    "aria-selected": tab === k,
-    onClick: () => setTab(k)
+    "aria-selected": !runId && tab === k,
+    onClick: () => pickTab(k)
   }, l, n ? React.createElement("span", {
     className: "n"
   }, n) : null))), React.createElement("div", {
     className: "tabline"
-  }), tab === "progress" && React.createElement(React.Fragment, null, React.createElement("div", {
+  }), runId && React.createElement(RunDetail, {
+    id: runId,
+    onLog: openLogPath,
+    onBack: () => {
+      location.hash = tab;
+    }
+  }), !runId && tab === "dashboard" && React.createElement(Dashboard, null), !runId && tab === "progress" && React.createElement(React.Fragment, null, React.createElement("div", {
     className: "tally rise",
     style: {
       "--i": 1
@@ -2277,7 +3106,7 @@ function App() {
     onAgain: onAgain,
     feed: feed,
     goAdd: () => setTab("add")
-  })), tab === "add" && React.createElement(AddRecordings, {
+  })), !runId && tab === "add" && React.createElement(AddRecordings, {
     cfg: cfg,
     toast: toast,
     ask: ask,
@@ -2285,11 +3114,11 @@ function App() {
       refresh(true);
       setTab("progress");
     }
-  }), tab === "reports" && React.createElement(AiReport, {
+  }), !runId && tab === "reports" && React.createElement(AiReport, {
     cfg: cfg,
     reports: reports,
     toast: toast
-  }), tab === "settings" && React.createElement(Settings, {
+  }), !runId && tab === "settings" && React.createElement(Settings, {
     cfg: cfg,
     setCfg: setCfg,
     schema: schema,

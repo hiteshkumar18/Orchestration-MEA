@@ -365,6 +365,18 @@ and running states, and fails if it comes out blank. `click_ui.js` opens the
 Wells and Log panels, which is where the second failure was: `RunBlock` rendered
 `<Wells>` and no such component existed.
 
+`dashboard_ui.js` drives the Dashboard and a run page with full fake data:
+attention items, a running card with progress, system health with a GPU fault,
+opening a run from the history, every section of the run page, Back, the
+Progress tab's **Details** button and an unknown run id.
+
+`tests/python/` holds stdlib `unittest` suites for the run history (lifecycle,
+re-dispatch, restarts, two history objects on one file — a settings save
+replaces the watcher while the old one keeps finishing its jobs), log parsing on
+fixtures copied from real raw and NWB logs, the monitor parsers, and the HTTP
+API against a test server. No pytest: nothing extra may be installed into the
+live environment.
+
 **Run this after any change to `index.html`.** Parsing is not enough.
 
 Two specific traps in that file:

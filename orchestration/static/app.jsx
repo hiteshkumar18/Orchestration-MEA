@@ -347,6 +347,8 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,i}){
                     target="_blank" rel="noopener"><Doc s={14}/> Report</a>}
         {net&&<button className="btn sm" aria-expanded={open} onClick={()=>onWells(f)}><Grid s={14}/> Wells</button>}
         {(net?.log||scan?.log)&&<button className="btn sm" onClick={()=>onLog(f)}><Lines s={14}/> Log</button>}
+        {(net?.run_id||scan?.run_id)&&<button className="btn sm" title="Steps, wells, outputs and settings of this run"
+          onClick={()=>goRun(net?.run_id||scan?.run_id)}><Chev s={14}/> Details</button>}
         <button className="btn ghost sm" title="Analyse this date again" aria-label="Analyse again" onClick={()=>onAgain(f)}><Again s={14}/></button>
       </div>
     </div>
@@ -634,6 +636,10 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
                 label="Spike sorting (slow — about an hour per well)"
                 hint={sorting?"On: separates individual neurons with the graphics card. Much slower.":
                   "Off (recommended): counts spikes on each electrode. A few minutes per well, no graphics card needed."}/>
+        <Switch id="nwb" checked={!!cfg.nwb_convert} disabled={locked||!cfg.run_network} onChange={v=>setT("nwb_convert",v)}
+                label="Convert to NWB first (for sharing on DANDI)"
+                hint={cfg.nwb_convert?"On: each well is saved as an NWB file in the results folder, and the analysis reads it from there. Conversion adds a few seconds per well and about one more copy of the data on disk.":
+                  "Off: the analysis reads the original recordings directly. Turn on to also keep a standard NWB copy of every well."}/>
         <Switch id="act" checked={cfg.run_activity} disabled={locked} onChange={v=>setT("run_activity",v)}
                 label="Activity scan" hint="Whole-chip activity maps and quality checks. Takes seconds."/>
         <Switch id="stg" checked={!!cfg.stage_locally} disabled={locked} onChange={v=>setT("stage_locally",v)}
@@ -656,6 +662,11 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
             <input className="inp tnum" type="number" min="1" max="16" value={cfg.max_concurrent_activity??2} disabled={locked} onChange={e=>setT("max_concurrent_activity",e.target.value)}/></div>
           <div className="f"><label className="f-l">Fast-disk folder</label>
             <input className="inp mono" value={cfg.scratch_dir||""} disabled={locked} onChange={e=>setT("scratch_dir",e.target.value)}/></div>
+          <div className="f"><label className="f-l">NWB compression</label>
+            <select className="sel" value={cfg.nwb_compression||"gzip"} disabled={locked} onChange={e=>setT("nwb_compression",e.target.value)}>
+              <option value="gzip">Standard (gzip) — any reader and DANDI can open it</option>
+              <option value="maxwell">MaxWell's own — smaller, needs MaxWell's plugin to read</option>
+            </select></div>
           <div className="f"><label className="f-l">Always keep this much free on it (GB)</label>
             <input className="inp tnum" type="number" min="0" value={cfg.stage_min_free_gb??200} disabled={locked} onChange={e=>setT("stage_min_free_gb",e.target.value)}/></div>
         </div>
@@ -697,15 +708,300 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
   </div>);
 }
 
+
+/* ── Dashboard ────────────────────────────────────────────────────────── */
+const fmtBytes=b=>{if(b==null)return"—";const u=["B","KB","MB","GB","TB"];let i=0,v=b;
+  while(v>=1024&&i<u.length-1){v/=1024;i++;}return`${v<10&&i?v.toFixed(1):Math.round(v)} ${u[i]}`;};
+const pct=(a,b)=>b?Math.round(100*a/b):0;
+const WELL_OUT={complete:["finished","ok"],silent:["no activity","queue"],not_recorded:["not in the recording file","wait"],
+  failed:["problem","bad"],stopped:["stopped","bad"],running:["in progress","run"]};
+const RUN_SAY={done:["Done","ok"],failed:["Failed","bad"],interrupted:["Interrupted","wait"],running:["Analysing","run"],
+  dispatched:["Starting","queue"],queued:["In line","queue"],detected:["Found (test mode)","wait"]};
+const runSay=st=>RUN_SAY[st]||[st||"—","wait"];
+const jobName=j=>j==="activity"?"Activity scan":"Network analysis";
+// The watcher's once-a-minute "still running" note; not a step.
+const HEARTBEAT=/^running .+ · last log output .+ ago$/;
+const goRun=id=>{if(id)location.hash="run/"+id;};
+
+function Meter({value,max,label,sub,danger}){
+  const f=max?Math.min(100,100*value/max):0;
+  return (<div className="meter-row">
+    <div className="meter-top"><span>{label}</span><span className="hint-s">{sub}</span></div>
+    <div className="meter"><i style={{width:`${f}%`}} data-k={danger?"bad":f>85?"warn":"ok"}/></div>
+  </div>);
+}
+
+function SysHealth({sys}){
+  if(!sys?.ready) return <div className="card"><div className="card-b hint" style={{display:"flex",gap:10,alignItems:"center"}}>
+    <span className="spin"/> Measuring the computer…</div></div>;
+  const c=sys.cpu||{}, m=sys.memory||{}, g=sys.gpu||{};
+  const mine=(sys.processes||[]).filter(p=>p.mine), others=(sys.processes||[]).filter(p=>!p.mine);
+  const byUser={};others.forEach(p=>{byUser[p.user]=(byUser[p.user]||0)+1;});
+  return (<div className="card"><div className="card-b">
+    <div className="health">
+      <div className="hcell">
+        <div className="h-k">Processors</div>
+        <div className="h-v tnum">{c.percent==null?"…":`${Math.round(c.percent)}%`}</div>
+        <div className="hint-s">{c.cores} cores · load {(c.load||[])[0]}{c.iowait_percent?` · waiting on disks ${Math.round(c.iowait_percent)}%`:""}</div>
+      </div>
+      <div className="hcell">
+        <div className="h-k">Memory</div>
+        <div className="h-v tnum">{m.total?`${pct(m.used,m.total)}%`:"—"}</div>
+        <div className="hint-s">{fmtBytes(m.available)} free of {fmtBytes(m.total)}</div>
+      </div>
+      <div className="hcell">
+        <div className="h-k">Graphics card</div>
+        {g.ok?(g.gpus||[]).map((x,i)=>(<React.Fragment key={i}>
+          <div className="h-v tnum">{Math.round(x.util)}%</div>
+          <div className="hint-s">{x.name} · {Math.round(x.mem_used_mb/1024)} of {Math.round(x.mem_total_mb/1024)} GB · {Math.round(x.temp_c)}°C</div></React.Fragment>))
+          :<><div className="h-v" style={{color:"var(--red)",fontSize:22}}>Not usable</div>
+            <div className="hint-s" style={{color:"var(--red)"}}>{g.error}</div></>}
+      </div>
+    </div>
+    <div className="disks">
+      <Meter label="Memory in use" value={m.used||0} max={m.total} sub={`${fmtBytes(m.used)} / ${fmtBytes(m.total)}`}/>
+      {Object.entries(sys.disks||{}).map(([k,d])=>d.error
+        ?<div className="meter-row" key={k}><div className="meter-top"><span>{k}</span><span className="hint-s" style={{color:"var(--red)"}}>{d.error}</span></div></div>
+        :<Meter key={k} label={k} value={d.used} max={d.total} sub={`${fmtBytes(d.free)} free of ${fmtBytes(d.total)}`}/>)}
+    </div>
+    <div className="sub-h">Analysis programs running now</div>
+    {mine.length===0?<div className="hint">None of yours.</div>:
+      <div className="tw"><table className="tbl"><thead><tr><th>What</th><th>Working on</th><th className="n">Processor</th>
+        <th className="n">Memory</th><th className="n">Running for</th></tr></thead><tbody>
+        {mine.map(p=><tr key={p.pid}><td>{p.kind}</td><td className="mono">{p.target||"—"}</td>
+          <td className="n">{p.cpu_percent==null?"…":`${Math.round(p.cpu_percent)}%`}</td><td className="n">{fmtBytes(p.rss)}</td>
+          <td className="n">{dur(p.elapsed_s)}</td></tr>)}
+      </tbody></table></div>}
+    {others.length>0&&<div className="hint-s" style={{marginTop:8}}>Also on this computer: {Object.entries(byUser).map(([u,n])=>`${n} analysis program${n===1?"":"s"} of ${u}`).join(", ")}.</div>}
+  </div></div>);
+}
+
+function RunCard({r}){
+  const p=r.progress||{}, [say,k]=runSay(r.status), dt=prettyDate(r.date);
+  return (<button className="runcard rise" onClick={()=>goRun(r.id)}>
+    <div className="rc-top"><span className="rc-date">{dt.big} {dt.year}</span><span className={"stamp "+k}>{say}</span></div>
+    <div className="hint-s">{prettyProject(r.project)} · {jobName(r.job)}</div>
+    {r.job==="network"&&<>
+      <div className="bar"><i style={{width:`${p.fraction?Math.round(100*p.fraction):3}%`}}/></div>
+      <div className="rc-meta">{p.total?<b>{p.done} of {p.total} wells</b>:<b>{p.done||0} wells finished</b>}
+        {p.seconds_left!=null&&<span> · about {dur(p.seconds_left)} left</span>}</div>
+    </>}
+    <div className="hint-s">Running for {dur(r.elapsed_s)}{r.last_output_age_s!=null&&` · last activity ${dur(r.last_output_age_s)} ago`}</div>
+    {r.conversion_summary&&<div className="hint-s">NWB: {r.conversion_summary.converted} converted, {r.conversion_summary.reused} reused</div>}
+  </button>);
+}
+
+function HistoryTable({fixedLimit}){
+  const [f,setF]=useState({project:"",job:"",status:""});
+  const [data,setData]=useState(null);
+  const [limit,setLimit]=useState(fixedLimit||25);
+  const load=useCallback(()=>{
+    const q=new URLSearchParams({...f,limit:String(limit)}).toString();
+    api("/api/history?"+q).then(setData).catch(()=>setData({runs:[],total:0,projects:[]}));},[f,limit]);
+  useEffect(()=>{load();const t=setInterval(()=>{if(!document.hidden)load();},15000);return()=>clearInterval(t);},[load]);
+  if(!data) return <div className="skel" style={{height:120}}/>;
+  return (<>
+    {!fixedLimit&&<div className="filters">
+      <select className="sel" value={f.project} onChange={e=>setF({...f,project:e.target.value})} aria-label="Project">
+        <option value="">All projects</option>{(data.projects||[]).map(p=><option key={p} value={p}>{prettyProject(p)}</option>)}</select>
+      <select className="sel" value={f.job} onChange={e=>setF({...f,job:e.target.value})} aria-label="Analysis">
+        <option value="">Both analyses</option><option value="network">Network analysis</option><option value="activity">Activity scan</option></select>
+      <select className="sel" value={f.status} onChange={e=>setF({...f,status:e.target.value})} aria-label="Outcome">
+        <option value="">Any outcome</option><option value="done">Done</option><option value="failed">Failed</option>
+        <option value="interrupted">Interrupted</option><option value="running,dispatched,queued">Running or starting</option></select>
+      <span className="hint-s">{data.total} run{data.total===1?"":"s"}</span>
+    </div>}
+    {data.runs.length===0?<div className="hint" style={{padding:"10px 2px"}}>No runs match.</div>:
+    <div className="tw"><table className="tbl hover"><thead><tr><th>Recording date</th><th>Project</th><th>Analysis</th>
+      <th>Outcome</th><th className="n">Took</th><th>Finished</th></tr></thead><tbody>
+      {data.runs.map(r=>{const [say,k]=runSay(r.status),dt=prettyDate(r.date);return(
+        <tr key={r.id} onClick={()=>goRun(r.id)} tabIndex={0} onKeyDown={e=>e.key==="Enter"&&goRun(r.id)}>
+          <td><b>{dt.big}</b> <span className="hint-s">{dt.year}</span></td><td>{prettyProject(r.project)}</td>
+          <td>{jobName(r.job)}</td><td><span className={"stamp "+k}>{say}</span></td>
+          <td className="n">{r.duration_s!=null?dur(r.duration_s):"—"}</td><td className="hint-s">{r.completed_at?ago(r.completed_at):"—"}</td></tr>);})}
+    </tbody></table></div>}
+    {!fixedLimit&&data.total>data.runs.length&&<div style={{marginTop:10}}>
+      <button className="btn sm" onClick={()=>setLimit(l=>l+50)}>Show more</button></div>}
+  </>);
+}
+
+function Dashboard(){
+  const [ov,setOv]=useState(null);
+  const [sys,setSys]=useState(null);
+  useEffect(()=>{
+    const load=()=>{if(document.hidden)return;
+      api("/api/overview").then(setOv).catch(()=>{});api("/api/system").then(setSys).catch(()=>{});};
+    load();const t=setInterval(load,5000);return()=>clearInterval(t);},[]);
+  if(!ov) return <div className="skel" style={{height:240}}/>;
+  const lim=ov.limits||{}, act=ov.active_jobs||{};
+  return (<div className="rise">
+    <div className="slots">
+      <span className={"dot "+(ov.watching?"ok":"wait")}/>{ov.watching?"Watching for new recordings":"Not watching for new recordings"}
+      <span className="hint-s">· Network analyses running {act.network||0} of {lim.network||1} · Activity scans {act.activity||0} of {lim.activity||1}</span>
+    </div>
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Needs attention</div></div>
+      {ov.attention.length===0
+        ?<Callout kind="green" icon={<Check s={17}/>}>Nothing needs attention.</Callout>
+        :<div className="att">{ov.attention.map((a,i)=>(
+          <div key={i} className={"att-i "+(a.level||"warn")} onClick={()=>a.run_id&&goRun(a.run_id)} style={{cursor:a.run_id?"pointer":"default"}}>
+            <span className="ic">{a.level==="bad"?<Alert s={17}/>:<Info s={17}/>}</span>
+            <div style={{flex:1,minWidth:0}}>
+              {a.date&&<b>{prettyDate(a.date).big} {prettyDate(a.date).year} · {jobName(a.job)} — </b>}{a.text}</div>
+            {a.run_id&&<Chev s={15}/>}
+          </div>))}</div>}
+    </div>
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Running now</div>
+        <div className="sec-d">{ov.running.length?"Click a run for its wells, steps and log":"Nothing is analysing at the moment"}</div></div>
+      {ov.running.length>0&&<div className="runcards">{ov.running.map(r=><RunCard key={r.id} r={r}/>)}</div>}
+    </div>
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">The computer</div><div className="sec-d">Updates every few seconds</div></div>
+      <SysHealth sys={sys}/>
+    </div>
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Run history</div><div className="sec-d">Every analysis run, newest first</div></div>
+      <div className="card"><div className="card-b"><HistoryTable/></div></div>
+    </div>
+  </div>);
+}
+
+/* ── Run detail ───────────────────────────────────────────────────────── */
+function RunDetail({id,onLog,onBack}){
+  const [d,setD]=useState(null);
+  const [err,setErr]=useState("");
+  const [showAll,setShowAll]=useState(false);
+  useEffect(()=>{let t;setD(null);setErr("");
+    const load=()=>api("/api/history/"+id).then(x=>{setD(x);
+      if(!["done","failed","interrupted","detected"].includes(x.status)&&!t)t=setInterval(()=>{if(!document.hidden)load();},5000);
+      else if(["done","failed","interrupted","detected"].includes(x.status)&&t){clearInterval(t);t=null;}})
+      .catch(e=>setErr(e.message));
+    load();return()=>t&&clearInterval(t);},[id]);
+  if(err) return <div className="rise"><button className="btn sm" onClick={onBack}>← Back</button>
+    <div style={{marginTop:16}}><Callout kind="red" icon={<Alert s={17}/>}>{err}</Callout></div></div>;
+  if(!d) return <div className="skel" style={{height:300}}/>;
+  const [say,k]=runSay(d.status), dt=prettyDate(d.date), ls=d.log_summary||{}, p=d.progress||{};
+  const wells=ls.wells||[], conv=ls.conversion||[];
+  const probs=wells.filter(w=>["failed","stopped"].includes(w.outcome));
+  const shown=showAll?wells:wells.slice(0,60);
+  const st=d.settings||{};
+  const report=(d.outputs||[]).find(o=>o.report);
+  return (<div className="rise">
+    <button className="btn sm" onClick={onBack}>← Back</button>
+    <div className="rd-h">
+      <div><div className="rd-t">{dt.big} {dt.year}</div>
+        <div className="hint">{prettyProject(d.project)} · {jobName(d.job)} · folder <span className="mono">{d.date}</span>
+          {d.attempt>1&&` · run ${d.attempt} for this date`}{d.imported?" · imported from before history was kept":""}</div></div>
+      <div className="acts" style={{alignItems:"center"}}>
+        <span className={"stamp "+k} style={{fontSize:13}}>{say}</span>
+        {report&&<a className="btn ink sm" target="_blank" rel="noopener" href={`/api/reports/view?path=${encodeURIComponent(report.path)}`}><Doc s={14}/> Report</a>}
+        {d.log&&<button className="btn sm" onClick={()=>onLog(d.log,`${dt.big} ${dt.year} · ${jobName(d.job)}`)}><Lines s={14}/> Log</button>}
+      </div>
+    </div>
+
+    <div className="tally" style={{marginBottom:22}}>
+      <div className="tal"><div className="tal-k">Started</div><div className="rd-v">{d.started_at?ago(d.started_at):"—"}</div></div>
+      <div className="tal"><div className="tal-k">{["done","failed","interrupted"].includes(d.status)?"Took":"Running for"}</div><div className="rd-v">{d.elapsed_s!=null?dur(d.elapsed_s):"—"}</div></div>
+      <div className="tal"><div className="tal-k">Finished</div><div className="rd-v">{d.completed_at?ago(d.completed_at):"not yet"}</div></div>
+      <div className="tal"><div className="tal-k">Wells</div><div className="rd-v">{d.job==="network"?
+        `${(ls.counts||{}).complete||0} finished${probs.length?` · ${probs.length} problem${probs.length===1?"":"s"}`:""}`:((ls.summary||{}).wells??"—")}</div></div>
+    </div>
+
+    {d.error&&<div style={{marginBottom:18}}><Callout kind="red" icon={<Alert s={17}/>}><b>What went wrong:</b> {d.error}</Callout></div>}
+    {d.live_detail&&<div style={{marginBottom:18}}><Callout kind="blue">{d.live_detail}</Callout></div>}
+
+    {d.job==="network"&&!["done","failed","interrupted"].includes(d.status)&&<div className="sec">
+      <div className="sec-h"><div className="sec-t">Progress</div></div>
+      <div className="card"><div className="card-b">
+        <div className="bar" style={{height:10}}><i style={{width:`${p.fraction?Math.round(100*p.fraction):3}%`}}/></div>
+        <div style={{marginTop:8}}>{p.total?<b>{p.done} of {p.total} wells done</b>:<b>{p.done||0} wells done</b>}
+          {p.seconds_left!=null&&<span> · about {dur(p.seconds_left)} left</span>}
+          {!p.expected_known&&<span className="hint-s"> · counting this date's wells…</span>}
+          {d.last_output_age_s!=null&&<span className="hint-s"> · last activity {dur(d.last_output_age_s)} ago</span>}</div>
+      </div></div></div>}
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Steps</div><div className="sec-d">What happened, in order</div></div>
+      <div className="card"><div className="card-b"><ol className="tl">
+        {(d.events||[]).length===0&&<li className="hint">No step record — this run happened before history was kept.</li>}
+        {(d.events||[]).filter(e=>e.status||!HEARTBEAT.test(e.message||"")).map((e,i)=><li key={i} data-k={runSay(e.status)[1]}>
+          <span className="tl-t">{e.time?new Date(e.time).toLocaleString():""}</span>
+          <span>{e.status?<b>{runSay(e.status)[0]}</b>:null}{e.status&&e.message?" — ":""}{e.message}</span></li>)}
+        {ls.conversion_summary&&<li data-k="ok"><span className="tl-t">NWB</span><span><b>Converted to NWB</b> — {ls.conversion_summary.converted} converted,
+          {" "}{ls.conversion_summary.reused} reused, {ls.conversion_summary.failed} failed in {dur(ls.conversion_summary.seconds)}</span></li>}
+        {ls.driver_seconds!=null&&<li data-k="ok"><span className="tl-t">Analysis</span><span><b>All wells analysed</b> in {dur(ls.driver_seconds)}</span></li>}
+      </ol></div></div>
+    </div>
+
+    {d.job==="network"&&<div className="sec">
+      <div className="sec-h"><div className="sec-t">Wells</div><div className="sec-d">{wells.length} well{wells.length===1?"":"s"} in the log</div></div>
+      {wells.length===0?<div className="card"><div className="card-b hint">No wells started yet.</div></div>:
+      <div className="card"><div className="card-b"><div className="tw"><table className="tbl"><thead><tr><th>Chip</th><th>Recording</th><th>Well</th>
+        <th>Outcome</th><th>Step reached</th><th className="n">Spikes</th><th className="n">Took</th><th>Why</th></tr></thead><tbody>
+        {shown.map((w,i)=>{const [s2,k2]=WELL_OUT[w.outcome]||[w.outcome,"wait"];return(
+          <tr key={i}><td className="mono">{w.chip}</td><td className="mono">{w.run}</td><td>{+String(w.well).replace(/\D/g,"")+1}</td>
+            <td><span className={"stamp "+k2}>{s2}</span></td><td className="hint-s">{w.phase}</td>
+            <td className="n">{w.spikes!=null?w.spikes.toLocaleString():"—"}</td><td className="n">{w.seconds!=null?dur(w.seconds):"—"}</td>
+            <td className="hint-s" style={{whiteSpace:"normal",maxWidth:320}}>{w.reason?plainWellError({error:w.reason,status:"failed"}):""}</td></tr>);})}
+      </tbody></table></div>
+      {wells.length>60&&<button className="btn sm" style={{marginTop:10}} onClick={()=>setShowAll(x=>!x)}>{showAll?"Show fewer":`Show all ${wells.length}`}</button>}
+      </div></div>}
+    </div>}
+
+    {conv.length>0&&<div className="sec">
+      <div className="sec-h"><div className="sec-t">NWB conversion</div></div>
+      <div className="card"><div className="card-b"><div className="tw"><table className="tbl"><thead><tr><th>Chip</th><th>Recording</th><th>Well</th><th>Result</th><th className="n">Took</th><th>Why</th></tr></thead><tbody>
+        {conv.map((c,i)=><tr key={i}><td className="mono">{c.chip}</td><td className="mono">{c.run}</td><td>{+String(c.well).replace(/\D/g,"")+1}</td>
+          <td><span className={"stamp "+(c.outcome==="failed"?"bad":c.outcome==="not_recorded"?"wait":"ok")}>{c.outcome==="not_recorded"?"not in the file":c.outcome}</span></td>
+          <td className="n">{c.seconds?dur(c.seconds):"—"}</td><td className="hint-s">{c.reason||""}</td></tr>)}
+      </tbody></table></div></div></div></div>}
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">What it produced</div></div>
+      <div className="card"><div className="card-b">{(d.outputs||[]).length===0?<div className="hint">Nothing yet.</div>:
+        <div className="outs">{d.outputs.map((o,i)=><div className="out" key={i}>
+          <div><b>{o.label}</b> <span className="hint-s">{o.count} {o.unit}{o.bytes!=null?` · ${fmtBytes(o.bytes)}`:""}</span></div>
+          <div className="mono hint-s" style={{wordBreak:"break-all"}}>{o.path}</div>
+          {o.report&&<a className="btn sm" target="_blank" rel="noopener" href={`/api/reports/view?path=${encodeURIComponent(o.path)}`}><Ext s={13}/> Open</a>}
+          {o.log&&<button className="btn sm" onClick={()=>onLog(o.path,`${dt.big} ${dt.year} · ${jobName(d.job)}`)}><Lines s={13}/> Open</button>}
+        </div>)}</div>}</div></div>
+    </div>
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Settings it ran with</div></div>
+      <div className="card"><div className="card-b">
+        {Object.keys(st).length===0?<div className="hint">Not recorded for this run (it happened before history was kept).</div>:
+        <dl className="kv">
+          <dt>Spike sorting</dt><dd>{st.spike_sorting?"On":"Off (spike detection only)"}</dd>
+          <dt>Converted to NWB first</dt><dd>{st.nwb_convert?`Yes (${st.nwb_compression==="maxwell"?"MaxWell compression":"standard compression"})`:"No"}</dd>
+          <dt>Fast local disk</dt><dd>{st.stage_locally?`Yes — ${st.scratch_dir||"default folder"}`:"No"}</dd>
+          <dt>Analyses at once</dt><dd>Network {st.max_concurrent_network} · Activity scan {st.max_concurrent_activity}</dd>
+          <dt>Recordings from</dt><dd className="mono">{st.watch_dir}</dd>
+          <dt>Results to</dt><dd className="mono">{st.output_dir}</dd>
+        </dl>}
+        {d.command&&<details className="adv"><summary><span className="chev"><Chev s={14}/></span>Exact command</summary><Code text={d.command}/></details>}
+      </div></div>
+    </div>
+  </div>);
+}
+
 /* ── App ──────────────────────────────────────────────────────────────── */
 function App(){
   const [schema,setSchema]=useState(null);
   const [cfg,setCfg]=useState(null);
   const [status,setStatus]=useState(null);
   const [fatal,setFatal]=useState("");
+  const VIEWS=["dashboard","progress","add","reports","settings"];
   const [tab,setTab]=useState(()=>{const h=location.hash.slice(1);
-    if(["progress","add","reports","settings"].includes(h))return h;
-    try{return localStorage.getItem("mea-tab")||"progress";}catch(e){return"progress";}});
+    if(VIEWS.includes(h))return h;
+    try{const t=localStorage.getItem("mea-tab");return VIEWS.includes(t)?t:"dashboard";}catch(e){return"dashboard";}});
+  // A run's detail page has its own address (#run/<id>) so Back works.
+  const [runId,setRunId]=useState(()=>location.hash.startsWith("#run/")?location.hash.slice(5):null);
   const [reports,setReports]=useState({});
   const [wells,setWells]=useState({});
   const [openW,setOpenW]=useState({});
@@ -722,10 +1018,12 @@ function App(){
   const closeAsk=v=>{setConfirmAsk(null);confirmRes.current&&confirmRes.current(v);};
 
   useEffect(()=>{try{localStorage.setItem("mea-tab",tab);}catch(e){}
-    if(location.hash.slice(1)!==tab)history.replaceState(null,"","#"+tab);},[tab]);
+    if(!runId&&location.hash.slice(1)!==tab)history.replaceState(null,"","#"+tab);},[tab,runId]);
   useEffect(()=>{const h=()=>{const t=location.hash.slice(1);
-    if(["progress","add","reports","settings"].includes(t))setTab(t);};
-    addEventListener("hashchange",h);return()=>removeEventListener("hashchange",h);},[]);
+    if(t.startsWith("run/")){setRunId(t.slice(4));window.scrollTo(0,0);return;}
+    setRunId(null);if(VIEWS.includes(t))setTab(t);};
+    addEventListener("hashchange",h);addEventListener("popstate",h);
+    return()=>{removeEventListener("hashchange",h);removeEventListener("popstate",h);};},[]);
   useEffect(()=>{openWRef.current=openW;},[openW]);
 
   useEffect(()=>{(async()=>{try{
@@ -825,6 +1123,7 @@ function App(){
     logs_in_output:cfg.logs_in_output!==false,stage_locally:!!cfg.stage_locally,scratch_dir:cfg.scratch_dir||"",
     stage_min_free_gb:Number(cfg.stage_min_free_gb)||200,dry_run:!!cfg.dry_run,
     ai_requirements:cfg.ai_requirements||"",auto_handoff:cfg.auto_handoff!==false,
+    nwb_convert:!!cfg.nwb_convert,nwb_python:cfg.nwb_python||"",nwb_compression:cfg.nwb_compression||"gzip",
   });
   const run_=async(fn,ok,m)=>{setBusy(true);try{await fn();if(ok)toast(ok,m);refresh(true);}
     catch(e){toast("That didn’t work",e.message,"error");}finally{setBusy(false);}};
@@ -858,7 +1157,9 @@ function App(){
       "Added again",`${dt.big} will be analysed again.`);
   };
 
-  const TABS=[["progress","Progress",folders.length],["add","Add recordings"],["reports","AI report",Object.keys(reports).length],["settings","Settings"]];
+  const openLogPath=(path,title)=>{const l={path,title,lines:[]};setLog(l);loadLog(l);};
+  const pickTab=k=>{setRunId(null);setTab(k);history.pushState(null,"","#"+k);};
+  const TABS=[["dashboard","Dashboard"],["progress","Progress",folders.length],["add","Add recordings"],["reports","AI report",Object.keys(reports).length],["settings","Settings"]];
   return (
     <div className="wrap">
       <h1 className="sr">MEA Bench — analysis control</h1>
@@ -882,12 +1183,14 @@ function App(){
 
       <nav className="tabs" role="tablist">
         {TABS.map(([k,l,n])=>(
-          <button key={k} role="tab" className="tab" aria-selected={tab===k} onClick={()=>setTab(k)}>
+          <button key={k} role="tab" className="tab" aria-selected={!runId&&tab===k} onClick={()=>pickTab(k)}>
             {l}{n?<span className="n">{n}</span>:null}</button>))}
       </nav>
       <div className="tabline"/>
 
-      {tab==="progress"&&<>
+      {runId&&<RunDetail id={runId} onLog={openLogPath} onBack={()=>{location.hash=tab;}}/>}
+      {!runId&&tab==="dashboard"&&<Dashboard/>}
+      {!runId&&tab==="progress"&&<>
         <div className="tally rise" style={{"--i":1}}>
           {[["wait","Waiting"],["run","Analysing"],["done","Done"],["bad","Need attention"]].map(([k,l])=>(
             <div className="tal" key={k} data-k={k} data-on={tally[k]>0}>
@@ -897,9 +1200,9 @@ function App(){
         <Progress folders={folders} reports={reports} wells={wells} openW={openW}
                   onWells={onWells} onLog={onLog} onAgain={onAgain} feed={feed} goAdd={()=>setTab("add")}/>
       </>}
-      {tab==="add"&&<AddRecordings cfg={cfg} toast={toast} ask={ask} onQueued={()=>{refresh(true);setTab("progress");}}/>}
-      {tab==="reports"&&<AiReport cfg={cfg} reports={reports} toast={toast}/>}
-      {tab==="settings"&&<Settings cfg={cfg} setCfg={setCfg} schema={schema} locked={active>0} onSave={save} busy={busy} toast={toast}/>}
+      {!runId&&tab==="add"&&<AddRecordings cfg={cfg} toast={toast} ask={ask} onQueued={()=>{refresh(true);setTab("progress");}}/>}
+      {!runId&&tab==="reports"&&<AiReport cfg={cfg} reports={reports} toast={toast}/>}
+      {!runId&&tab==="settings"&&<Settings cfg={cfg} setCfg={setCfg} schema={schema} locked={active>0} onSave={save} busy={busy} toast={toast}/>}
 
       <div className="foot"><span>Orchestration-MEA</span><span>·</span><span>recordings are only ever read, never changed</span></div>
 
