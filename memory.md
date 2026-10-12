@@ -32,13 +32,13 @@ The users are non-technical lab members.
 
 ## Branches
 
-| Branch | Head | Based on | Pushed |
-|---|---|---|---|
-| `main` | `7d71b51` | — | yes (includes `feat/ui-redesign` up to `1ea9e72`) |
-| `feat/ai-reports` | `3c16281` | `main` | yes, merged (PRs #1, #2) |
-| `feat/ui-redesign` | `1ea9e72` + this file | `feat/ai-reports` | yes, merged up to `1ea9e72` (PR #3) |
-| `feat/nwb-conversion` | `cd55259` | `feat/ui-redesign` at `1ea9e72` | **not on GitHub** (checked 2026-10-12) |
-| `feat/dashboard` | `43563b4` | `feat/nwb-conversion` | **not on GitHub** (checked 2026-10-12) |
+| Branch | Head | Merged into `main` |
+|---|---|---|
+| `main` | `fdfba83` | — |
+| `feat/ai-reports` | `3c16281` | yes (PRs #1, #2) |
+| `feat/ui-redesign` | `5523956` | yes (PRs #3, #4) |
+| `feat/nwb-conversion` | `cd55259` | yes (through PR #5, since `feat/dashboard` is built on it) |
+| `feat/dashboard` | `43563b4` | yes (PR #5) |
 
 Worktrees on the lab machine:
 
@@ -46,14 +46,10 @@ Worktrees on the lab machine:
 - `Orchestration-MEA-nwb` → `feat/nwb-conversion`
 - `Orchestration-MEA-dash` → `feat/dashboard`
 
-Correction (cloud session, 2026-10-12): the earlier notes said nothing was
-merged and every branch was pushed. GitHub shows that PRs #1–#3 were merged, so
-`main` already holds all of `feat/ui-redesign` except this file. It also shows
-that `feat/nwb-conversion` and `feat/dashboard` are missing, so their push from
-the lab machine did not land. Push them from the lab machine
-(`git push -u origin feat/nwb-conversion feat/dashboard`) before opening their
-pull requests. This file is on `feat/ui-redesign` only; the NWB and dashboard
-branches were cut before it was written.
+As of 2026-10-12, everything is merged into `main` (`fdfba83`) and there are
+no open pull requests. The lab worktrees can switch to `main`.
+On the merged `main`, all 51 stdlib unittests in `tests/python` pass (11 are
+skipped because they need a test server on 8766 or `h5py`), and so does `npm test`.
 
 ## What has been done
 
@@ -146,8 +142,9 @@ The machine was rebooted to fix a GPU "Driver/library version mismatch".
 
 On the lab machine (a cloud session cannot reach it — see below):
 
-1. Start `mea-ui` on port 8000 with `OOMPolicy=continue`. Open question: run it
-   from `feat/ui-redesign` (as before) or `feat/dashboard`.
+1. Start `mea-ui` on port 8000 with `OOMPolicy=continue`. `main` now has both
+   the UI redesign and the dashboard, so the natural choice is to run it from
+   `main`. Confirm with the user first.
 2. Reset the failed `261003::network` step with `POST /api/runs/reset`, then queue
    260919, 260930 and 261003 with `POST /api/queue` (`rerun=false`). Hold 260903.
 3. Delete the test outputs `dash_test` and `nwb_test`. The user approved this
@@ -157,9 +154,7 @@ On the lab machine (a cloud session cannot reach it — see below):
 
 In the repository:
 
-5. Open pull requests towards `main` for `feat/nwb-conversion`, then
-   `feat/dashboard`. Blocked until both branches are pushed (see Branches).
-   `ui-redesign` and `ai-reports` are already merged.
+5. ~~Open pull requests and merge towards `main`.~~ Done 2026-10-12 (PRs #1–#5).
 6. A guard against the 260903 failure — for example a spike-count ceiling before
    network-burst analysis — has been discussed as a need but not designed or built.
 7. DANDI upload: the subject and lab metadata must come from the user.
@@ -174,10 +169,7 @@ the live server.
   and the stdlib unittests in `tests/python` need none of the lab data.
 - It cannot do items 1 to 4, or any run on real recordings. Those need a session
   on `benshalom-labtower1`.
-- It only sees branches that are pushed. As of 2026-10-12 only `main`,
-  `feat/ai-reports` and `feat/ui-redesign` are on GitHub. Without the
-  dashboard branch, a cloud session has no `tests/python` and none of
-  `history.py`, `rundetail.py` or `monitor.py`.
+- It only sees branches that are pushed. Everything is on `main` as of 2026-10-12.
 - Item 6 cannot be built safely from here. The spike count is only known
   inside MEA-Analysis's per-well routine, which must not be changed. A guard
   at the orchestrator level, such as a per-well memory cap through a cgroup or
