@@ -32,23 +32,26 @@ The users are non-technical lab members.
 
 ## Branches
 
-| Branch | Head | Based on | Pushed |
-|---|---|---|---|
-| `main` | `4f3eedf` | — | yes (54 commits behind `feat/ui-redesign`) |
-| `feat/ai-reports` | `3c16281` | `main` | yes |
-| `feat/ui-redesign` | `1ea9e72` + this file | `feat/ai-reports` | yes |
-| `feat/nwb-conversion` | `cd55259` | `feat/ui-redesign` at `1ea9e72` | yes (2026-10-12) |
-| `feat/dashboard` | `43563b4` | `feat/nwb-conversion` | yes (2026-10-12) |
+| Branch | Head | State |
+|---|---|---|
+| `main` | `fdfba83` | Holds everything. Work from here. |
+| `feat/ai-reports` | `3c16281` | Merged (PRs #1, #2) |
+| `feat/ui-redesign` | `5523956` | Merged (PRs #3, #4) |
+| `feat/nwb-conversion` | `cd55259` | Merged through the dashboard branch (PR #5) |
+| `feat/dashboard` | `43563b4` | Merged (PR #5) |
+
+All five are on GitHub and there are no open pull requests. Cut a new branch
+from `main` for any new work.
 
 Worktrees on the lab machine:
 
-- `Orchestration-MEA` → `feat/ui-redesign` (the live server ran from here)
-- `Orchestration-MEA-nwb` → `feat/nwb-conversion`
-- `Orchestration-MEA-dash` → `feat/dashboard`
+- `Orchestration-MEA` → the main worktree; the live server runs from here
+- `Orchestration-MEA-nwb` → `feat/nwb-conversion` (merged, no longer needed)
+- `Orchestration-MEA-dash` → `feat/dashboard` (merged, no longer needed)
 
-Nothing has been merged to `main` and there are no open pull requests yet.
-This file lives only on `feat/ui-redesign`; the NWB and dashboard branches were
-cut before it was written.
+`origin/claude/memory-md-tasks-7ays59` is a cloud session's correction to this
+file, written before PRs #4 and #5 were merged. This version replaces it, so
+that branch can be deleted.
 
 ## What has been done
 
@@ -141,8 +144,8 @@ The machine was rebooted to fix a GPU "Driver/library version mismatch".
 
 On the lab machine (a cloud session cannot reach it — see below):
 
-1. Start `mea-ui` on port 8000 with `OOMPolicy=continue`. Open question: run it
-   from `feat/ui-redesign` (as before) or `feat/dashboard`.
+1. Start `mea-ui` on port 8000 from `main` with `OOMPolicy=continue`, so that one
+   well running out of memory does not stop the server.
 2. Reset the failed `261003::network` step with `POST /api/runs/reset`, then queue
    260919, 260930 and 261003 with `POST /api/queue` (`rerun=false`). Hold 260903.
 3. Delete the test outputs `dash_test` and `nwb_test`. The user approved this
@@ -152,10 +155,16 @@ On the lab machine (a cloud session cannot reach it — see below):
 
 In the repository:
 
-5. Open pull requests and merge towards `main`, which is 54 commits behind.
-6. A guard against the 260903 failure — for example a spike-count ceiling before
-   network-burst analysis — has been discussed as a need but not designed or built.
-7. DANDI upload: the subject and lab metadata must come from the user.
+5. A guard against the 260903 failure. Not designed yet. The spike count is only
+   known inside MEA-Analysis's per-well routine, which must not be changed, so
+   the guard belongs in the orchestrator: for example a per-well memory cap
+   through a cgroup or `systemd-run`. It has to be tested on the lab machine.
+6. DANDI upload: the subject and lab metadata must come from the user.
+7. Housekeeping: delete `origin/claude/memory-md-tasks-7ays59`, and remove the
+   two merged worktrees once nothing in them is needed.
+
+Finished since the last update: every feature branch is merged into `main`
+(PRs #1 to #5, the last on 2026-10-12).
 
 ## What a cloud session can and cannot do
 
@@ -163,8 +172,8 @@ A cloud session works from a clone of the GitHub repository. It has no access to
 the NAS recordings, the output volume, the SSD scratch, MEA-Analysis, the GPU or
 the live server.
 
-- It can do items 5 to 7 that are code, tests and docs: `npm test` in `tests/`
-  and the stdlib unittests in `tests/python` need none of the lab data.
-- It cannot do items 1 to 4, or any run on real recordings. Those need a session
-  on `benshalom-labtower1`.
-- It only sees branches that are pushed. All five branches above are on GitHub.
+- It can do code, tests and docs: `npm test` in `tests/` and the stdlib unittests
+  in `tests/python` need none of the lab data.
+- It cannot do items 1 to 4, test the guard in item 5, or make any run on real
+  recordings. Those need a session on `benshalom-labtower1`.
+- It only sees branches that are pushed. `main` on GitHub has everything.
