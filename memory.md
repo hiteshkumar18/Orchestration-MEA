@@ -34,11 +34,11 @@ The users are non-technical lab members.
 
 | Branch | Head | Based on | Pushed |
 |---|---|---|---|
-| `main` | `4f3eedf` | — | yes (54 commits behind `feat/ui-redesign`) |
-| `feat/ai-reports` | `3c16281` | `main` | yes |
-| `feat/ui-redesign` | `1ea9e72` + this file | `feat/ai-reports` | yes |
-| `feat/nwb-conversion` | `cd55259` | `feat/ui-redesign` at `1ea9e72` | yes (2026-10-12) |
-| `feat/dashboard` | `43563b4` | `feat/nwb-conversion` | yes (2026-10-12) |
+| `main` | `7d71b51` | — | yes (includes `feat/ui-redesign` up to `1ea9e72`) |
+| `feat/ai-reports` | `3c16281` | `main` | yes, merged (PRs #1, #2) |
+| `feat/ui-redesign` | `1ea9e72` + this file | `feat/ai-reports` | yes, merged up to `1ea9e72` (PR #3) |
+| `feat/nwb-conversion` | `cd55259` | `feat/ui-redesign` at `1ea9e72` | **not on GitHub** (checked 2026-10-12) |
+| `feat/dashboard` | `43563b4` | `feat/nwb-conversion` | **not on GitHub** (checked 2026-10-12) |
 
 Worktrees on the lab machine:
 
@@ -46,9 +46,14 @@ Worktrees on the lab machine:
 - `Orchestration-MEA-nwb` → `feat/nwb-conversion`
 - `Orchestration-MEA-dash` → `feat/dashboard`
 
-Nothing has been merged to `main` and there are no open pull requests yet.
-This file lives only on `feat/ui-redesign`; the NWB and dashboard branches were
-cut before it was written.
+Correction (cloud session, 2026-10-12): the earlier notes said nothing was
+merged and every branch was pushed. GitHub shows that PRs #1–#3 were merged, so
+`main` already holds all of `feat/ui-redesign` except this file. It also shows
+that `feat/nwb-conversion` and `feat/dashboard` are missing, so their push from
+the lab machine did not land. Push them from the lab machine
+(`git push -u origin feat/nwb-conversion feat/dashboard`) before opening their
+pull requests. This file is on `feat/ui-redesign` only; the NWB and dashboard
+branches were cut before it was written.
 
 ## What has been done
 
@@ -152,7 +157,9 @@ On the lab machine (a cloud session cannot reach it — see below):
 
 In the repository:
 
-5. Open pull requests and merge towards `main`, which is 54 commits behind.
+5. Open pull requests towards `main` for `feat/nwb-conversion`, then
+   `feat/dashboard`. Blocked until both branches are pushed (see Branches).
+   `ui-redesign` and `ai-reports` are already merged.
 6. A guard against the 260903 failure — for example a spike-count ceiling before
    network-burst analysis — has been discussed as a need but not designed or built.
 7. DANDI upload: the subject and lab metadata must come from the user.
@@ -167,4 +174,11 @@ the live server.
   and the stdlib unittests in `tests/python` need none of the lab data.
 - It cannot do items 1 to 4, or any run on real recordings. Those need a session
   on `benshalom-labtower1`.
-- It only sees branches that are pushed. All five branches above are on GitHub.
+- It only sees branches that are pushed. As of 2026-10-12 only `main`,
+  `feat/ai-reports` and `feat/ui-redesign` are on GitHub. Without the
+  dashboard branch, a cloud session has no `tests/python` and none of
+  `history.py`, `rundetail.py` or `monitor.py`.
+- Item 6 cannot be built safely from here. The spike count is only known
+  inside MEA-Analysis's per-well routine, which must not be changed. A guard
+  at the orchestrator level, such as a per-well memory cap through a cgroup or
+  `systemd-run`, is a design choice and has to be tested on the lab machine.
