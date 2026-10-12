@@ -413,6 +413,9 @@ class StateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._data: dict[str, dict] = {}
+        # Called after every update with (key, merged entry, changed fields);
+        # the run history hangs off this. Must never break an update.
+        self.on_update = None
         if self.path.exists():
             try:
                 self._data = json.loads(self.path.read_text())
@@ -439,6 +442,13 @@ class StateStore:
             entry = self._data.setdefault(key, {"run": Path(key).name})
             entry.update(fields)
             self._flush()
+            snapshot = dict(entry)
+        hook = self.on_update
+        if hook is not None:
+            try:
+                hook(key, snapshot, fields)
+            except Exception:  # noqa: BLE001
+                LOG.exception("State update hook failed for %s", key)
 
     def all(self) -> dict[str, dict]:
         """Deep-enough copy for a consistent snapshot while jobs are running."""
@@ -637,6 +647,23 @@ class Watcher:
         self.state = StateStore(self.work_dir / "watcher_state.json")
         self.on_event = on_event or (lambda *_: None)
 
+        # Permanent run history (see history.py). Only the real watcher keeps
+        # it; a throwaway Watcher (command preview) must not write. Attached
+        # before _reconcile_state so runs left in flight are closed properly.
+        self.history = None
+        if reconcile:
+            try:
+                from history import RunHistory
+                self.history = RunHistory(self.work_dir / "run_history.sqlite",
+                                          settings_snapshot=self._settings_snapshot)
+                imported = self.history.import_state(self.state.all())
+                if imported:
+                    LOG.info("Run history started with %d run(s) from the state file", imported)
+                self.state.on_update = self.history.record
+            except Exception:  # noqa: BLE001
+                LOG.exception("Run history unavailable; analyses are unaffected")
+                self.history = None
+
         # Two separate signals. `_stop` ends the scan loop; `_halt` ends the
         # worker threads. Stopping the watcher should stop it looking for new
         # folders, not abandon work already queued — a queued Kilosort job that
@@ -686,6 +713,21 @@ class Watcher:
         self._stage_reserved: dict[str, float] = {}
         self._stage_lock = threading.Lock()
         self.on_batch_done: Optional[Callable[[dict], None]] = None
+
+    def _settings_snapshot(self) -> dict:
+        """What a run is launched with — stored with each run in the history."""
+        c = self.cfg
+        return {
+            "watch_dir": c.watch_dir, "output_dir": c.output_dir,
+            "run_network": c.run_network, "run_activity": c.run_activity,
+            "spike_sorting": not c.driver_options.get("skip_spikesorting"),
+            "nwb_convert": c.nwb_convert, "nwb_compression": c.nwb_compression,
+            "stage_locally": c.stage_locally, "scratch_dir": c.scratch_dir,
+            "max_concurrent_network": c.max_concurrent_network,
+            "max_concurrent_activity": c.max_concurrent_activity,
+            "driver_options": {k: v for k, v in c.driver_options.items()
+                               if v not in (None, False, "")},
+        }
 
     # -- lifecycle ---------------------------------------------------------- #
     IN_FLIGHT = ("detected", "dispatched", "queued", "running")

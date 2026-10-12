@@ -574,7 +574,157 @@ def api_status():
     # How many jobs a Start would resume, so the UI can say so beforehand
     # rather than the operator watching the whole previous queue reappear.
     snap["resumable"] = len(watcher.resumable())
+    # Each row's run in the history, so the UI can open its detail page.
+    if watcher.history is not None:
+        for r in snap.get("runs", []):
+            try:
+                r["run_id"] = watcher.history.current_run_id(r["path"])
+            except Exception:  # noqa: BLE001
+                r["run_id"] = None
     return snap
+
+
+# --------------------------------------------------------------------------- #
+# Dashboard: history, run detail, system health, overview
+# --------------------------------------------------------------------------- #
+from rundetail import (estimate, expected_wells_cached, outputs as run_outputs,  # noqa: E402
+                       parse_log_file)
+from history import HEARTBEAT as RUN_HEARTBEAT, TERMINAL as RUN_TERMINAL  # noqa: E402
+from monitor import SystemMonitor  # noqa: E402
+
+_monitor: Optional[SystemMonitor] = None
+_monitor_lock = threading.Lock()
+
+
+def get_monitor() -> SystemMonitor:
+    global _monitor
+    with _monitor_lock:
+        if _monitor is None:
+            def paths() -> dict[str, str]:
+                w = get_watcher()
+                cfg = w.cfg
+                return {"Output disk": cfg.output_dir or "",
+                        "Fast disk": str(w._scratch_root().parent) if cfg.stage_locally else "",
+                        "Recordings (NAS)": cfg.watch_dir or "",
+                        "Work folder": str(WORK_DIR)}
+            _monitor = SystemMonitor(paths, own_pids=lambda: set(get_watcher()._own_pids))
+        return _monitor
+
+
+def _seconds_since(iso: Optional[str]) -> Optional[float]:
+    if not iso:
+        return None
+    try:
+        return time.time() - datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _live_detail(status: Optional[str], detail: Optional[str]) -> Optional[str]:
+    """The watcher's current note on a run in flight. Why it was queued stops
+    being news once it is running."""
+    if status not in ("running", "dispatched", "queued") or not detail:
+        return None
+    if status == "running" and (detail.startswith("queued") or RUN_HEARTBEAT.match(detail)):
+        return None
+    return detail
+
+
+def _run_detail(run: dict, light: bool = False) -> dict:
+    """A history run plus what its log, the recordings and the output folder say."""
+    w = get_watcher()
+    status = run.get("status")
+    finished = status in RUN_TERMINAL
+    is_current = w.history is not None and w.history.current_run_id(run["key"]) == run["id"]
+    state = w.state.get(run["key"]) if is_current else {}
+    parsed = parse_log_file(run.get("log"), run.get("job") or "network", finished)
+    elapsed = run.get("duration_s")
+    if elapsed is None and status in ("running",):
+        elapsed = _seconds_since(run.get("started_at"))
+    progress = None
+    if (run.get("job") == "network") and parsed and "counts" in parsed:
+        exp = expected_wells_cached(run["folder"], w.cfg.assay_subfolder or "Network")
+        progress = estimate(parsed, (exp or {}).get("total") or 0, elapsed)
+        progress["expected_known"] = exp is not None
+    out = {**run, "is_current": is_current, "elapsed_s": round(elapsed) if elapsed else elapsed,
+           "live_detail": _live_detail(status, state.get("detail")),
+           "last_output_age_s": round(time.time() - parsed["log_mtime"]) if parsed else None,
+           "progress": progress}
+    if light:
+        out["counts"] = (parsed or {}).get("counts")
+        out["conversion_summary"] = (parsed or {}).get("conversion_summary")
+        return out
+    out["log_summary"] = parsed
+    try:
+        reports = api_reports()["reports"]
+    except Exception:  # noqa: BLE001
+        reports = []
+    out["outputs"] = run_outputs(w.cfg.output_dir, run["folder"], run.get("job") or "network",
+                                 run.get("log"), reports)
+    return out
+
+
+@app.get("/api/history")
+def api_history(project: str = "", job: str = "", status: str = "", date: str = "",
+                limit: int = 50, offset: int = 0):
+    w = get_watcher()
+    if w.history is None:
+        return {"total": 0, "runs": [], "projects": [], "unavailable": True}
+    return w.history.list(project=project, job=job, status=status, date=date,
+                          limit=max(1, min(limit, 500)), offset=max(0, offset))
+
+
+@app.get("/api/history/{run_id}")
+def api_history_run(run_id: str):
+    w = get_watcher()
+    run = w.history.get(run_id) if w.history is not None else None
+    if not run:
+        raise HTTPException(404, "No such run")
+    return _run_detail(run)
+
+
+@app.get("/api/system")
+def api_system():
+    return get_monitor().snapshot()
+
+
+@app.get("/api/overview")
+def api_overview():
+    """Everything the dashboard landing view needs, in one request."""
+    w = get_watcher()
+    snap = w.snapshot()
+    runs = snap.get("runs", [])
+    running, attention = [], []
+    stall_min = int(getattr(w.cfg, "stall_minutes", 120) or 0)      # 0: watchdog off
+    stall_s = max(60, (stall_min or 120) * 60)
+    hist = w.history
+    for r in runs:
+        rid = hist.current_run_id(r["path"]) if hist else None
+        if r.get("status") == "running" and rid:
+            d = _run_detail(hist.get(rid), light=True)
+            running.append(d)
+            age = d.get("last_output_age_s")
+            if age is not None and age > stall_s / 2:
+                attention.append({"level": "warn", "kind": "quiet", "run_id": rid,
+                                  "project": d["project"], "date": d["date"], "job": d["job"],
+                                  "text": f"No new log output for {age // 60} min — may be stuck"
+                                          + (f" (stopped automatically after {stall_min} min)."
+                                             if stall_min else ".")})
+        elif r.get("status") == "failed":
+            attention.append({"level": "bad", "kind": "failed", "run_id": rid,
+                              "project": Path(r["folder"]).parent.name, "date": r["run"],
+                              "job": r.get("job"),
+                              "text": (r.get("error") or "Failed").splitlines()[0][:200]})
+    sysw = (get_monitor().snapshot().get("warnings") or [])
+    for x in sysw:
+        attention.append({**x, "kind": "system"})
+    recent = hist.list(status="done,failed,interrupted", limit=10)["runs"] if hist else []
+    counts: dict[str, int] = {}
+    for r in runs:
+        counts[r.get("status") or "unknown"] = counts.get(r.get("status") or "unknown", 0) + 1
+    return {"running": running, "attention": attention, "recent": recent, "counts": counts,
+            "watching": snap.get("running"), "active_jobs": snap.get("active_jobs"),
+            "limits": snap.get("limits")}
 
 
 @app.get("/api/gpu")
@@ -599,6 +749,8 @@ def api_reset(payload: RunKeyPayload):
     """
     watcher = get_watcher()
     watcher.state.reset(payload.path)
+    if watcher.history is not None:
+        watcher.history.close_open(payload.path, "cleared by hand")
     folder = payload.path.split("::")[0]
     watcher._prints.pop(folder, None)
     watcher._prints.pop(payload.path, None)   # tolerate a bare folder path
@@ -641,7 +793,8 @@ def api_reset_all(payload: ResetAllPayload):
 def api_log(path: str, tail: int = 400):
     """Read a pipeline log.
 
-    Restricted to the watcher's log directory. The UI is unauthenticated by
+    Restricted to the watcher's log directories and the logs of runs in the
+    history. The UI is unauthenticated by
     design, so an unrestricted path parameter here would be an arbitrary
     file-read primitive for anyone who can reach the port.
     """
@@ -660,7 +813,10 @@ def api_log(path: str, tail: int = 400):
     except (OSError, RuntimeError):
         raise HTTPException(404, "Log not found")
 
-    if not any(p == r or r in p.parents for r in roots):
+    # A run's own log stays readable after the output folder setting changes:
+    # the history recorded exactly which file each run wrote.
+    known = watcher.history is not None and watcher.history.knows_log(path, str(p))
+    if not known and not any(p == r or r in p.parents for r in roots):
         LOG.warning("Rejected log read outside %s: %s", roots, p)
         raise HTTPException(403, "Log path is outside the allowed log directories")
     if not p.is_file():

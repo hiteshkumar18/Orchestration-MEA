@@ -9,7 +9,7 @@
 
 const fs=require('fs'); const path=require('path'); const {JSDOM}=require('jsdom');
 const code=fs.readFileSync(path.join(__dirname,'..','orchestration','static','app.js'),'utf8');
-const dom=new JSDOM('<!DOCTYPE html><div id="root"></div>',{runScripts:'dangerously',pretendToBeVisual:true,url:'http://localhost:8000/'});
+const dom=new JSDOM('<!DOCTYPE html><div id="root"></div>',{runScripts:'dangerously',pretendToBeVisual:true,url:'http://localhost:8000/#progress'});
 const w=dom.window;
 global.window=w; global.document=w.document; global.navigator=w.navigator;
 global.HTMLElement=w.HTMLElement; global.Element=w.Element;
@@ -26,7 +26,7 @@ const data={
    run_activity:true,max_concurrent_network:2,max_concurrent_activity:2,gpu_cooldown_seconds:5,
    queue_poll_seconds:2,settle_seconds:600,poll_seconds:30,logs_in_output:true,stage_locally:false,
    scratch_dir:'',stage_min_free_gb:200,activity_active_hz:0.05,h5_glob:'data.raw.h5',driver_python:''},
- '/api/schema':{groups:[]},'/api/env':{},'/api/queue':{batches:[]},'/api/handoff':{state:'idle'},'/api/reports':{reports:[{project:'in',label:'260828',path:'/out/r.html',built:'2026-10-05T10:00'}]},
+ '/api/schema':{groups:[]},'/api/env':{},'/api/queue':{batches:[]},'/api/handoff':{state:'idle'},'/api/overview':{running:[],attention:[],recent:[],counts:{},limits:{},active_jobs:{}},'/api/system':{ready:false},'/api/history':{total:0,runs:[],projects:[]},'/api/reports':{reports:[{project:'in',label:'260828',path:'/out/r.html',built:'2026-10-05T10:00'}]},
  '/api/logs':{lines:[]},'/api/picker':{},
  '/api/runs/checkpoints':{summary:{wells:19,complete:18,failed:1},
    wells:[{well:'well001',run_id:'000061',chip_id:'M07036',stage:10,stage_name:'Reports complete',
