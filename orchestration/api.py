@@ -299,6 +299,16 @@ def api_set_config(payload: ConfigPayload):
     watcher = get_watcher()
     if watcher.is_running:
         raise HTTPException(409, "Stop the watcher before changing configuration.")
+    # Saving replaces the watcher. Jobs still in flight belong to the old one:
+    # the new one would mark them interrupted while they are in fact running,
+    # and the same folder could then be started a second time on top of them.
+    # The settings page is already locked while analyses run; this holds the
+    # same line for anything else that calls the API.
+    busy = sorted({e.get("run") or k for k, e in watcher.state.all().items()
+                   if e.get("status") in ("dispatched", "queued", "running")})
+    if busy:
+        raise HTTPException(409, "Settings cannot be changed while analyses are running "
+                                 f"({', '.join(busy)}). Wait for them to finish, or stop them first.")
 
     opt_errors = validate_options(payload.driver_options)
     if opt_errors:
