@@ -60,6 +60,7 @@ from typing import Any, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import checkpoints  # noqa: E402
+import memguard  # noqa: E402
 from driver_schema import build_driver_args, default_options  # noqa: E402
 from mea_repo import find_mea_repo, find_driver_python, check_python, required_imports  # noqa: E402
 
@@ -190,6 +191,14 @@ class JobConfig:
     max_runtime_hours: float = 0.0
     # Seconds given to a killed process group to exit before SIGKILL.
     kill_grace_seconds: int = 20
+    # The most memory one Network job may use, in GB. A noisy well can detect
+    # hundreds of millions of spikes, and loading them once used all 63 GB and
+    # took the server and the neighbouring job down with it. At the ceiling
+    # only the well using the memory is stopped; the driver reports it as
+    # failed and carries on with the next well.
+    # 0 works it out: the RAM left after a reserve, shared between the Network
+    # jobs allowed at once. A negative number turns the ceiling off.
+    memory_limit_gb: float = 0.0
 
     settle_seconds: int = 600
     poll_seconds: int = 30
@@ -1697,6 +1706,23 @@ class Watcher:
         except subprocess.TimeoutExpired:
             LOG.error("pid %s did not die even after SIGKILL", proc.pid)
 
+    def _memory_limit(self, job: str) -> Optional[float]:
+        """The memory ceiling for this job in GB, or None to run without one."""
+        if job != JOB_NETWORK:
+            return None
+        limit = memguard.resolve_limit_gb(self.cfg.memory_limit_gb, memguard.total_ram_gb(),
+                                          self.cfg.max_concurrent_network)
+        if limit is None:
+            return None
+        if not memguard.available():
+            if not getattr(self, "_memguard_warned", False):
+                self._memguard_warned = True
+                LOG.warning("No memory ceiling: this machine cannot start a "
+                            "memory-limited job (systemd-run --user --scope). "
+                            "Jobs run as before, without one.")
+            return None
+        return limit
+
     def _supervise(self, cmd: list[str], env: dict, fh, log_path: Path,
                    run_name: str, label: str, key: str) -> tuple[int, Optional[str]]:
         """Run the driver, watching for a hang. Returns (returncode, stall reason).
@@ -2118,10 +2144,24 @@ class Watcher:
                 # interpreter ran what, and that was invisible in every log.
                 for line in self._env_banner(cmd, env, interp):
                     fh.write(line + "\n")
+                mem_limit = self._memory_limit(job)
+                run_cmd = cmd
+                if mem_limit is not None:
+                    run_cmd = memguard.wrap(cmd, mem_limit, memguard.own_service_unit())
+                    fh.write(f"memory ceiling: {mem_limit:g} GB for this job\n")
+                    LOG.info("%s [%s] memory ceiling %g GB", run_dir.name, label, mem_limit)
                 fh.write("-" * 72 + "\n")
                 fh.flush()
-                rc, stall = self._supervise(cmd, env, fh, log_path,
+                rc, stall = self._supervise(run_cmd, env, fh, log_path,
                                             run_dir.name, label, key)
+            # The driver carries on after a killed well, so the job can still
+            # end "done". Say so, or the missing well is a mystery later.
+            mem_note = None
+            killed = memguard.count_killed(log_path) if mem_limit is not None else 0
+            if killed:
+                mem_note = (f"{killed} well(s) were stopped, most likely for reaching the "
+                            f"{mem_limit:g} GB memory ceiling; the other wells were not affected")
+                LOG.warning("%s [%s]: %s", run_dir.name, label, mem_note)
             # Copy staged results back *before* the run is marked finished.
             # A finished run is what triggers its report, and marking it done
             # first let a report be built from a half-copied folder.
@@ -2161,7 +2201,7 @@ class Watcher:
                 completed_at=_now(),
                 returncode=rc,
                 error=verdict if verdict and not ok else None,
-                detail=verdict if verdict and ok else None,
+                detail=("; ".join(x for x in (verdict, mem_note) if x) or None) if ok else None,
                 duration_s=round(time.time() - started, 1),
             )
             (LOG.info if ok else LOG.error)(

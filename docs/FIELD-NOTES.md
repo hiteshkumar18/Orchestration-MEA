@@ -307,6 +307,38 @@ external route: `set_global_job_kwargs()` is per-process and not persisted.
 Estimated gain if it were done: Phase 3 from ~21 to ~5 min, so ~56 → ~40 min per
 well.
 
+### One noisy well can use all the RAM — now capped
+
+On 2026-10-07 the server died of an out-of-memory failure. In 260903, well
+`M07301/000097/well000` detected 725 million spikes, and loading them for
+network-burst analysis used all 63 GB while 261003 ran beside it. The service
+was started with `OOMPolicy=stop`, so the kernel killing one process stopped
+the server and both jobs.
+
+Two things now stand in the way:
+
+* Start the server with **`OOMPolicy=continue`**
+  (`systemd-run --user --unit=mea-ui -p OOMPolicy=continue ./run.sh`), so a
+  killed process is only that process.
+* Each Network job runs under a **memory ceiling** (`memguard.py`). The spike
+  count is only known inside the per-well routine, which is not ours to change,
+  so the limit is applied from outside: the driver is started in its own
+  systemd scope with `MemoryMax`. At the ceiling the kernel ends the largest
+  process in that scope, which is the well using the memory. The driver logs
+  `Exit Code: -9` for it and moves to the next well. The job ends "done" with a
+  note saying how many wells were stopped.
+
+`memory_limit_gb` in `job.json` sets it: `0` (default) is automatic — RAM minus
+8 GB, shared between the Network jobs allowed at once, so 27.5 GB each here with
+two at a time. A positive number is used as given; a negative one turns it off.
+Measured on 2026-10-12 over three real dates: the whole job peaked at 9 to 18 GB,
+and the largest single well process at 18 GB (260919). The scope is bound to the
+server's service, so stopping the server still stops its jobs. Without
+`systemd-run --user` the job runs with no ceiling and a warning is logged once.
+
+The ceiling counts the file cache the job fills as well as its own memory, but
+cache is given back before anything is killed.
+
 ### Other open items
 
 * **OneDrive delivery** — discussed, not built. The architectural point: push
