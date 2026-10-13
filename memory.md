@@ -32,6 +32,16 @@ The users are non-technical lab members.
 
 ## Branches
 
+| Branch | Head | State |
+|---|---|---|
+| `main` | `fdfba83` | Holds everything. Work from here. |
+| `feat/ai-reports` | `3c16281` | Merged (PRs #1, #2) |
+| `feat/ui-redesign` | `5523956` | Merged (PRs #3, #4) |
+| `feat/nwb-conversion` | `cd55259` | Merged through the dashboard branch (PR #5) |
+| `feat/dashboard` | `43563b4` | Merged (PR #5) |
+
+All five are on GitHub and there are no open pull requests. Cut a new branch
+from `main` for any new work.
 | Branch | Head | Merged into `main` |
 |---|---|---|
 | `main` | `fdfba83` | — |
@@ -42,10 +52,13 @@ The users are non-technical lab members.
 
 Worktrees on the lab machine:
 
-- `Orchestration-MEA` → `feat/ui-redesign` (the live server ran from here)
-- `Orchestration-MEA-nwb` → `feat/nwb-conversion`
-- `Orchestration-MEA-dash` → `feat/dashboard`
+- `Orchestration-MEA` → the main worktree; the live server runs from here
+- `Orchestration-MEA-nwb` → `feat/nwb-conversion` (merged, no longer needed)
+- `Orchestration-MEA-dash` → `feat/dashboard` (merged, no longer needed)
 
+`origin/claude/memory-md-tasks-7ays59` is a cloud session's correction to this
+file, written before PRs #4 and #5 were merged. This version replaces it, so
+that branch can be deleted.
 As of 2026-10-12, everything is merged into `main` (`fdfba83`) and there are
 no open pull requests. The lab worktrees can switch to `main`.
 On the merged `main`, all 51 stdlib unittests in `tests/python` pass (11 are
@@ -142,6 +155,8 @@ The machine was rebooted to fix a GPU "Driver/library version mismatch".
 
 On the lab machine (a cloud session cannot reach it — see below):
 
+1. Start `mea-ui` on port 8000 from `main` with `OOMPolicy=continue`, so that one
+   well running out of memory does not stop the server.
 1. Start `mea-ui` on port 8000 with `OOMPolicy=continue`. `main` now has both
    the UI redesign and the dashboard, so the natural choice is to run it from
    `main`. Confirm with the user first.
@@ -154,6 +169,16 @@ On the lab machine (a cloud session cannot reach it — see below):
 
 In the repository:
 
+5. A guard against the 260903 failure. Not designed yet. The spike count is only
+   known inside MEA-Analysis's per-well routine, which must not be changed, so
+   the guard belongs in the orchestrator: for example a per-well memory cap
+   through a cgroup or `systemd-run`. It has to be tested on the lab machine.
+6. DANDI upload: the subject and lab metadata must come from the user.
+7. Housekeeping: delete `origin/claude/memory-md-tasks-7ays59`, and remove the
+   two merged worktrees once nothing in them is needed.
+
+Finished since the last update: every feature branch is merged into `main`
+(PRs #1 to #5, the last on 2026-10-12).
 5. ~~Open pull requests and merge towards `main`.~~ Done 2026-10-12 (PRs #1–#5).
 6. A guard against the 260903 failure — for example a spike-count ceiling before
    network-burst analysis — has been discussed as a need but not designed or built.
@@ -165,6 +190,11 @@ A cloud session works from a clone of the GitHub repository. It has no access to
 the NAS recordings, the output volume, the SSD scratch, MEA-Analysis, the GPU or
 the live server.
 
+- It can do code, tests and docs: `npm test` in `tests/` and the stdlib unittests
+  in `tests/python` need none of the lab data.
+- It cannot do items 1 to 4, test the guard in item 5, or make any run on real
+  recordings. Those need a session on `benshalom-labtower1`.
+- It only sees branches that are pushed. `main` on GitHub has everything.
 - It can do items 5 to 7 that are code, tests and docs: `npm test` in `tests/`
   and the stdlib unittests in `tests/python` need none of the lab data.
 - It cannot do items 1 to 4, or any run on real recordings. Those need a session

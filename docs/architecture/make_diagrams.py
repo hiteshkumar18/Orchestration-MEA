@@ -6,8 +6,10 @@ Generate the pipeline architecture diagrams (SVG) in this folder.
     # PNGs: rendered from the SVGs with headless Chrome (see the bottom of this file)
 
 Two layers:
-  architecture-overview.svg  stages and data flow, with / without spike sorting
+  architecture-overview.svg  stages and data flow, with / without spike sorting,
+                             the optional NWB route and the dashboard
   architecture-detail.svg    components, files, phases, hardware and storage
+  architecture-dataflow.svg  the same flow at a glance, no explanations
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ C = {
     "sort": ("#fff7ed", "#ea580c"),       # with spike sorting (GPU)
     "nosort": ("#ecfdf5", "#059669"),     # without spike sorting (default)
     "scan": ("#f5f3ff", "#7c3aed"),       # activity scan
+    "nwb": ("#ecfeff", "#0891b2"),        # NWB conversion (optional)
     "ai": ("#fdf2f8", "#db2777"),         # AI report
     "hw": ("#fefce8", "#ca8a04"),         # hardware
 }
@@ -37,18 +40,33 @@ class Svg:
     def __init__(self, w: int, h: int):
         self.w, self.h, self.parts = w, h, []
         self.warnings: list[str] = []
+        self.dy = 0  # added to every y: lets a whole section be moved down
+
+    def _shifted(self, draw):
+        """Run `draw` with the offset switched off (its y values are already moved)."""
+        dy, self.dy = self.dy, 0
+        try:
+            draw()
+        finally:
+            self.dy = dy
 
     def add(self, s: str) -> None:
         self.parts.append(s)
 
     def text(self, x, y, s, size=13, weight=400, color=None, anchor="start", mono=False, italic=False):
         style = ' font-style="italic"' if italic else ""
+        y += self.dy
         self.add(f'<text xml:space="preserve" x="{x}" y="{y}" font-family="{MONO if mono else FONT}" font-size="{size}" '
                  f'font-weight="{weight}" fill="{color or C["ink"]}" text-anchor="{anchor}"'
                  f'{style}>{html.escape(s)}</text>')
 
     def box(self, x, y, w, h, title, lines=(), role="orch", title_size=15, line_size=12.5,
             dashed=False, sub=None, rx=10, mono_lines=False):
+        y += self.dy
+        self._shifted(lambda: self._box(x, y, w, h, title, lines, role, title_size, line_size,
+                                        dashed, sub, rx, mono_lines))
+
+    def _box(self, x, y, w, h, title, lines, role, title_size, line_size, dashed, sub, rx, mono_lines):
         fill, stroke = C[role]
         dash = ' stroke-dasharray="6 4"' if dashed else ""
         self.add(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}" fill="{fill}" '
@@ -75,6 +93,10 @@ class Svg:
             self.warnings.append(f"possibly too wide ({len(s) * size * k:.0f}>{width}): {s!r}")
 
     def container(self, x, y, w, h, label, role="orch", sub=None):
+        y += self.dy
+        self._shifted(lambda: self._container(x, y, w, h, label, role, sub))
+
+    def _container(self, x, y, w, h, label, role, sub):
         fill, stroke = C[role]
         self.add(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="14" fill="none" '
                  f'stroke="{stroke}" stroke-width="1.4" stroke-dasharray="7 5"/>')
@@ -86,7 +108,7 @@ class Svg:
 
     def arrow(self, pts, color=None, label=None, lx=None, ly=None, dashed=False, width=1.8):
         color = color or C["line"]
-        d = "M " + " L ".join(f"{x} {y}" for x, y in pts)
+        d = "M " + " L ".join(f"{x} {y + self.dy}" for x, y in pts)
         mid = {"#9ca3af": "a-grey"}.get(color, "a-" + color.strip("#"))
         dash = ' stroke-dasharray="5 4"' if dashed else ""
         self.add(f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{width}"{dash} '
@@ -123,7 +145,8 @@ def overview() -> Svg:
     s = Svg(1820, 1040)
     s.text(40, 46, "MEA analysis pipeline — end to end", size=26, weight=700)
     s.text(40, 72, "From the MaxWell recording to an AI-written report. Network analysis runs with or "
-                   "without spike sorting; without is the default.", size=14, color=C["ink2"])
+                   "without spike sorting (without is the default), optionally from NWB files. "
+                   "A dashboard keeps every run.", size=14, color=C["ink2"])
 
     # Stage headers
     for x, w, t in ((40, 250, "1  Acquire"), (330, 270, "2  Detect & dispatch"), (640, 650, "3  Analyse"),
@@ -140,7 +163,7 @@ def overview() -> Svg:
     s.arrow([(165, 262), (165, 316)], color=C["store"][1], label="copied", lx=200, ly=294)
 
     # 2 Detect & dispatch
-    s.container(330, 150, 270, 500, "Orchestration-MEA", role="orch")
+    s.container(330, 150, 270, 580, "Orchestration-MEA", role="orch")
     s.box(348, 178, 234, 140, "Watcher", role="orch",
           lines=["Finds finished folders:", "• a recording is present", "• MaxWell 'finished' marker",
                  "• no file changes for 10 min"])
@@ -152,26 +175,31 @@ def overview() -> Svg:
     # Watcher and Queue are two ways in; both feed the dispatcher.
     s.arrow([(570, 318), (570, 448)], color=C["orch"][1], label="auto", lx=591, ly=388)
     s.arrow([(465, 426), (465, 448)], color=C["orch"][1], label="manual", lx=500, ly=442)
-    s.text(465, 610, "Web UI: status, logs, per-well progress,", size=11.5, color=C["ink2"], anchor="middle")
-    s.text(465, 626, "requirements for the AI report", size=11.5, color=C["ink2"], anchor="middle")
+    s.box(348, 598, 234, 116, "Dashboard (web UI)", role="orch",
+          lines=["Every run kept in a history", "Run page: wells, NWB steps,", "  time left, outputs, settings",
+                 "Health: RAM, GPU, disks"])
 
     # 3 Analyse — Network
     s.container(640, 150, 650, 560, "Network analysis — MEA-Analysis pipeline", role="mea",
                 sub="one subprocess per well")
-    s.box(660, 182, 610, 80, "Phase 1 · Preprocessing (CPU)", role="mea",
-          lines=["Read data.raw.h5 → band-pass filter + common reference →",
+    s.box(660, 182, 610, 78, "Optional · Convert to NWB first (Orchestration-MEA)", role="nwb",
+          lines=["One NWB file per well on the output disk, checked against the source; reused next time.",
+                 "Off by default. The analysis then reads the NWB; results land in the same place."])
+    s.arrow([(965, 260), (965, 282)], color=C["nwb"][1])
+    s.box(660, 284, 610, 80, "Phase 1 · Preprocessing (CPU)", role="mea",
+          lines=["Read data.raw.h5 (or the well's NWB) → band-pass filter + common reference →",
                  "uncompressed scratch copy of the well (deleted after)"])
-    s.box(660, 300, 296, 330, "A · With spike sorting", role="sort", sub="opt-in — needs the GPU",
+    s.box(660, 398, 296, 256, "A · With spike sorting", role="sort", sub="opt-in — needs the GPU",
           lines=["Kilosort4 spike sorting (GPU)", "   ↓", "Merge split units (optional)", "   ↓",
                  "Analyzer: waveforms, quality", "metrics (single CPU core)", "   ↓",
                  "Curation + network bursts + figures", "", "Units = putative neurons", "≈ 1 hour per well"])
-    s.box(974, 300, 296, 330, "B · Without spike sorting", role="nosort", sub="default — no GPU",
+    s.box(974, 398, 296, 256, "B · Without spike sorting", role="nosort", sub="default — no GPU",
           lines=["Threshold spike detection (CPU),", "per channel, 5 × noise level", "   ↓",
                  "Network bursts + raster figures", "", "", "", "", "",
                  "Units = electrode channels", "≈ 1–3 minutes per well"])
-    s.arrow([(808, 262), (808, 298)], color=C["sort"][1])
-    s.arrow([(1122, 262), (1122, 298)], color=C["nosort"][1])
-    s.text(965, 286, "--skip-spikesorting decides the path", size=11.5, color=C["ink2"], anchor="middle",
+    s.arrow([(808, 364), (808, 396)], color=C["sort"][1])
+    s.arrow([(1122, 364), (1122, 396)], color=C["nosort"][1])
+    s.text(965, 385, "--skip-spikesorting decides the path", size=11.5, color=C["ink2"], anchor="middle",
            italic=True)
 
     # 3 Analyse — Activity scan
@@ -182,7 +210,9 @@ def overview() -> Svg:
                  "   (compared with the same chip's Network recording)"])
 
     # dispatcher → analyses
-    s.arrow([(582, 500), (620, 500), (620, 222), (658, 222)], color=C["orch"][1])
+    s.arrow([(582, 500), (620, 500), (620, 324), (658, 324)], color=C["orch"][1])
+    # ... or through the NWB conversion first, when that setting is on
+    s.arrow([(620, 324), (620, 222), (658, 222)], color=C["nwb"][1], dashed=True)
     s.arrow([(582, 540), (620, 540), (620, 815), (638, 815)], color=C["orch"][1])
     # NAS → analyses (data read)
     s.arrow([(165, 540), (165, 940), (965, 940), (965, 892)], color=C["store"][1], dashed=True,
@@ -192,14 +222,17 @@ def overview() -> Svg:
     s.box(1330, 182, 210, 270, "Network results", role="store", sub="per well",
           lines=["network_results.json", "unit_stats.csv", "spike_times.npy", "raster plots",
                  "checkpoints", "", "+ with sorting:", "quality metrics,", "waveforms"])
-    s.box(1330, 486, 210, 104, "Per-well status", role="orch",
+    s.box(1330, 478, 210, 92, "Per-well status", role="orch",
           lines=["Read from checkpoints;", "shown live in the UI"])
+    s.box(1330, 590, 210, 104, "NWB files", role="nwb", sub="optional, per well",
+          lines=["<project>/NWB/…/", "wellNNN.nwb"], mono_lines=True)
+    s.arrow([(1270, 222), (1280, 222), (1280, 640), (1328, 640)], color=C["nwb"][1], dashed=True)
     s.box(1330, 740, 210, 150, "Scan results", role="store", sub="per chip",
           lines=["summary.json", "per_electrode.csv", "maps + QC figures"])
-    s.arrow([(808, 630), (808, 680), (1312, 680), (1312, 300), (1328, 300)], color=C["sort"][1])
-    s.arrow([(1122, 630), (1122, 660), (1300, 660), (1300, 340), (1328, 340)], color=C["nosort"][1])
+    s.arrow([(808, 654), (808, 696), (1312, 696), (1312, 300), (1328, 300)], color=C["sort"][1])
+    s.arrow([(1122, 654), (1122, 678), (1300, 678), (1300, 340), (1328, 340)], color=C["nosort"][1])
     s.arrow([(1290, 815), (1328, 815)], color=C["scan"][1])
-    s.arrow([(1435, 452), (1435, 484)], color=C["orch"][1])
+    s.arrow([(1435, 452), (1435, 476)], color=C["orch"][1])
     s.text(1435, 920, "spike_detection/<project>/", size=12, color=C["ink2"], anchor="middle", mono=True)
     s.text(1435, 938, "on the output disk", size=11.5, color=C["ink2"], anchor="middle")
 
@@ -218,7 +251,7 @@ def overview() -> Svg:
 
     legend(s, 40, 1000, [("store", "data / storage"), ("orch", "Orchestration-MEA"), ("mea", "MEA-Analysis"),
                          ("sort", "with spike sorting"), ("nosort", "without spike sorting (default)"),
-                         ("scan", "activity scan"), ("ai", "AI report")])
+                         ("scan", "activity scan"), ("nwb", "NWB conversion (optional)"), ("ai", "AI report")])
     return s
 
 
@@ -226,7 +259,7 @@ def overview() -> Svg:
 # 2. Detail
 # --------------------------------------------------------------------------- #
 def detail() -> Svg:
-    s = Svg(1820, 1300)
+    s = Svg(1820, 1440)
     s.text(40, 46, "MEA analysis pipeline — components, files and hardware", size=26, weight=700)
     s.text(40, 72, "benshalom-labtower1. Orchestration-MEA drives MEA-Analysis as a subprocess and never "
                    "modifies it; raw data is never written to.", size=14, color=C["ink2"])
@@ -238,15 +271,17 @@ def detail() -> Svg:
     s.box(58, 280, 214, 72, "SSH tunnel", role="store", lines=["localhost:8000 → server"])
 
     # Orchestration-MEA server
-    s.container(330, 120, 1010, 560, "Orchestration-MEA  (tmux session 'mea', port 8000)", role="orch")
+    s.container(330, 120, 1010, 700, "Orchestration-MEA  (port 8000)", role="orch")
     s.box(350, 150, 300, 250, "api.py — FastAPI", role="orch",
           lines=["/api/status     jobs + counts", "/api/queue      queue folders", "/api/config     settings",
-                 "/api/runs/checkpoints", "/api/handoff    AI handoff", "/api/requirements",
-                 "/api/watcher/stop?cancel"], mono_lines=True)
+                 "/api/runs/checkpoints", "/api/history    every run + page",
+                 "/api/system     CPU RAM GPU disks", "/api/handoff    AI handoff", "/api/reports    built reports",
+                 "/api/requirements", "/api/watcher/stop?cancel"], mono_lines=True)
     s.box(670, 150, 330, 250, "watcher.py — scheduler", role="orch",
           lines=["• cached, depth-limited folder scan", "• completion: recording + marker +",
                  "  10 min without changes", "• state: watcher_state.json",
-                 "• slots: Network 2 · Activity 2", "• GPU check — sorting only",
+                 "• slots: Network 2 · Activity 2", "• NWB route when switched on",
+                 "• GPU check — sorting only",
                  "• watchdog: stop after 120 min", "  with no log output",
                  "• Stop & cancel kills whole", "  process groups"])
     s.box(1020, 150, 300, 250, "Local staging", role="hw", sub="scratch on the NVMe SSD",
@@ -259,20 +294,29 @@ def detail() -> Svg:
           lines=["Whole-array scan → maps, QC,", "bursts, synchrony; selection vs", "same-chip Network recording"])
     s.box(1020, 420, 300, 120, "handoff.py", role="ai",
           lines=["Writes AI_HANDOFF/<stamp>_<date>/", "PROMPT · skills.md ·", "REQUIREMENTS · MANIFEST"])
-    s.box(350, 560, 970, 100, "Config + rules", role="orch",
-          lines=["job.json: input folder, output folder, skip_spikesorting = true (default), staging, concurrency, "
-                 "AI requirements text",
+    s.box(350, 560, 300, 120, "nwb/ — NWB route (optional)", role="nwb",
+          lines=["convert_date.py: one .nwb per well,", "  validated; own .venv-nwb",
+                 "run_wells.py: each NWB through", "  the MEA-Analysis routine"])
+    s.box(670, 560, 330, 120, "history.py · rundetail.py", role="orch", sub="dashboard: runs",
+          lines=["Every run kept: run_history.sqlite", "Run page: wells, NWB steps, time",
+                 "left, outputs, settings, timeline"])
+    s.box(1020, 560, 300, 120, "monitor.py", role="orch", sub="dashboard: system health",
+          lines=["Sampled in the background:", "CPU, RAM, GPU, disks,", "analysis processes"])
+    s.box(350, 700, 970, 100, "Config + rules", role="orch",
+          lines=["job.json: input and output folders, skip_spikesorting = true (default), nwb_convert = false "
+                 "(default), staging, concurrency, AI requirements",
                  "Refuses any output / scratch / checkpoint folder inside the input folder — the raw data is read-only"])
     s.arrow([(272, 205), (348, 205)], color=C["orch"][1])
     s.arrow([(650, 275), (668, 275)], color=C["orch"][1])
     s.arrow([(1000, 275), (1018, 275)], color=C["hw"][1])
 
     # MEA-Analysis
+    s.dy = 140
     s.container(330, 720, 1010, 440, "MEA-Analysis  (separate repository, never modified)", role="mea")
     s.box(350, 750, 300, 100, "run_pipeline_driver.py", role="mea",
           lines=["Finds every recording × well", "in a date folder; one", "subprocess per well"])
     s.box(670, 750, 650, 100, "mea_analysis_routine.py — one well", role="mea",
-          lines=["Phase 1 · Preprocessing: read .h5 (MaxWell plugin) → filter + common reference →",
+          lines=["Phase 1 · Preprocessing: read .h5 (MaxWell plugin) or .nwb → filter + common reference →",
                  "float32 binary scratch copy; 16 CPU workers. Checkpoint saved after each stage."])
     s.box(670, 870, 318, 270, "A · With spike sorting", role="sort",
           lines=["Phase 2 · Kilosort4 — GPU", "Merge · UnitMatch (optional)", "Phase 3 · Analyzer — waveforms,",
@@ -291,12 +335,13 @@ def detail() -> Svg:
     s.arrow([(1160, 850), (1160, 868)], color=C["nosort"][1])
     s.arrow([(670, 1005), (652, 1005)], color=C["sort"][1])
     s.arrow([(1160, 1140), (1160, 1152), (500, 1152), (500, 1142)], color=C["nosort"][1])
+    s.dy = 0
     s.arrow([(835, 400), (835, 420)], color=C["orch"][1])
-    s.arrow([(690, 400), (690, 410), (340, 410), (340, 800), (348, 800)], color=C["orch"][1])
-    s.text(346, 700, "launches", size=11.5, color=C["ink2"], italic=True)
+    s.arrow([(690, 400), (690, 410), (340, 410), (340, 940), (348, 940)], color=C["orch"][1])
+    s.text(346, 842, "launches", size=11.5, color=C["ink2"], italic=True)
 
     # Storage + hardware
-    s.container(1380, 120, 400, 1040, "Storage and hardware", role="hw")
+    s.container(1380, 120, 400, 1180, "Storage and hardware", role="hw")
     s.box(1400, 150, 360, 150, "Lab NAS (CIFS)", role="store", sub="/mnt/benshalom-nas — read-only",
           lines=["Raw recordings: <project>/<date>/", "<chip>/{Network,ActivityScan}/", "<run>/data.raw.h5"])
     s.box(1400, 320, 360, 150, "NVMe SSD (Samsung 980 PRO)", role="hw", sub="system disk, ~450 GB free",
@@ -304,7 +349,12 @@ def detail() -> Svg:
     s.box(1400, 490, 360, 200, "Output disk (HDD, /mnt/Vol20tb2)", role="store",
           sub="hitesh_mea_analysis/spike_detection/",
           lines=["<project>/<date>/…/<well>/  results", "<project>/ActivityScan/   scans",
+                 "<project>/NWB/   one .nwb per well (optional)",
                  "<project>/orchestration_logs/", "<project>/AI_HANDOFF/     reports"], mono_lines=False)
+    s.box(1400, 710, 360, 120, "Work folder (.mea-watcher)", role="orch",
+          lines=["job.json — settings", "watcher_state.json — current jobs",
+                 "run_history.sqlite — every run, kept"])
+    s.dy = 140
     s.box(1400, 710, 360, 110, "GPU — RTX 5090, 32 GB", role="hw",
           lines=["Used only by Kilosort4 (path A)", "Idle in the default path"])
     s.box(1400, 840, 360, 110, "CPU — 32 cores, 62 GB RAM", role="hw",
@@ -312,15 +362,17 @@ def detail() -> Svg:
     s.box(1400, 970, 360, 170, "AI report", role="ai",
           lines=["Claude Code reads", "AI_HANDOFF/<stamp>_<date>/PROMPT.md", "→ report/report.html",
                  "   (Network tab + Activity tab)", "→ report/tables/*.csv"])
-    s.arrow([(1340, 470), (1398, 470), (1398, 1000)], color=C["ai"][1], dashed=True)
+    s.dy = 0
+    s.arrow([(1340, 470), (1398, 470), (1398, 1140)], color=C["ai"][1], dashed=True)
     s.arrow([(1398, 230), (1342, 230)], color=C["store"][1], dashed=True, label="read", lx=1370, ly=222)
     s.arrow([(1340, 300), (1398, 380)], color=C["hw"][1], dashed=True)
 
-    s.text(40, 1220, "Data rules: the raw-data folders are never written; other users' folders and processes are "
+    s.text(40, 1360, "Data rules: the raw-data folders are never written; other users' folders and processes are "
                      "never touched; SSD scratch exists only while a job runs.", size=13, color=C["ink2"])
-    legend(s, 40, 1260, [("store", "data / storage"), ("orch", "Orchestration-MEA"), ("mea", "MEA-Analysis"),
+    legend(s, 40, 1400, [("store", "data / storage"), ("orch", "Orchestration-MEA"), ("mea", "MEA-Analysis"),
                          ("sort", "with spike sorting"), ("nosort", "without spike sorting (default)"),
-                         ("scan", "activity scan"), ("ai", "AI report"), ("hw", "hardware / scratch")])
+                         ("scan", "activity scan"), ("nwb", "NWB (optional)"), ("ai", "AI report"),
+                         ("hw", "hardware / scratch")])
     return s
 
 
@@ -392,16 +444,18 @@ def dataflow() -> Svg:
     s.add('<rect x="748" y="410" width="512" height="452" rx="14" fill="#fbfcfd" stroke="#d4d8de"/>')
     s.add(f'<text x="768" y="438" font-family="{FONT}" font-size="13.5" font-weight="700" fill="#2b5c8a" '
           f'letter-spacing="2">NETWORK ANALYSIS</text>')
-    fbox(s, 770, 456, 468, 78, "Preprocessing", ["filter · scratch on SSD"], "lab")
-    fbox(s, 770, 572, 226, 168, "With spike sort", ["Kilosort4", "analyzer · curation"], "lab",
+    fbox(s, 770, 452, 468, 70, "Convert to NWB", ["optional · one file per well"])
+    s.arrow([(1004, 522), (1004, 538)], color=G)
+    fbox(s, 770, 540, 468, 72, "Preprocessing", ["filter · scratch on SSD"], "lab")
+    fbox(s, 770, 636, 226, 114, "With spike sort", ["Kilosort4", "analyzer · curation"], "lab",
          pill=("GPU", "#ea580c"))
-    fbox(s, 1012, 572, 226, 168, "Without spike sort", ["threshold detection"], "lab",
+    fbox(s, 1012, 636, 226, 114, "Without spike sort", ["threshold detection"], "lab",
          pill=("CPU · default", "#059669"))
     fbox(s, 770, 772, 468, 72, "Network bursts", ["per well"], "lab")
-    s.arrow([(883, 534), (883, 570)], color="#ea580c")
-    s.arrow([(1125, 534), (1125, 570)], color="#059669")
-    s.arrow([(883, 740), (883, 770)], color="#ea580c")
-    s.arrow([(1125, 740), (1125, 770)], color="#059669")
+    s.arrow([(883, 612), (883, 634)], color="#ea580c")
+    s.arrow([(1125, 612), (1125, 634)], color="#059669")
+    s.arrow([(883, 750), (883, 770)], color="#ea580c")
+    s.arrow([(1125, 750), (1125, 770)], color="#059669")
 
     # Activity scan
     s.add('<rect x="1280" y="410" width="272" height="452" rx="14" fill="#fbfcfd" stroke="#d4d8de"/>')
@@ -414,10 +468,10 @@ def dataflow() -> Svg:
     s.arrow([(1416, 534), (1416, 570)], color=G)
     s.arrow([(1416, 740), (1416, 770)], color=G)
 
-    s.arrow([(1004, 380), (1004, 454)], color=G)
+    s.arrow([(1004, 380), (1004, 450)], color=G)
     s.arrow([(1490, 380), (1490, 454)], color=G)
 
-    fbox(s, 750, 920, 800, 80, "Control UI", ["browser · SSH tunnel"])
+    fbox(s, 750, 920, 800, 80, "Control UI + dashboard", ["browser · run history · system health"])
     # NAS → watcher (read only); UI controls the tower
     s.arrow([(656, 275), (700, 275), (700, 225), (748, 225)], color=G, label="read only", lx=690, ly=208)
     s.arrow([(750, 960), (736, 960), (736, 262), (748, 262)], color=G)
@@ -425,6 +479,8 @@ def dataflow() -> Svg:
           f'transform="rotate(-90 728 640)">controls</text>')
 
     zone(s, 1620, 130, 340, 700, "OUTPUTS", "analysis disk")
+    fbox(s, 1648, 290, 284, 110, "NWB files", ["optional · one per well"])
+    s.arrow([(1238, 487), (1270, 487), (1270, 396), (1610, 396), (1610, 345), (1646, 345)], color=G, dashed=True)
     fbox(s, 1648, 470, 284, 130, "Results", ["<project>/<date>/", "<chip>/…/<well>/"], "plain")
     fbox(s, 1648, 650, 284, 110, "AI handoff", ["skills.md · requirements"])
     s.arrow([(1004, 844), (1004, 880), (1600, 880), (1600, 560), (1646, 560)], color=G)
