@@ -2,11 +2,11 @@
 
 Two diagrams describe reproducible MEA analysis from individual recordings and wells to chip, trial T and overall-line results. They use the same diagram style as the [existing pipeline architecture](../../architecture/architecture-overview.svg).
 
-These are design documents. They do not enable jobs, change scientific defaults or establish that the complete study workflow has been implemented.
+These are design documents. A separate local P01 Python metadata intake has been tested; its raw/authority/Nextflow integration is still pending. They do not enable jobs, change scientific defaults or establish that the complete study workflow has been implemented.
 
-## NWB before analysis, target 0.2
+## Network NWB and raw ActivityScan, target 0.3
 
-Updated 14 October 2026. Raw sources and study metadata are registered, converted to NWB and validated before signal analysis. Each result retains its recording/well identity, NWB identifier and processing version through chip, trial and line summaries.
+Updated 14 October 2026. Both assays enter the shared registry. Network is converted to NWB and validated early; ActivityScan keeps its original HDF5 reader with raw readiness/routing/exposure checks. Each result retains its source identity/hash and processing version through chip, trial and line summaries.
 
 [Editable SVG](mea-line-workflow-nwb-first.svg) · [PNG preview](mea-line-workflow-nwb-first.png)
 
@@ -20,11 +20,11 @@ Updated 14 October 2026. Raw sources and study metadata are registered, converte
 - Dashed teal boxes and the dashed ActivityScan box identify study controls/adapters to implement.
 - Existing algorithms can be reused, but the full diagram is not a deployment or validation claim.
 
-The intended sequence is registration → NWB conversion and validation → approved processing plan → measurements and QC → canonical result selection → frozen inclusion table → chip reports → trial T reports → overall-line statistics and report → accepted archive.
+The intended sequence is registration → Network NWB conversion/validation or raw ActivityScan checks → approved processing plan → measurements and QC → canonical result selection → frozen inclusion table → chip reports → trial T reports → overall-line statistics and report → accepted archive.
 
 ### Current support and remaining work
 
-The current [Network NWB route](../../NWB.md) converts per-well Network recordings and analyzes the resulting NWB files when enabled. ActivityScan still reads its original on-chip files. The target requires an ActivityScan NWB converter/reader preserving scan blocks, routed electrodes, timestamps and per-electrode exposure. Sequential scan blocks must not be treated as simultaneous whole-array measurements.
+The current [Network NWB route](../../NWB.md) converts per-well Network recordings and analyzes the resulting NWB files when enabled. ActivityScan still reads its original on-chip files. ActivityScan stays on that raw path. Its adapter must preserve scan blocks, routed electrodes, timestamps and per-electrode exposure; no ActivityScan NWB converter or reader is planned. Sequential scan blocks must not be treated as simultaneous whole-array measurements.
 
 NWB validation must cover schema/best-practice findings and separate comparisons with the raw signal, including scaling, timing, sample/channel counts and electrode mapping. Detection-only channel events retain their electrode meaning; sorted units can be exported as NWB Units.
 

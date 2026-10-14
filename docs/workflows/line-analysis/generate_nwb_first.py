@@ -17,52 +17,54 @@ Svg = style.Svg
 Svg._markers = set()
 s = Svg(2240, 1980)
 s.text(40, 48, 'MEA line analysis workflow', size=31, weight=700)
-s.text(40, 81, 'NWB before signal analysis • reusable Nextflow blocks • well and chip → trial (T) → overall line', size=18, color=style.C['ink2'])
-s.text(2200, 48, 'Target 0.2 · 14 October 2026', size=16, anchor='end', color=style.C['ink2'])
+s.text(40, 81, 'Network NWB + raw ActivityScan • reusable Nextflow blocks • well and chip → trial (T) → overall line', size=18, color=style.C['ink2'])
+s.text(2200, 48, 'Target 0.3 · 14 October 2026', size=16, anchor='end', color=style.C['ink2'])
 
 def box(x,y,w,h,title,lines,role='orch',dashed=False):
     s.box(x,y,w,h,title,lines,role=role,title_size=18,line_size=16,dashed=dashed)
 
 s.add('<g id="nwb-intake">')
-s.text(40,133,'0  Register, convert and validate before analysis',size=19,weight=700,color=style.C['ink2'])
+s.text(40,133,'0  Register both assays; convert only Network to NWB',size=19,weight=700,color=style.C['ink2'])
 box(40,180,330,190,'Original source archive',[
     'MaxWell Network + ActivityScan',
     'Assay logs and plate / genotype map',
     'Keep source HDF5 unchanged',
     'Record source identity and checksum',
     'Existing NWB can enter validation'],role='store')
-box(410,180,330,190,'P01  Recording registry',[
+box(410,180,330,190,'P01  Registry  local pilot',[
     'Line / T / chip / well / raw run',
     'Recording time, DIV and culture',
     'Known metadata or explicit unknown',
     'Keep conflicts and unfinished files',
-    'Link source → NWB identifier'],role='study',dashed=True)
-box(780,180,590,190,'P02  Convert early to NWB',[
-    'One immutable file per well / recording / assay',
+    'Metadata pilot tested; raw pending'],role='study')
+box(780,180,590,190,'P02  Network → NWB only',[
+    'Network: immutable NWB per well / recording / segment',
     'Network conversion already exists as an optional route',
-    'ActivityScan conversion and reader still need development',
-    'Preserve scan blocks, routing, timestamps and events',
+    'ActivityScan remains on raw HDF5; bypass P02 / P03',
+    'Register raw scan hashes, blocks, routing and exposure',
     'Populate verified biology metadata; pin converter version'],role='nwb')
 box(1400,180,330,190,'P03  Validate NWB',[
     'PyNWB schema + NWB Inspector',
     'Compare traces, scaling and timing',
-    'Check channels and scan coverage',
+    'Check Network channels and segments',
     'Save findings, including warnings',
     'Hold failed conversion / validation'],role='study',dashed=True)
-box(1770,180,430,190,'Validated NWB dataset',[
-    'Acquisition signals and event data',
-    'Culture, chip and recording metadata',
+box(1770,180,430,190,'Registered assay inputs',[
+    'Network: validated acquisition NWB',
+    'ActivityScan: original HDF5 + raw checks',
     'Source / converter / schema versions',
-    'NWB identifier and file checksum',
+    'NWB / raw identifier and checksum',
     'Derived tables always link back here'],role='nwb')
 for left,right in [(370,408),(740,778),(1370,1398),(1730,1768)]:
     s.arrow([(left,275),(right,275)],color=style.C['nwb'][1])
-s.arrow([(1985,370),(1985,395),(24,395),(24,675),(38,675)],color=style.C['nwb'][1])
+s.arrow([(1985,370),(1985,405),(24,405),(24,675),(38,675)],color=style.C['nwb'][1])
+s.arrow([(575,370),(575,390),(1900,390),(1900,372)],color=style.C['scan'][1])
+s.text(1090,383,'Raw ActivityScan: readiness / routing / exposure checks; no NWB conversion',size=14,anchor='middle',color=style.C['scan'][1])
 s.add('</g>')
 s.add('<g id="execution-control">')
 box(40,420,2160,82,'Dashboard and proposed Nextflow execution',[
     'Browser workspace submits saved plans, displays evidence and records analyst decisions. Nextflow runs computational blocks on the tower.',
-    'P labels name the proposed blocks below. Nextflow integration, ActivityScan NWB support and study gates are not deployed; existing algorithms are reused.'],role='orch')
+    'P labels name the proposed blocks below. Local P01 metadata intake is tested. Nextflow integration and study gates remain to build; existing algorithms are reused.'],role='orch')
 s.add('</g>')
 s.dy = 400
 s.add('<g id="analysis-and-study-gates">')
@@ -71,12 +73,12 @@ for x, w, title in [(40,330,'1  Data and remote access'),(410,330,'2  Register a
     s.text(x, 133, title, size=19, weight=700, color=style.C['ink2'])
     s.add(f'<line x1="{x}" y1="{145+s.dy}" x2="{x+w}" y2="{145+s.dy}" stroke="#e5e7eb" stroke-width="2"/>')
 
-box(40,180,330,190,'Canonical NWB registry',[
-    'Validated NWB from the intake above',
+box(40,180,330,190,'Shared recording registry',[
+    'Network NWB + registered raw scans',
     'Authoritative genotype / plate map',
     'Line, trial, chip, well, culture',
     'Original recording date and DIV',
-    'Every result records its NWB input'],role='nwb')
+    'Every result links its source hash'],role='nwb')
 box(40,435,330,185,'Analyst browser access',[
     'Mac on lab network; VPN off site',
     'SSH tunnel → personal MEA Bench',
@@ -86,7 +88,7 @@ box(40,435,330,185,'Analyst browser access',[
 box(40,715,330,150,'Gate 0  Connection check',[
     'Verify user, NAS and free space',
     'Record code + runtime versions',
-    'Confirm NWB access and validation',
+    'Check Network NWB / raw scan access',
     'No queue until checks pass'],role='review')
 
 box(410,180,330,205,'Gate 1  Verify identity',[
@@ -127,11 +129,11 @@ box(1090,355,258,145,'P06B / P07  Units',[
 box(802,545,546,80,'P08  Network burst analysis',[
     'Current Hitesh branch calls the parameter-free detector',
     'Spikes, rasters and burst metrics; log actual mode'],role='mea')
-box(780,715,590,150,'P09  ActivityScan from NWB  CPU',[
-    'Existing metrics; NWB reader still to implement',
+box(780,715,590,150,'P09  Raw ActivityScan  CPU',[
+    'Reuse existing HDF5 reader and metrics',
     'Keep per-channel exposure and block routing',
     'Whole-array activity maps; within-block comparisons',
-    'Save NWB-linked summaries, tables and QC figures'],role='scan',dashed=True)
+    'Save raw-linked summaries, tables and QC figures'],role='scan',dashed=True)
 
 box(1400,180,330,205,'Gate 3  Per-well validation',[
     'P10  Expected vs completed wells',
@@ -141,7 +143,7 @@ box(1400,180,330,205,'Gate 3  Per-well validation',[
     'Keep failures and no-event flags',
     'Choose accepted / hold / rerun'],role='review')
 box(1400,435,330,230,'Gate 4  Deduplicate results',[
-    'P11  Same NWB + measurement key',
+    'P11  Same source + measurement key',
     'Select one accepted code version',
     'Log duplicate → retained result',
     'Keep genuine repeat recordings',
@@ -154,23 +156,23 @@ box(1400,715,330,150,'P12  Freeze included data',[
     'Original DIV + grouped DIV',
     'Link every row to its evidence'],role='study',dashed=True)
 
-box(1770,180,430,205,'Outputs with NWB provenance',[
-    'NWB-linked JSON, spikes and raster figures',
+box(1770,180,430,205,'Outputs with assay provenance',[
+    'Source-linked JSON, spikes and raster figures',
     'Processing mode, logs and checkpoints',
     'Sorted mode: unit QC and rejection log',
     'ActivityScan summary and electrode table',
-    'Export derived NWB; add Units for sorted data',
+    'Network: derived NWB and sorted Units',
     'Completed processing ≠ scientific acceptance'],role='orch')
 box(1770,435,430,230,'Validated measurement table',[
     'One row per well / recording / metric',
     'Trial, chip, culture and group identifiers',
-    'NWB ID / checksum, assay and code version',
+    'NWB / raw checksum, assay and code version',
     'Measured duration, unit and denominator',
     'Zero events vs undefined metric vs missing',
     'Criterion version + inclusion decision',
     'Counts reconciled before aggregation'],role='study',dashed=True)
 box(1770,715,430,150,'Accepted analysis package',[
-    'NWB list + selected result versions',
+    'NWB / raw list + result versions',
     'Settings, exclusions and duplicate ledger',
     'Validation figures and stage decisions',
     'Only this frozen package goes forward'],role='study',dashed=True)
@@ -197,7 +199,7 @@ s.arrow([(1730,282),(1768,282)],color=style.C['orch'][1])
 s.arrow([(1730,550),(1768,550)],color=style.C['review'][1])
 
 box(40,950,2160,105,'Every step writes evidence and a decision',[
-    'NWB input and checksum • code / environment / parameters • measured QC • criterion and scope • decision and reason • analyst and time • linked outputs',
+    'NWB or raw input checksum • code / environment / parameters • measured QC • criterion and scope • decision and reason • analyst and time • linked outputs',
     'Human approvals become versioned inputs between workflow phases. Nextflow validates them; the reviewer makes the decision. Study controls still need implementation.'],role='study',dashed=True)
 s.arrow([(1985,865),(1985,915),(370,915),(370,948)],color=style.C['study'][1])
 s.arrow([(370,1055),(370,1168)],color=style.C['study'][1])
@@ -238,9 +240,9 @@ s.arrow([(1090,1456),(1090,1498),(1458,1498),(1458,1235),(1500,1235)],color=styl
 s.add('</g>')
 s.dy = 0
 style.legend(s,40,1930,[('orch','Dashboard / execution'),('nwb','Canonical NWB'),('mea','Network algorithms'),('scan','ActivityScan'),('review','Human review'),('study','Study layer to build')])
-s.text(40,1960,'Target workflow, not a deployment claim. Scientific criteria remain unapproved. Varda’s existing Nextflow blocks inform the design; NWB comes before analysis.',size=15,color=style.C['ink2'])
+s.text(40,1960,'Target workflow, not a deployment claim. Scientific criteria remain unapproved. Varda’s existing Nextflow blocks inform the design; Network uses NWB; ActivityScan stays raw. Local P01 is tested.',size=15,color=style.C['ink2'])
 svg = s.render().replace('width="2240" height="1980"', 'width="790.2222mm" height="698.5mm"', 1)
-svg = svg.replace('<defs>', '<title>MEA line analysis with early NWB and Nextflow blocks</title><defs>', 1)
+svg = svg.replace('<defs>', '<title>MEA line analysis: Network NWB, raw ActivityScan and Nextflow blocks</title><defs>', 1)
 (OUT/'mea-line-workflow-nwb-first.svg').write_text(svg)
 (OUT/'mea-line-workflow-nwb-first.layout.json').write_text(json.dumps({'warnings':s.warnings,'canvas':[s.w,s.h],'style_source':'docs/architecture/make_diagrams.py'},indent=2)+'\n')
 print(json.dumps({'diagram':str(OUT/'mea-line-workflow-nwb-first.svg'),'warnings':s.warnings},indent=2))
