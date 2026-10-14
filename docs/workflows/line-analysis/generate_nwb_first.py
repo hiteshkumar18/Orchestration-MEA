@@ -18,7 +18,7 @@ Svg._markers = set()
 s = Svg(2240, 1980)
 s.text(40, 48, 'MEA line analysis workflow', size=31, weight=700)
 s.text(40, 81, 'Network NWB + raw ActivityScan • reusable Nextflow blocks • well and chip → trial (T) → overall line', size=18, color=style.C['ink2'])
-s.text(2200, 48, 'Target 0.4 · 14 October 2026', size=16, anchor='end', color=style.C['ink2'])
+s.text(2200, 48, 'Target 0.5 · 14 October 2026', size=16, anchor='end', color=style.C['ink2'])
 
 def box(x,y,w,h,title,lines,role='orch',dashed=False):
     s.box(x,y,w,h,title,lines,role=role,title_size=18,line_size=16,dashed=dashed)
@@ -64,7 +64,7 @@ s.add('</g>')
 s.add('<g id="execution-control">')
 box(40,420,2160,82,'Dashboard and proposed Nextflow execution',[
     'Browser workspace submits saved plans, displays evidence and records analyst decisions. Nextflow runs computational blocks on the tower.',
-    'P labels name the proposed blocks below. New BenShalomLab/MEA-line-workflow repo planned: blocks and adapters call pinned MEA code. Local P01 is tested; study gates remain to build.'],role='orch')
+    'P labels name the proposed blocks below. Workflow blocks and adapters call pinned MEA code through a separate orchestration layer. P01 Python tests pass; study gates remain to build.'],role='orch')
 s.add('</g>')
 s.dy = 400
 s.add('<g id="analysis-and-study-gates">')

@@ -4,7 +4,7 @@ Two diagrams describe reproducible MEA analysis from individual recordings and w
 
 These are design documents. A separate local P01 Python metadata intake has been tested; its raw/authority/Nextflow integration is still pending. They do not enable jobs, change scientific defaults or establish that the complete study workflow has been implemented.
 
-## Network NWB and raw ActivityScan, target 0.4
+## Network NWB and raw ActivityScan, target 0.5
 
 Updated 14 October 2026. Both assays enter the shared registry. Network is converted to NWB and validated early; ActivityScan keeps its original HDF5 reader with raw readiness/routing/exposure checks. Each result retains its source identity/hash and processing version through chip, trial and line summaries.
 
@@ -30,7 +30,7 @@ NWB validation must cover schema/best-practice findings and separate comparisons
 
 Study metadata, scoped inclusion decisions, canonical deduplication, chip/trial/line statistics and reviewer gates remain additions around the existing processing. Source defaults are not approved lab criteria. Missing measurements, undefined metrics and valid zero-event recordings need separate statuses.
 
-The identified [MEA Nextflow framework](https://github.com/BenShalomLab/MEA-ephys-pipeline/tree/nersc-reusable-setup) already defines processing, sorting, curation, visualization, reports, bursts and NWB export as processes. It supplies reusable process/capsule patterns for the separate planned BenShalomLab/MEA-line-workflow orchestration repository, subject to version reconciliation and a representative execution pilot. This design was informed by that branch at `9d0173eecf3a5d7c58bdc5102f4bcaa6bacf8709` and the Orchestration-MEA baseline at `6e78eaf9fbd5b200b5c7e18dcd406e139e255be0`.
+The identified [MEA Nextflow framework](https://github.com/BenShalomLab/MEA-ephys-pipeline/tree/nersc-reusable-setup) already defines processing, sorting, curation, visualization, reports, bursts and NWB export as processes. It supplies reusable process/capsule patterns for the separate orchestration layer, subject to version reconciliation and a representative execution pilot. This design was informed by that branch at `9d0173eecf3a5d7c58bdc5102f4bcaa6bacf8709` and the Orchestration-MEA baseline at `6e78eaf9fbd5b200b5c7e18dcd406e139e255be0`.
 
 Human approvals are versioned inputs between workflow phases. The application must enforce who can approve and verify that a decision applies to the exact dataset/configuration/model version. Nextflow execution logs complement the scientific decision log; successful processing alone does not establish scientific acceptance.
 
@@ -55,6 +55,6 @@ python3 docs/workflows/line-analysis/generate_nwb_first.py
 
 The scripts reuse `docs/architecture/make_diagrams.py`, need only the Python standard library and write an SVG plus a layout-check JSON file in this directory. The JSON records any estimated text overflow. PNG previews are rendered from the SVGs; inspect the render after changing a figure.
 
-### Separate workflow repository
+### Separate orchestration layer
 
-The target is BenShalomLab/MEA-line-workflow for all blocks, adapters and evidence/review contracts. Existing MEA algorithms remain in their source repositories and are referenced by pinned commits. Blocks exchange keyed input/output artifacts through Nextflow. The new repository is prepared locally; organization publication is pending access.
+The orchestration layer owns the blocks, adapters and evidence/review contracts. Existing MEA algorithms remain in their source repositories and are referenced by pinned commits. Blocks exchange keyed input/output artifacts through Nextflow. P01 Python synthetic checks pass; raw/source authority and Nextflow validation remain pending. Study-specific implementation access and locations are documented in the lab's controlled materials.
