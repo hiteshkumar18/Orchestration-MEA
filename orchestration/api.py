@@ -109,6 +109,11 @@ _events: list[dict] = []
 def _record_event(kind: str, payload: dict) -> None:
     _events.append({"kind": kind, **payload})
     del _events[:-200]  # keep the last 200
+    if kind == "date_finished" and payload.get("folder"):
+        # A date the watcher picked up by itself; batches report through
+        # their own hook. Never on the job's thread: a report takes a while.
+        threading.Thread(target=_date_handoff, args=(payload["folder"],),
+                         name="mea-date-report", daemon=True).start()
 
 
 def load_job_config() -> JobConfig:
@@ -879,54 +884,140 @@ def api_checkpoints(path: str = "", tail: int = 0):
 # --------------------------------------------------------------------------- #
 LAST_HANDOFF: dict = {"state": "idle"}
 HANDOFF_LOCK = threading.Lock()
+# One package at a time: each runs the report builder, which takes a minute
+# or so per date and reads every result file of those dates.
+HANDOFF_BUILD = threading.Lock()
+REPORT_SCRIPT = HERE / "report" / "make_report.py"
+
+
+def _report_projects(folders: Optional[list[str]]) -> dict[Path, Optional[list[str]]]:
+    """Project results folder -> dates to report (None: every finished date)."""
+    cfg = get_watcher().cfg
+    out = cfg.output_dir
+    if not out or not Path(out).is_dir():
+        raise ValueError("There is no results folder yet. Set 'Results go to' in Settings "
+                         "and analyse something first.")
+    plan: dict[Path, Optional[list[str]]] = {}
+    if folders:
+        for f in folders:
+            plan.setdefault(cfg.project_dir(f), []).append(Path(f).name)
+        plan = {p: sorted(set(d)) for p, d in plan.items() if p and p.is_dir()}
+    else:
+        plan = {p: None for p in sorted(Path(out).iterdir()) if make_report_is_project(p)}
+    if not plan:
+        raise ValueError("There are no results to report yet.")
+    return plan
+
+
+def make_report_is_project(path: Path) -> bool:
+    """Same test as the report command (report/make_report.py: is_project_dir)."""
+    import re
+    date = re.compile(r"^\d{6}$")
+    if not path.is_dir() or path.name in ("report_tools", "_report_tools", "ActivityScan"):
+        return False
+    try:
+        if any(date.match(x.name) for x in path.iterdir() if x.is_dir()):
+            return True
+        act = path / "ActivityScan"
+        return act.is_dir() and any(date.match(x.name) for x in act.iterdir() if x.is_dir())
+    except OSError:
+        return False
+
+
+def _build_package(pdir: Path, dates: Optional[list[str]], requirements: str,
+                   label: str = "") -> dict:
+    """Run the standard report for one project, then write PROMPT.md into it."""
+    import json as _json
+    import subprocess
+    cfg = get_watcher().cfg
+    cmd = [cfg.resolve_driver_python(), str(REPORT_SCRIPT), "--project-dir", str(pdir)]
+    # Dates named by a finished batch are reported as they are, even if one of
+    # their analyses failed; "everything" leaves out dates still in progress.
+    cmd += ["--dates", *dates, "--allow-unfinished"] if dates else ["--all"]
+    if label:
+        cmd += ["--label", label]
+    if requirements.strip():
+        req = WORK_DIR / "report_requirements.txt"
+        req.write_text(requirements)
+        cmd += ["--requirements", f"@{req}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ), timeout=6 * 3600)
+    out = r.stdout
+    i = out.rfind("\n{")
+    blob = out[i + 1:] if i >= 0 else (out if out.startswith("{") else "")
+    try:
+        res = _json.loads(blob)
+    except ValueError:
+        tail = (r.stderr or r.stdout).strip().splitlines()[-3:]
+        raise RuntimeError(f"{pdir.name}: the report could not be made — " + " / ".join(tail))
+    folder = Path(res["folder"])
+    input_dir = ""
+    try:
+        man = _json.loads((folder / "MANIFEST.json").read_text())
+        input_dir = man.get("input_dir_read_only") or ""
+    except (OSError, ValueError):
+        pass
+    prompt = handoff.write_prompt(
+        folder, project=pdir.name, dates=res["dates"], network_wells=res["network_wells"],
+        activity_runs=res["activity_runs"], built=res["built"], results_dir=str(pdir),
+        input_dir=input_dir or cfg.watch_dir)
+    return {"project": pdir.name, "dates": res["dates"], "dir": str(folder),
+            "prompt": str(prompt), "report": res["report"], "report_dir": str(folder / "report"),
+            "built": res["built"], "network_wells": res["network_wells"],
+            "activity_runs": res["activity_runs"],
+            "instruction": f"cd {folder} && claude \"Read PROMPT.md and do what it says.\""}
 
 
 def _make_handoff(folders: Optional[list[str]] = None, label: str = "",
                   requirements: Optional[str] = None) -> dict:
-    """Write an AI handoff folder for these input folders (all, if None)."""
+    """Build the standard report and a Claude package for these input folders
+    (every finished date of every project, if None). One package per project."""
     cfg = get_watcher().cfg
-    out = cfg.output_dir
-    if not out:
-        raise ValueError("No output directory is configured.")
-    # One project per handoff: its activity scans and its handoff folder both
-    # live under <output>/<project>/. Folders from several projects fall back
-    # to the output root.
-    probe_dirs = folders or ([cfg.watch_dir.rstrip("/") + "/x"] if cfg.watch_dir else [])
-    projects = {JobConfig.project_of(f) for f in probe_dirs}
-    if len(projects) == 1 and probe_dirs:
-        act = cfg.activity_out_for(probe_dirs[0])
-        root = cfg.project_dir(probe_dirs[0])
-        # Older outputs kept scans in <output>/ActivityScan.
-        if not (act and Path(act).is_dir()) and (Path(out) / "ActivityScan").is_dir():
-            act = str(Path(out) / "ActivityScan")
-    else:
-        act, root = str(Path(out) / "ActivityScan"), Path(out)
-    with HANDOFF_LOCK:
-        LAST_HANDOFF.clear()
-        LAST_HANDOFF.update({"state": "running", "started": time.time(), "label": label})
-    try:
-        res = handoff.generate(
-            Path(out), cfg.ai_requirements if requirements is None else requirements,
-            watch_dir=cfg.watch_dir,
-            activity_dir=Path(act) if act and Path(act).is_dir() else None,
-            folders=folders, label=label, handoff_root=root)
-    except Exception as exc:  # noqa: BLE001
+    plan = _report_projects(folders)
+    req = cfg.ai_requirements if requirements is None else requirements
+    with HANDOFF_BUILD:
         with HANDOFF_LOCK:
-            LAST_HANDOFF.update({"state": "error", "error": str(exc), "finished": time.time()})
-        raise
-    with HANDOFF_LOCK:
-        LAST_HANDOFF.update({"state": "done", **res, "finished": time.time()})
+            LAST_HANDOFF.clear()
+            LAST_HANDOFF.update({"state": "running", "started": time.time(), "label": label,
+                                 "projects": [p.name for p in plan]})
+        packages, errors = [], []
+        for pdir, dates in plan.items():
+            try:
+                packages.append(_build_package(pdir, dates, req, label))
+                LOG.info("Report ready for %s: %s", pdir.name, packages[-1]["report"])
+            except Exception as exc:  # noqa: BLE001
+                LOG.error("Report for %s failed: %s", pdir.name, exc)
+                errors.append(str(exc))
+        res = {**(packages[0] if packages else {}), "packages": packages, "errors": errors,
+               "network_wells": sum(p["network_wells"] for p in packages),
+               "activity_runs": sum(p["activity_runs"] for p in packages)}
+        with HANDOFF_LOCK:
+            LAST_HANDOFF.update({"state": "done" if packages else "error",
+                                 "error": "; ".join(errors) or None, **res,
+                                 "finished": time.time()})
+    if not packages:
+        raise RuntimeError("; ".join(errors) or "Nothing was built.")
     return res
 
 
 def _batch_handoff(batch: dict) -> None:
-    """Prepare the AI handoff for a finished batch. Runs on its own thread."""
+    """Report a finished batch. Runs on its own thread."""
     folders = sorted({k.split("::")[0] for k in batch.get("keys", [])})
     try:
-        res = _make_handoff(folders, label=batch["id"])
-        LOG.info("Batch %s: AI handoff ready — %s", batch["id"], res["prompt"])
+        res = _make_handoff(folders)
+        LOG.info("Batch %s: report and Claude package ready — %s", batch["id"], res["prompt"])
     except Exception:  # noqa: BLE001
-        LOG.exception("Batch %s: could not prepare the AI handoff", batch["id"])
+        LOG.exception("Batch %s: could not make the report", batch["id"])
+
+
+def _date_handoff(folder: str) -> None:
+    """Report a date the watcher analysed on its own (not part of a batch)."""
+    if not get_watcher().cfg.auto_handoff:
+        return
+    try:
+        res = _make_handoff([folder])
+        LOG.info("%s: report and Claude package ready — %s", Path(folder).name, res["prompt"])
+    except Exception:  # noqa: BLE001
+        LOG.exception("%s: could not make the report", Path(folder).name)
 
 
 @app.post("/api/queue/inspect")
@@ -995,11 +1086,29 @@ def api_requirements(payload: RequirementsPayload):
 
 @app.post("/api/handoff")
 def api_handoff(payload: HandoffPayload):
+    """Start building reports and Claude packages; poll GET /api/handoff.
+
+    In the background: a report takes a minute or so per date, and "every
+    date" can be many minutes."""
     label = "".join(ch for ch in payload.label if ch.isalnum() or ch in "-_")[:40]
+    folders = payload.folders or None
     try:
-        return _make_handoff(payload.folders or None, label=label)
+        _report_projects(folders)                 # fail now if there is nothing to do
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if HANDOFF_BUILD.locked():
+        raise HTTPException(409, "A report is already being made. Wait for it to finish.")
+
+    def run():
+        try:
+            _make_handoff(folders, label=label)
+        except Exception:  # noqa: BLE001 — recorded in LAST_HANDOFF
+            LOG.exception("Report package failed")
+    with HANDOFF_LOCK:
+        LAST_HANDOFF.clear()
+        LAST_HANDOFF.update({"state": "running", "started": time.time(), "label": label})
+    threading.Thread(target=run, name="mea-report", daemon=True).start()
+    return {"state": "running"}
 
 
 # --------------------------------------------------------------------------- #
@@ -1086,6 +1195,9 @@ def main() -> None:
     p.add_argument("--strict", action="store_true",
                    help="Refuse to start if the MEA repo is missing or its options have drifted")
     a = p.parse_args()
+    # The report command asks this server whether a date has finished; the
+    # report_tools launcher written into the results folder passes it on.
+    os.environ["MEA_STATUS_URL"] = f"http://127.0.0.1:{a.port}/api/status"
 
     WORK_DIR = a.work_dir
     WORK_DIR.mkdir(parents=True, exist_ok=True)

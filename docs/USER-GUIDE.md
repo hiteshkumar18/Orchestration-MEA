@@ -330,9 +330,22 @@ follows the lab's instructions. You can use any assistant that runs there and
 can run commands — for example **Claude Code** (`claude`) or **ChatGPT Codex**
 (`codex`). The first time, it asks you to sign in with your own account.
 
-The instructions are already waiting in your results folder: every time you
-start analysing, the tool places `AI_REPORT_INSTRUCTIONS.md` and a
-`report_tools` folder there.
+**The standard report can be made for you.** In the **AI report** tab, open
+**Making reports** and switch on **Make the report automatically when dates
+finish**. Every date then gets the lab's standard report as soon as its
+analyses end, with whichever analyses were run: Network analysis, Activity
+scan, or both. **Make reports for every finished date** does the same on
+demand. Each report folder also holds a note for the AI (`PROMPT.md`); the page
+shows the one command to run (`cd … && claude "Read PROMPT.md and do what it
+says."`) to have it add what your instructions ask for and explain the results.
+
+A date analysed with the **activity scan only** gets a report too: its Network
+tab says there are no Network results, which is expected, and the report opens
+on the Activity scan tab.
+
+You can also ask the AI directly. The instructions are already waiting in your
+results folder: every time you start analysing, the tool places
+`AI_REPORT_INSTRUCTIONS.md` and a `report_tools` folder there.
 
 **Steps**
 

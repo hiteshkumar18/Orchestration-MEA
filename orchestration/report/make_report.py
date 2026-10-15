@@ -24,6 +24,7 @@ import html
 import io
 import base64
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -52,13 +53,33 @@ def available_dates(pdir: Path) -> dict[str, dict]:
     return dict(sorted(out.items()))
 
 
+def is_project_dir(path: Path) -> bool:
+    """A project's results folder: date folders (Network results), an
+    ActivityScan folder with date folders, or both. A project analysed with the
+    activity scan only has no date folders of its own."""
+    # ActivityScan holds date folders too, but it is part of a project.
+    if not path.is_dir() or path.name == "ActivityScan":
+        return False
+    if any(DATE_RE.match(x.name) for x in path.iterdir() if x.is_dir()):
+        return True
+    act = path / "ActivityScan"
+    return act.is_dir() and any(DATE_RE.match(x.name) for x in act.iterdir() if x.is_dir())
+
+
+# The control server that produced the results. The report_tools/make_report
+# launcher sets this to the server that wrote it; 8000 is the lab's default.
+STATUS_URL = os.environ.get("MEA_STATUS_URL", "http://localhost:8000/api/status")
+
+
 def analysis_state(project: str) -> dict[str, str]:
     """date -> finished / running / waiting / failed, from the control server.
 
+    Only the analyses that were actually run for a date count: a date analysed
+    with the activity scan alone is finished when its scan is.
     Empty when the server cannot be reached (then nothing is refused)."""
     import urllib.request
     try:
-        runs = json.load(urllib.request.urlopen("http://localhost:8000/api/status", timeout=15))["runs"]
+        runs = json.load(urllib.request.urlopen(STATUS_URL, timeout=15))["runs"]
     except Exception:  # noqa: BLE001
         return {}
     by: dict[str, list[str]] = {}
@@ -246,11 +267,13 @@ def main() -> None:
     pdir = a.project_dir.expanduser().resolve()
     if not pdir.is_dir():
         sys.exit(f"Not a folder: {pdir}")
-    if not any(DATE_RE.match(x.name) for x in pdir.iterdir() if x.is_dir()):
-        projects = [x.name for x in sorted(pdir.iterdir())
-                    if x.is_dir() and any(DATE_RE.match(y.name) for y in x.iterdir() if y.is_dir())]
+    if pdir.name == "ActivityScan" and is_project_dir(pdir.parent):
+        sys.exit(f"{pdir} is a project's ActivityScan folder. Use --project-dir {pdir.parent}")
+    if not is_project_dir(pdir):
+        projects = [x.name for x in sorted(pdir.iterdir()) if x.name != "ActivityScan" and is_project_dir(x)]
         if projects:
             sys.exit(f"{pdir} holds projects, not dates. Use --project-dir with one of: " + ", ".join(projects))
+        sys.exit(f"No results in {pdir}: it has no date folders and no ActivityScan folder.")
     have = available_dates(pdir)
     state = analysis_state(pdir.name)
     if a.list:
@@ -288,6 +311,11 @@ def main() -> None:
     for w in handoff.collect_network(pdir / dates[0], []) if (pdir / dates[0]).is_dir() else []:
         if w.get("recording"):
             watch = str(Path(w["recording"]).parents[4]); break
+    if not watch and (pdir / "ActivityScan").is_dir():
+        for r in handoff.collect_activity(pdir / "ActivityScan", []):
+            if r["date"] == dates[0] and r.get("recording"):
+                # <input>/<date>/<chip>/ActivityScan/<run>/data.raw.h5 -> <input>
+                watch = str(Path(r["recording"]).parents[4]); break
 
     req = a.requirements[1:] if a.requirements.startswith("@") else ""
     req_text = Path(req).read_text() if req else a.requirements

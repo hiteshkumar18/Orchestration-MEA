@@ -361,7 +361,8 @@ net = pd.DataFrame(net_rows, columns=None if net_rows else ["chip", "well", "fla
 if len(net):
     net["outcome"] = net["outcome"].fillna("complete") if "outcome" in net else "complete"
 oc = net["outcome"] if "outcome" in net else pd.Series(dtype=str)
-units = pd.concat(unit_frames, ignore_index=True)
+# Empty when the date had no Network analysis (activity scan only).
+units = pd.concat(unit_frames, ignore_index=True) if unit_frames else pd.DataFrame()
 events = pd.concat(event_frames, ignore_index=True) if event_frames else pd.DataFrame()
 diag_df = pd.DataFrame(diag_rows)
 nb_ev = events[events["event_type"] == "network_burst"].copy() if len(events) else pd.DataFrame()
@@ -417,7 +418,9 @@ if rec_date and len(plating) == 1:
     div = (rec_date - date(y, m, d)).days
 groups = sorted(set(act["group"].dropna())) if "group" in act else []
 project = (MANIFEST["network_wells"][0]["project"] if MANIFEST["network_wells"]
-           else Path(MANIFEST["folders_in_scope"][0]).parent.name if MANIFEST.get("folders_in_scope") else "")
+           else Path(MANIFEST["folders_in_scope"][0]).parent.name if MANIFEST.get("folders_in_scope")
+           # make_report's manifest: output_dir is the project's results folder
+           else Path(MANIFEST["output_dir"]).name if MANIFEST.get("output_dir") else "")
 
 
 # --------------------------------------------------------------------------- #
@@ -892,10 +895,23 @@ def sources_html(kind: str) -> str:
             f"<details><summary>Show files</summary><pre>{html.escape(chr(10).join(files))}</pre></details>")
 
 
-NONE = ("<h2>No {k} results</h2><p>This recording folder has no {k} results in MANIFEST.json "
-        "(no recording of that type was made, or its analysis produced no output).</p>")
-net_html = (network_page() + sources_html("network")) if len(net) else NONE.format(k="Network")
-act_html = (activity_page() + sources_html("activity")) if len(act) else NONE.format(k="ActivityScan")
+NONE = ("<h2>No {k} results</h2><p>There are no {k} results for this date. Most often the "
+        "{k} was not run for it (it can be switched off in the control page's settings); otherwise "
+        "no recording of that type was made, or its analysis produced no output. "
+        "The {other} page has everything that was analysed.</p>")
+def network_failed_page() -> str:
+    """Network wells were analysed but none produced results: say why for each."""
+    cols = [c for c in ("chip", "run", "well", "status", "outcome", "flags") if c in net]
+    return (f"<h2>No Network results</h2><p>{len(net)} well(s) were analysed, but none produced "
+            "results. The reason for each is below (from the pipeline's checkpoints and log).</p>"
+            + table(net[cols], "network_qc", "Why each well has no results"))
+
+
+net_html = ((network_page() + sources_html("network")) if unit_frames
+            else network_failed_page() if len(net)
+            else NONE.format(k="Network analysis", other="Activity scan"))
+act_html = ((activity_page() + sources_html("activity")) if len(act)
+            else NONE.format(k="Activity scan", other="Network analysis"))
 
 CSS = """
 :root{--ink:#111827;--ink2:#4b5563;--line:#e5e7eb;--bg:#f9fafb;--card:#fff;--acc:#2563eb}
@@ -928,7 +944,7 @@ function show(id){document.querySelectorAll('main>section').forEach(s=>s.hidden=
 document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===id));
 history.replaceState(null,'','#'+id);window.scrollTo(0,0);}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.t));
-show(location.hash==='#activity'?'activity':'network');
+show(location.hash==='#activity'||location.hash==='#network'?location.hash.slice(1):'__FIRST__');
 document.querySelectorAll('table.sortable th').forEach((th,i)=>th.onclick=()=>{
 const tb=th.closest('table').tBodies[0],rows=[...tb.rows],asc=th.dataset.s!=='a';
 th.closest('tr').querySelectorAll('th').forEach(x=>delete x.dataset.s);th.dataset.s=asc?'a':'d';
@@ -936,6 +952,10 @@ rows.sort((a,b)=>{const x=a.cells[i],y=b.cells[i],xv=x.dataset.v,yv=y.dataset.v;
 let r=(xv!==undefined&&yv!==undefined)?(+xv-+yv):x.textContent.localeCompare(y.textContent,undefined,{numeric:true});
 return asc?r:-r;});rows.forEach(r=>tb.appendChild(r));});
 """
+
+# Open on the page that has results: a date with the activity scan only
+# would otherwise open on an empty Network page.
+JS = JS.replace("__FIRST__", "network" if len(net) or not len(act) else "activity")
 
 title = f"MEA report — {project} · {rec_date}"
 doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">

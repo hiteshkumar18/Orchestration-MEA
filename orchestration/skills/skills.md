@@ -219,6 +219,15 @@ them separately, and never mix the two in one statistic.
 
 ## 4. Default report (when the requirements do not say otherwise)
 
+**Usually already built.** The lab's standard report is made by its report
+command (`report_tools/make_report`, or automatically by the control page), and
+a package with `PROMPT.md` already contains it in `report/`. Then do not write
+another one: check it, add only what `REQUIREMENTS.md` asks beyond it in
+`report/extras/`, and explain it. A date analysed with the activity scan only
+has no Network results; the standard report's Network page says so, which is
+expected. The rest of this section describes what the standard report covers,
+and is the guide when you are asked to write one without the command.
+
 **Format:** one self-contained HTML file, `report/report.html`, with all
 figures embedded (base64 PNG or inline SVG) so it opens offline. Plus
 `report/tables/` with every table as CSV. Use Python (pandas, matplotlib)

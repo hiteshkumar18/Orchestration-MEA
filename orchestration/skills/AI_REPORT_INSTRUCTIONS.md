@@ -51,6 +51,14 @@ report_tools/skills.md        what every measurement means
 
 Dates are folder names in `YYMMDD` form: `260821` is 21 August 2026.
 
+A project analysed with the **activity scan only** has no date folders of its
+own, only `ActivityScan/<YYMMDD>/…`. That is normal: the report command handles
+it, and the report's Network page then says there are no Network results. Do
+not ask the user about missing Network results, and never start an analysis.
+
+If the user gives you a report folder that already contains `PROMPT.md`, follow
+that file instead: its report is already built.
+
 The user may give you the output folder itself (it contains `report_tools` and
 one or more project folders) or a single project folder inside it (it contains
 date folders). If it is a project folder, `report_tools` is in the folder above it.
@@ -184,6 +192,7 @@ Make the standard report first, then add to it — never change it.
 | `No results for …` | That date has no results yet. Run `--list` and offer the dates that exist. |
 | `Not finished yet: …` | The analysis is still running or waiting. Offer the finished dates, or a partial report if the user insists (`--allow-unfinished`). |
 | `control server not reachable` in `--list` | Status unknown, so nothing is refused. Say the status could not be checked. |
+| `… holds projects, not dates` | You gave the results folder, not a project folder. Use one of the project names it lists. |
 | `FAILED <date>` | The report for that date could not be built. Show the user the last lines of the error and stop — do not try to repair the analysis or the script. |
 | `report_tools/make_report: not found` | You are not in the output folder, or it was given as a project folder — use `../report_tools/make_report`. If `report_tools` is missing, ask the user to start watching once in the control page (it writes the folder), and stop. |
 | Folder already exists | Use a different `--label`, or let the command choose the name. |
