@@ -700,6 +700,7 @@ class Watcher:
         # A throwaway Watcher (the UI's command preview) shares this state file
         # with the live one, and must not mark the live one's jobs interrupted.
         if reconcile:
+            self._stop_leftover_jobs()
             self._reconcile_state()
 
         # Walking the watch directory is the most expensive thing this class
@@ -740,6 +741,23 @@ class Watcher:
 
     # -- lifecycle ---------------------------------------------------------- #
     IN_FLIGHT = ("detected", "dispatched", "queued", "running")
+
+    def _stop_leftover_jobs(self) -> None:
+        """End analyses a previous run of this server left running (see
+        memguard.stop_orphans). Once per process: a settings save builds a new
+        Watcher, and by then any job in its own scope is this process's own."""
+        global _LEFTOVERS_CHECKED
+        if _LEFTOVERS_CHECKED:
+            return
+        _LEFTOVERS_CHECKED = True
+        try:
+            stopped = memguard.stop_orphans(memguard.own_service_unit())
+        except Exception:  # noqa: BLE001 — never block the server from starting
+            LOG.exception("Could not check for analyses left by a previous server")
+            return
+        if stopped:
+            LOG.warning("Stopped %d analysis job(s) left running by the previous server "
+                        "(restarted with systemctl restart): %s", len(stopped), ", ".join(stopped))
 
     def _reconcile_state(self) -> None:
         """Retire statuses left mid-flight by a previous process.
@@ -2386,6 +2404,10 @@ class Watcher:
             "counts_by_job": by_job,
             "runs": runs,
         }
+
+
+# Whether this process has looked for jobs a previous server left running.
+_LEFTOVERS_CHECKED = False
 
 
 def _now() -> str:

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -149,6 +150,40 @@ class RealLimitTest(unittest.TestCase):
         self.assertIn("memory ceiling: 0.2 GB", text)
         self.assertIn("Processing Complete for well002", text)
         self.assertIn("1 well(s) were stopped", entry["detail"])
+
+
+@unittest.skipUnless(memguard.available(), "needs systemd user scopes")
+class LeftoverJobTest(unittest.TestCase):
+    """A `systemctl restart` of the server leaves its job scopes running; the
+    next server start must end them, and only them."""
+
+    def run_unit(self, name, *props):
+        subprocess.run(["systemd-run", "--user", f"--unit={name}", "--quiet", *props,
+                        "/bin/sleep", "600"], check=True)
+        self.addCleanup(subprocess.run, ["systemctl", "--user", "stop", name], capture_output=True)
+
+    def scope(self, seconds, *props):
+        p = subprocess.Popen(["systemd-run", "--user", "--scope", "--quiet", "--collect", *props,
+                              "--", "/bin/sleep", str(seconds)])
+        self.addCleanup(p.kill)
+        return p
+
+    def test_only_scopes_bound_to_this_server_are_stopped(self):
+        me, other = f"mg-test-{os.getpid()}-a", f"mg-test-{os.getpid()}-b"
+        self.run_unit(me)
+        self.run_unit(other)
+        mine = self.scope(601, "-p", f"BindsTo={me}.service", "-p", f"After={me}.service")
+        theirs = self.scope(602, "-p", f"BindsTo={other}.service", "-p", f"After={other}.service")
+        loose = self.scope(603)
+        time.sleep(1.5)
+        stopped = memguard.stop_orphans(f"{me}.service")
+        self.assertEqual(len(stopped), 1, stopped)
+        self.assertIsNotNone(mine.wait(timeout=20))
+        self.assertIsNone(theirs.poll())
+        self.assertIsNone(loose.poll())
+
+    def test_no_service_means_nothing_to_stop(self):
+        self.assertEqual(memguard.stop_orphans(None), [])
 
 
 if __name__ == "__main__":
