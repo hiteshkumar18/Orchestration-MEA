@@ -272,6 +272,10 @@ const JOB = {
     say: "Paused — will resume",
     k: "wait"
   },
+  held: {
+    say: "On hold",
+    k: "wait"
+  },
   done: {
     say: "Done",
     k: "ok"
@@ -292,6 +296,7 @@ function folderState(jobs) {
   if (sts.includes("failed")) return "failed";
   if (sts.length && sts.every(s => s === "done")) return "done";
   if (sts.includes("interrupted")) return "interrupted";
+  if (sts.includes("held")) return "held";
   return sts[0] || "waiting";
 }
 function plainNote(job) {
@@ -301,6 +306,10 @@ function plainNote(job) {
   if (m) return {
     t: `${m[2] - m[1]} of ${m[2]} wells finished · ${m[1]} had problems`,
     k: "warn"
+  };
+  if (job.status === "held") return {
+    t: "Taken off the queue — press Resume to analyse it",
+    k: ""
   };
   if (job.status === "failed") {
     if (/cancelled/i.test(e)) return {
@@ -532,7 +541,10 @@ function Confirm({
   }, React.createElement("button", {
     className: "btn ghost",
     onClick: () => onClose(false)
-  }, "Cancel"), React.createElement("button", {
+  }, "Cancel"), ask.alt && React.createElement("button", {
+    className: "btn",
+    onClick: () => onClose("alt")
+  }, ask.alt), React.createElement("button", {
     className: "btn " + (ask.danger ? "red" : "ink"),
     autoFocus: true,
     onClick: () => onClose(true)
@@ -789,6 +801,7 @@ function LogDrawer({
     className: "lg " + logKind(l)
   }, l)))));
 }
+const HOLDABLE = ["dispatched", "queued", "running", "interrupted", "waiting"];
 function Line({
   f,
   report,
@@ -797,6 +810,8 @@ function Line({
   onWells,
   onLog,
   onAgain,
+  onHold,
+  onResume,
   i
 }) {
   const st = folderState(f.jobs),
@@ -872,7 +887,19 @@ function Line({
     onClick: () => goRun(net?.run_id || scan?.run_id)
   }, React.createElement(Chev, {
     s: 14
-  }), " Details"), React.createElement("button", {
+  }), " Details"), f.jobs.some(j => HOLDABLE.includes(j.status)) && React.createElement("button", {
+    className: "btn sm",
+    title: busy ? "Stop this date and keep it for later" : "Take this date off the queue and keep it for later",
+    onClick: () => onHold(f)
+  }, React.createElement(Pause, {
+    s: 14
+  }), " Hold"), f.jobs.some(j => j.status === "held") && React.createElement("button", {
+    className: "btn sm",
+    title: "Put this date back in the queue",
+    onClick: () => onResume(f)
+  }, React.createElement(Play, {
+    s: 11
+  }), " Resume"), React.createElement("button", {
     className: "btn ghost sm",
     title: "Analyse this date again",
     "aria-label": "Analyse again",
@@ -894,6 +921,8 @@ function Progress({
   onWells,
   onLog,
   onAgain,
+  onHold,
+  onResume,
   feed,
   goAdd
 }) {
@@ -940,7 +969,9 @@ function Progress({
     open: !!openW[f.folder],
     onWells: onWells,
     onLog: onLog,
-    onAgain: onAgain
+    onAgain: onAgain,
+    onHold: onHold,
+    onResume: onResume
   }))))), feed.some(l => !/^=+$|Open this in your browser|do not open index\.html|^Work dir:/.test(l.message)) && React.createElement("div", {
     className: "sec"
   }, React.createElement("div", {
@@ -1929,6 +1960,7 @@ const RUN_SAY = {
   done: ["Done", "ok"],
   failed: ["Failed", "bad"],
   interrupted: ["Interrupted", "wait"],
+  held: ["On hold", "wait"],
   running: ["Analysing", "run"],
   dispatched: ["Starting", "queue"],
   queued: ["In line", "queue"],
@@ -2195,6 +2227,8 @@ function HistoryTable({
   }, "Failed"), React.createElement("option", {
     value: "interrupted"
   }, "Interrupted"), React.createElement("option", {
+    value: "held"
+  }, "On hold"), React.createElement("option", {
     value: "running,dispatched,queued"
   }, "Running or starting")), React.createElement("span", {
     className: "hint-s"
@@ -2348,9 +2382,9 @@ function RunDetail({
     setErr("");
     const load = () => api("/api/history/" + id).then(x => {
       setD(x);
-      if (!["done", "failed", "interrupted", "detected"].includes(x.status) && !t) t = setInterval(() => {
+      if (!["done", "failed", "interrupted", "detected", "held"].includes(x.status) && !t) t = setInterval(() => {
         if (!document.hidden) load();
-      }, 5000);else if (["done", "failed", "interrupted", "detected"].includes(x.status) && t) {
+      }, 5000);else if (["done", "failed", "interrupted", "detected", "held"].includes(x.status) && t) {
         clearInterval(t);
         t = null;
       }
@@ -2439,7 +2473,7 @@ function RunDetail({
     className: "tal"
   }, React.createElement("div", {
     className: "tal-k"
-  }, ["done", "failed", "interrupted"].includes(d.status) ? "Took" : "Running for"), React.createElement("div", {
+  }, ["done", "failed", "interrupted", "held"].includes(d.status) ? "Took" : "Running for"), React.createElement("div", {
     className: "rd-v"
   }, d.elapsed_s != null ? dur(d.elapsed_s) : "—")), React.createElement("div", {
     className: "tal"
@@ -2468,7 +2502,7 @@ function RunDetail({
     }
   }, React.createElement(Callout, {
     kind: "blue"
-  }, d.live_detail)), d.job === "network" && !["done", "failed", "interrupted"].includes(d.status) && React.createElement("div", {
+  }, d.live_detail)), d.job === "network" && !["done", "failed", "interrupted", "held"].includes(d.status) && React.createElement("div", {
     className: "sec"
   }, React.createElement("div", {
     className: "sec-h"
@@ -2908,7 +2942,7 @@ function App() {
   const active = (status?.active_jobs?.network || 0) + (status?.active_jobs?.activity || 0);
   const watching = !!status?.running;
   const tally = {
-    wait: folders.filter(f => ["dispatched", "waiting", "interrupted", "detected"].includes(folderState(f.jobs))).length,
+    wait: folders.filter(f => ["dispatched", "waiting", "interrupted", "detected", "held"].includes(folderState(f.jobs))).length,
     run: folders.filter(f => folderState(f.jobs) === "running").length,
     done: folders.filter(f => folderState(f.jobs) === "done").length,
     bad: folders.filter(f => folderState(f.jobs) === "failed").length
@@ -2961,15 +2995,80 @@ function App() {
     body: JSON.stringify(payload())
   }), "Settings saved");
   save.payload = payload;
-  const startWatch = () => run_(async () => {
-    if (!active) await api("/api/config", {
+  const inLine = runs.some(r => ["dispatched", "queued", "running"].includes(r.status));
+  const dateList = fs => fs.map(f => {
+    const d = prettyDate(f.date);
+    return `${d.big} ${d.year}`;
+  }).join(", ");
+  const startWatch = async () => {
+    const intr = folders.filter(f => f.jobs.some(j => j.status === "interrupted"));
+    let hold = false;
+    if (intr.length) {
+      const n = intr.length,
+        s = n === 1 ? "" : "s";
+      const a = await ask({
+        title: `Continue ${n} interrupted date${s}?`,
+        ok: n === 1 ? "Continue it" : "Continue them",
+        alt: "Keep on hold",
+        body: `${n === 1 ? "This date was" : "These dates were"} stopped before ${n === 1 ? "it" : "they"} finished: ${dateList(intr)}.\n\n` + `Continue ${n === 1 ? "it" : "them"} now, or keep ${n === 1 ? "it" : "them"} on hold and only watch for new dates. ` + `Dates on hold can be resumed later from Progress.`
+      });
+      if (!a) return;
+      hold = a === "alt";
+    }
+    run_(async () => {
+      if (!active && !inLine) await api("/api/config", {
+        method: "POST",
+        body: JSON.stringify(payload())
+      });
+      await api("/api/watcher/start" + (hold ? "?hold_interrupted=true" : ""), {
+        method: "POST"
+      });
+    }, "Watching for new recordings", hold ? "Interrupted dates are on hold. New dates are picked up once copied." : "New dates are picked up automatically once copied.");
+  };
+  const onHold = async f => {
+    const dt = prettyDate(f.date),
+      running = f.jobs.some(j => j.status === "running");
+    const paths = f.jobs.filter(j => HOLDABLE.includes(j.status)).map(j => j.path);
+    if (!(await ask({
+      title: `Put ${dt.big} on hold?`,
+      danger: running,
+      ok: running ? "Stop and hold" : "Put on hold",
+      body: running ? "Its analysis is running and will be stopped now. Wells that already finished keep their results, " + "so resuming it later repeats only the well that was in progress." : "It will be taken off the queue and kept for later. Nothing is deleted. Press Resume on it when you want it analysed."
+    }))) return;
+    run_(() => api("/api/runs/hold", {
       method: "POST",
-      body: JSON.stringify(payload())
-    });
-    await api("/api/watcher/start", {
+      body: JSON.stringify({
+        paths
+      })
+    }), "On hold", `${dt.big} will not be analysed until you resume it.`);
+  };
+  const onResume = f => {
+    const dt = prettyDate(f.date);
+    run_(() => api("/api/queue", {
+      method: "POST",
+      body: JSON.stringify({
+        folders: [f.folder]
+      })
+    }), "Resumed", `${dt.big} is back in the queue.`);
+  };
+  const holdable = runs.filter(r => HOLDABLE.includes(r.status));
+  const resetQueue = async () => {
+    const c = sts => holdable.filter(r => sts.includes(r.status)).length,
+      pl = n => n === 1 ? "" : "s";
+    const nRun = c(["running"]),
+      nWait = c(["dispatched", "queued"]),
+      nInt = c(["interrupted", "waiting"]);
+    const lines = [nRun && `• ${nRun} running analysis job${pl(nRun)} will be stopped now`, nWait && `• ${nWait} waiting job${pl(nWait)} will be taken out of the queue`, nInt && `• ${nInt} interrupted job${pl(nInt)} will be kept from resuming`, watching && "• Watching for new recordings will be paused"].filter(Boolean);
+    if (!(await ask({
+      title: "Reset the queue?",
+      danger: nRun > 0,
+      ok: "Reset queue",
+      body: lines.join("\n") + "\n\nThese dates are put “On hold”: nothing starts them until you press Resume on them — " + "for example after switching off Network analysis in Settings to run only the activity scan.\n\n" + "Finished results are kept. Wells that already finished keep theirs too, so resuming repeats only the well in progress."
+    }))) return;
+    run_(() => api("/api/queue/reset", {
       method: "POST"
-    });
-  }, "Watching for new recordings", "New dates are picked up automatically once copied.");
+    }), "Queue reset", "Nothing will start until you resume a date or add recordings.");
+  };
   const pauseWatch = () => run_(() => api("/api/watcher/stop", {
     method: "POST"
   }), "Paused", "No new dates will be started. Analyses already running carry on.");
@@ -3118,7 +3217,19 @@ function App() {
     className: "tal-k"
   }, l, " ", React.createElement("span", {
     className: "hint-s"
-  }, "dates"))))), React.createElement(Progress, {
+  }, "dates"))))), holdable.length > 0 && React.createElement("div", {
+    className: "qbar rise",
+    style: {
+      "--i": 1
+    }
+  }, React.createElement("button", {
+    className: "btn sm",
+    disabled: busy,
+    onClick: resetQueue,
+    title: "Stop and hold everything that has not finished, so you can decide what to run"
+  }, React.createElement(Again, {
+    s: 13
+  }), " Reset queue")), React.createElement(Progress, {
     folders: folders,
     reports: reports,
     wells: wells,
@@ -3126,6 +3237,8 @@ function App() {
     onWells: onWells,
     onLog: onLog,
     onAgain: onAgain,
+    onHold: onHold,
+    onResume: onResume,
     feed: feed,
     goAdd: () => setTab("add")
   })), !runId && tab === "add" && React.createElement(AddRecordings, {

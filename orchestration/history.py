@@ -22,8 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-# A run is open until one of these.
-TERMINAL = {"done", "failed", "interrupted", "detected"}
+# A run is open until one of these. "held": taken off the queue by hand.
+TERMINAL = {"done", "failed", "interrupted", "detected", "held"}
 # Statuses that begin a new run.
 STARTS = {"dispatched", "detected"}
 
@@ -117,8 +117,10 @@ class RunHistory:
                 # replaced by a settings save keeps finishing its jobs).
                 self._open.pop(key, None)
                 run_id = None
+            # Interrupted and held only ever close a run; on their own they
+            # are not one (an interrupted date put on hold ran nothing new).
             starts = status in STARTS or (status in TERMINAL and run_id is None
-                                          and status != "interrupted")
+                                          and status not in ("interrupted", "held"))
             if starts and (run_id is None or status in STARTS):
                 if run_id is not None and status in STARTS:
                     # A new dispatch while one is open: the old one was abandoned.
