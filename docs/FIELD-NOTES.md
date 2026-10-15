@@ -336,6 +336,16 @@ and the largest single well process at 18 GB (260919). The scope is bound to the
 server's service, so stopping the server still stops its jobs. Without
 `systemd-run --user` the job runs with no ceiling and a warning is logged once.
 
+**Restart is the exception.** Tested 2026-10-14: stopping the service, or the
+service crashing and being restarted by `Restart=on-failure`, ends the job's
+scope — but a deliberate `systemctl --user restart` does not (`BindsTo` and
+`PartOf` were both tried). The job kept running unseen while the new server
+marked it "interrupted", and resuming it would have started a second copy
+writing into the same wells. So the server, when it starts, stops any scope
+bound to its own service (`memguard.stop_orphans`) and logs "Stopped N analysis
+job(s) left running by the previous server". Scopes of other servers and other
+users are never touched.
+
 The ceiling counts the file cache the job fills as well as its own memory, but
 cache is given back before anything is killed.
 

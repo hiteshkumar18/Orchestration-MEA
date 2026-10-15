@@ -120,6 +120,48 @@ def wrap(cmd: list[str], limit_gb: float, bind_unit: Optional[str] = None) -> li
     return pre + ["--"] + list(cmd)
 
 
+def stop_orphans(bind_unit: Optional[str]) -> list[str]:
+    """Stop jobs a previous run of this server left behind. Returns their units.
+
+    A job runs in its own scope, tied to the server's service. Stopping the
+    service, or the service crashing and being restarted, ends the scope too.
+    A deliberate `systemctl restart` does not: systemd restarts the service
+    and leaves the scope running. Before jobs had their own scope they lived
+    inside the service and always ended with it, and everything here assumes
+    that: the restarted server marks the job "interrupted", and resuming it
+    would start a second copy writing into the same wells as the first.
+
+    So when the server starts, scopes tied to its own service are leftovers
+    and are stopped. Only scopes bound to this service: other servers' and
+    other users' jobs are never touched.
+    """
+    if not bind_unit or not shutil.which("systemctl"):
+        return []
+    try:
+        listed = subprocess.run(
+            ["systemctl", "--user", "list-units", "--type=scope", "--state=active",
+             "--no-legend", "--plain", "run-*.scope"],
+            capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    stopped = []
+    for line in listed.splitlines():
+        unit = line.split()[0] if line.split() else ""
+        if not unit.endswith(".scope"):
+            continue
+        try:
+            bound = subprocess.run(
+                ["systemctl", "--user", "show", unit, "-p", "BindsTo", "--value"],
+                capture_output=True, text=True, timeout=20).stdout.split()
+            if bind_unit in bound:
+                subprocess.run(["systemctl", "--user", "stop", unit],
+                               capture_output=True, timeout=120)
+                stopped.append(unit)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return stopped
+
+
 def count_killed(log_path: Path) -> int:
     """How many wells the driver reported as killed in this job's log."""
     try:
