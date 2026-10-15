@@ -13,6 +13,8 @@ Serves the single-page frontend and exposes the watcher as a REST API:
     POST /api/watcher/start start watching
     POST /api/watcher/stop  stop watching
     POST /api/runs/reset    forget a run so it can be re-processed
+    POST /api/runs/hold     take runs off the queue, keep them for later
+    POST /api/queue/reset   clear the queue: stop everything unfinished, hold it
     GET  /api/runs/log      tail a run's pipeline log
     POST /api/requirements  save the AI report requirements (any time)
     POST /api/handoff       prepare an AI report handoff folder
@@ -213,6 +215,10 @@ class RunKeyPayload(BaseModel):
 class ResetAllPayload(BaseModel):
     # "failed" | "done" | "all" — what to forget in one go
     which: str = "failed"
+
+
+class HoldPayload(BaseModel):
+    paths: list[str] = []      # state keys, "<folder>::<job>"
 
 
 class QueuePayload(BaseModel):
@@ -543,12 +549,14 @@ def api_preview(payload: ConfigPayload):
 # Routes — watcher control & status
 # --------------------------------------------------------------------------- #
 @app.post("/api/watcher/start")
-def api_start():
+def api_start(hold_interrupted: bool = False):
+    """Start watching. Interrupted runs are picked up again unless
+    ``hold_interrupted`` asks for them to be put on hold first."""
     watcher = get_watcher()
     errors = watcher.cfg.validate()
     if errors:
         raise HTTPException(400, {"errors": errors})
-    watcher.start()
+    watcher.start(hold_interrupted=hold_interrupted)
     return {"ok": True, "running": watcher.is_running}
 
 
@@ -765,6 +773,25 @@ def api_reset(payload: RunKeyPayload):
     watcher._prints.pop(folder, None)
     watcher._prints.pop(payload.path, None)   # tolerate a bare folder path
     return {"ok": True, "cleared_fingerprint_for": folder}
+
+
+@app.post("/api/runs/hold")
+def api_hold(payload: HoldPayload):
+    """Take runs off the queue and keep them for later (status "held").
+
+    Waiting runs leave the queue, running ones are stopped, interrupted ones
+    are marked. A held run starts again only when its folder is queued again.
+    """
+    if not payload.paths:
+        raise HTTPException(400, "Choose at least one run.")
+    return {"ok": True, **get_watcher().hold(payload.paths)}
+
+
+@app.post("/api/queue/reset")
+def api_queue_reset():
+    """Clear the queue: stop watching, stop running analyses, and put every
+    unfinished run on hold. Finished results are not touched."""
+    return {"ok": True, **get_watcher().reset_queue()}
 
 
 @app.post("/api/runs/reset-all")

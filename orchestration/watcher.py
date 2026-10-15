@@ -414,8 +414,10 @@ class StateStore:
 
     TERMINAL = {"done", "failed"}
     # A run in any of these states must never be dispatched again.
-    # "detected" is the dry-run outcome and counts as claimed.
-    CLAIMED = {"detected", "dispatched", "running", "done", "failed"}
+    # "detected" is the dry-run outcome and counts as claimed. "held" was taken
+    # off the queue by hand: it waits for someone to resume it, so neither the
+    # scan loop nor a restart may start it.
+    CLAIMED = {"detected", "dispatched", "running", "done", "failed", "held"}
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -679,6 +681,11 @@ class Watcher:
         # is waiting for the GPU must survive someone pressing Stop.
         self._stop = threading.Event()
         self._halt = threading.Event()
+        # Runs to end one by one: key -> "held" (taken off the queue, kept for
+        # later) or "stopped" (Stop all). _halt is for the server shutting
+        # down; it stays set until the next start, so using it for Stop all
+        # also cancelled anything queued by hand afterwards.
+        self._cancel: dict[str, str] = {}
         self._thread: Optional[threading.Thread] = None
         # run_key -> (fingerprint, observed_at) from the previous poll
         self._prints: dict[str, tuple[tuple[int, int, float], float]] = {}
@@ -920,9 +927,13 @@ class Watcher:
             LOG.warning("Could not write the report kit into %s (%s)", out, exc)
             return None
 
-    def start(self) -> None:
+    def start(self, hold_interrupted: bool = False) -> None:
         if self.is_running:
             return
+        if hold_interrupted:
+            interrupted = self.resumable()
+            if interrupted:
+                self.hold(interrupted)
         self.place_report_instructions()
         # Before anything is dispatched, while there is still time to act.
         self.warn_about_foreign_pipelines()
@@ -982,8 +993,69 @@ class Watcher:
         in_flight = [k for k, e in self.state.all().items()
                      if e.get("status") in self.IN_FLIGHT]
         LOG.warning("Cancelling: %d job(s) in flight will be stopped", len(in_flight))
-        self.halt()
+        self.stop()
+        for key in in_flight:
+            self._cancel[key] = "stopped"
+        self._cancel_batches(in_flight)
         return {"cancelled": len(in_flight), "runs": in_flight}
+
+    HELD_DETAIL = "on hold — taken off the queue by hand"
+
+    def hold(self, keys: Optional[list[str]] = None) -> dict:
+        """Take runs off the queue and keep them for later.
+
+        Waiting runs are removed from the queue and running ones are stopped;
+        interrupted ones (and folders still being watched while copying) are
+        simply marked. All of them become "held": nothing starts them again —
+        not the scan loop, not a restart — until someone resumes them, which
+        is queueing the folder again. Finished runs are not touched.
+
+        Stopping a running job costs only the well in flight: finished wells
+        keep their checkpoints and are skipped when the date is resumed.
+        """
+        entries = self.state.all()
+        targets = list(entries) if keys is None else [k for k in keys if k in entries]
+        stopping, removed, held = [], [], []
+        for key in targets:
+            status = entries[key].get("status")
+            if status == "running":
+                self._cancel[key] = "held"
+                stopping.append(key)
+            elif status in ("dispatched", "queued"):
+                self._cancel[key] = "held"
+                removed.append(key)
+            elif status in ("interrupted", "waiting"):
+                self.state.update(key, status="held", completed_at=_now(),
+                                  detail=self.HELD_DETAIL, error=None)
+                held.append(key)
+        self._cancel_batches(stopping + removed)
+        if stopping or removed or held:
+            LOG.warning("Put on hold: %d running job(s) stopping, %d taken out of the "
+                        "queue, %d interrupted or waiting", len(stopping), len(removed),
+                        len(held))
+        return {"stopping": stopping, "removed": removed, "held": held}
+
+    def reset_queue(self) -> dict:
+        """Clear the queue: stop watching, and put every unfinished run on hold.
+
+        For when the plan changes — for example to run only the activity scan.
+        Running analyses are stopped too. Finished results stay as they are,
+        and held dates can be resumed one by one later.
+        """
+        was_watching = self.is_running
+        if was_watching:
+            self.stop()
+        result = self.hold()
+        return {**result, "paused_watching": was_watching}
+
+    def _cancel_batches(self, keys: list[str]) -> None:
+        """A batch with a cancelled run must not build its report when it ends:
+        it would describe a date that was not analysed to the end."""
+        keys = set(keys)
+        with self._batch_lock:
+            for batch in self._batches.values():
+                if not batch["finished"] and batch["pending"] & keys:
+                    batch["cancelled"] = True
 
     def resumable(self) -> list[str]:
         """Jobs a start would pick up again, so the UI can say so first."""
@@ -1422,6 +1494,9 @@ class Watcher:
             return
 
         log_path = self._log_path_for(run_dir, job)
+        # A cancellation is for the run that was in flight when it was asked
+        # for, never for a later one of the same folder.
+        self._cancel.pop(key, None)
         self.state.update(key, status="dispatched", dispatched_at=_now(),
                           log=str(log_path), **common)
         self.on_event("dispatched", {"run": run_dir.name, "job": job, "log": str(log_path)})
@@ -1747,12 +1822,21 @@ class Watcher:
         note_at = 0.0
         while True:
             try:
-                rc = proc.wait(timeout=30)
+                # Short, so a stop asked for from the page takes effect within
+                # seconds; the stall checks below are timed, not counted.
+                rc = proc.wait(timeout=5)
                 return rc, None
             except subprocess.TimeoutExpired:
                 pass
 
-            if self._halt.is_set():
+            if self._cancel.get(key) == "held":
+                LOG.warning("%s [%s] taken off the queue — ending pid %s",
+                            run_name, label, proc.pid)
+                self._kill_tree(proc)
+                return -1, ("taken off the queue by hand while running. Finished wells "
+                            "kept their checkpoints, so resuming repeats only the well "
+                            "in flight.")
+            if self._halt.is_set() or self._cancel.get(key) == "stopped":
                 LOG.warning("%s [%s] shutting down — ending pid %s",
                             run_name, label, proc.pid)
                 self._kill_tree(proc)
@@ -2064,10 +2148,12 @@ class Watcher:
             self.state.update(key, detail=f"queued — waiting for a free {label.lower()} slot")
             self.on_event("queued", {"run": run_dir.name, "job": job})
             wait = max(1, self.cfg.queue_poll_seconds)
-            while not self._halt.is_set():
+            while not self._halt.is_set() and key not in self._cancel:
                 if slot.acquire(timeout=wait):
                     break
             else:
+                if self._end_cancelled_before_start(key):
+                    return
                 self.state.update(key, status="failed", completed_at=_now(),
                                   error="server shut down before the job could start")
                 return
@@ -2078,6 +2164,13 @@ class Watcher:
                 LOG.info("%s [%s] waiting %ss for GPU memory to free", run_dir.name, label, cool)
                 self.state.update(key, detail=f"starting in {cool}s (GPU cooldown)")
                 self._halt.wait(cool)
+
+        # Taken off the queue while waiting for its slot or its cooldown.
+        if key in self._cancel:
+            if slot is not None:
+                slot.release()
+            self._end_cancelled_before_start(key)
+            return
 
         # After the slot is held, so nothing else is writing into this run's
         # output while folders are moved, and before the driver starts, since
@@ -2178,6 +2271,13 @@ class Watcher:
                 LOG.error("%s [%s] %s", run_dir.name, label, copy_error)
                 self.on_event("failed", {"run": run_dir.name, "job": job, "error": copy_error})
                 return
+            if stall and self._cancel.get(key) == "held":
+                self.state.update(key, status="held", completed_at=_now(), returncode=rc,
+                                  error=None, detail=self.HELD_DETAIL,
+                                  duration_s=round(time.time() - started, 1))
+                LOG.warning("%s [%s] stopped and put on hold", run_dir.name, label)
+                self.on_event("held", {"run": run_dir.name, "job": job})
+                return
             if stall:
                 self.state.update(key, status="failed", completed_at=_now(),
                                   returncode=rc, error=stall,
@@ -2230,7 +2330,24 @@ class Watcher:
                 slot.release()
             # Terminal either way — a failed job must still close its batch, or
             # the batch would never finish and no report would ever be built.
+            self._cancel.pop(key, None)
             self._batch_finished(key)
+
+    def _end_cancelled_before_start(self, key: str) -> bool:
+        """Close a run that was cancelled before it started. False if it was not."""
+        outcome = self._cancel.pop(key, None)
+        if outcome is None:
+            return False
+        if outcome == "held":
+            self.state.update(key, status="held", completed_at=_now(),
+                              detail=self.HELD_DETAIL, error=None)
+        else:
+            self.state.update(key, status="failed", completed_at=_now(),
+                              error="cancelled — stopped by hand before it started")
+        self.on_event("held" if outcome == "held" else "failed",
+                      {"run": Path(key.split("::")[0]).name})
+        self._batch_finished(key)
+        return True
 
     # -- queueing ------------------------------------------------------------ #
     TERMINAL = {"done", "failed"}
@@ -2333,7 +2450,7 @@ class Watcher:
                     batch["completed_at"] = _now()
                     ready.append(batch)
         for batch in ready:
-            hook = batch.get("on_complete")
+            hook = None if batch.get("cancelled") else batch.get("on_complete")
             LOG.info("Batch %s complete (%d job(s))", batch["id"], len(batch["keys"]))
             self.on_event("batch_done", {"batch": batch["id"],
                                          "jobs": len(batch["keys"])})

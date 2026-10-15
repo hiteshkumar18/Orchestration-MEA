@@ -263,7 +263,8 @@ The four numbers at the top count recording dates: **Waiting**, **Analysing**,
 | **Waiting for copy** | The recording is still arriving from the rig. |
 | **Analysing** | Running now. "N wells finished so far" updates as it goes. |
 | **Done** | Both analyses finished. A note says how many wells finished. |
-| **Paused — will resume** | Interrupted (e.g. the computer restarted); it continues by itself. |
+| **Paused — will resume** | Interrupted (e.g. the computer restarted). It continues when you press **Watch for new** — the page asks first, and you can keep it on hold instead. |
+| **On hold** | Taken off the queue by hand. Nothing starts it until you press **Resume**. |
 | **Needs attention** | Something went wrong — press **Log** to see why, or ask for help. |
 
 **Buttons on each line**
@@ -277,7 +278,19 @@ The four numbers at the top count recording dates: **Waiting**, **Analysing**,
   highlighted in red. **Show everything** shows the raw log.
 - **Report** — opens the newest report for that date (appears once a report exists).
 - **Details** — the full page for this analysis run (see Part 5b).
+- **Hold** — take this date off the queue and keep it for later. If it is
+  being analysed, that stops now; wells that already finished keep their
+  results, so resuming repeats only the well that was in progress.
+- **Resume** — put a date that is on hold back in the queue.
 - **↻** — analyse this date again.
+
+**Reset queue** (above the list, shown while anything is unfinished) stops all
+analyses that are running, takes everything waiting off the queue, pauses
+**Watch for new**, and puts all those dates **On hold**. Finished results are
+not touched. Use it when the plan changes — for example to run only the
+activity scan: press **Reset queue**, switch off **Network analysis** in
+**Settings**, save, then press **Resume** on the dates you want (only the
+activity scan runs; the Network part stays on hold).
 
 Typical times with spike sorting off: a few minutes per well, so roughly
 30 minutes to 2 hours per recording date depending on its size.
