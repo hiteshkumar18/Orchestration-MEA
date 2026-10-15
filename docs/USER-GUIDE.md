@@ -13,6 +13,12 @@ What this tool does:
 
 Your raw recordings are **only ever read**, never changed or moved.
 
+> **Most lab members need no setup at all.** The lab runs one shared control
+> page for everyone. Open **http://benshalom-labtower1:8000** in your browser
+> (on the university network or VPN), sign in with your name and email, and go
+> straight to [Part 4](#part-4--analyse-recordings). Part 1 is only for running
+> a separate copy of your own.
+
 ---
 
 ## Contents
@@ -163,9 +169,25 @@ You can now type `exit` to log out of the analysis computer. Setup is done.
 
 ## Part 2 — Open the control page
 
-The control page is a web page served by the analysis computer. For safety it
-is not open to the network; you reach it through an **SSH tunnel** — a private
-connection from your computer.
+### The lab's shared page (most people)
+
+Open **http://benshalom-labtower1:8000** in your browser. If that name is not
+found, use the computer's address instead: **http://10.157.209.11:8000**. You
+need to be on the university network or VPN.
+
+**Sign in** with your **name** and **email address**. There is no password: your
+name is shown on every analysis you start, so everyone can see whose analysis
+is whose. Use the same email each time — it is what identifies you. Your
+browser stays signed in for 30 days; **Sign out** is at the top right, next to
+your name.
+
+Everyone uses the same page and the same queue. You can add dates while other
+people's analyses are running; yours wait their turn and start automatically.
+
+### Your own copy (only if you set one up in Part 1)
+
+Your own copy is not open to the network; you reach it through an **SSH
+tunnel** — a private connection from your computer.
 
 **Each time you want to use it:**
 
@@ -238,15 +260,33 @@ There are two ways. Most people use the first.
 3. Press **Analyse N dates** at the bottom.
 
 The dates are analysed in order, one at a time (you can allow two at once under
-**Settings → Advanced → Network analyses at once**, if the lab agrees). To analyse an already analysed
-date again, also tick **Also redo …** — its results are computed again and replaced.
+**Settings → Advanced → Network analyses at once**, if the lab agrees).
+
+**Already analysed by someone?** A date that anyone has already analysed is
+marked **analysed**, with who did it. If you tick it anyway, the bar at the
+bottom tells you who analysed it, when, and **the folder where its results
+already are** — usually you can just use those. It is skipped unless you also
+tick **Run it again anyway**, which computes its results again and replaces
+them (the earlier run stays in the history). A date that is **analysing** or
+**in queue** shows who started it, and cannot be added a second time. If the
+earlier results have been deleted, the date counts as not analysed.
 
 ### Automatic — "Watch for new"
 
 Press **Watch for new** (top right). From then on, every new recording date that
 appears in your project folder is analysed automatically, once its copy has
-finished. Press **Pause watching** to stop picking up new dates (analyses that
-are already running carry on).
+finished. Those dates are shown as started by whoever pressed **Watch for new**.
+Press **Pause watching** to stop picking up new dates (analyses that are already
+running carry on).
+
+### Who started what
+
+Every date in **Progress** says who started it and when (*started by Ana · 14
+Oct, 09:12*). The Dashboard's **Run history** has a **Started by** column, and
+each run's page shows the name and email. **Who did what** on the Dashboard
+lists every sign-in, every date queued, held, resumed or stopped, every queue
+reset and every settings change, with the person's name — so if something
+stopped, you can see who stopped it.
 
 ---
 
@@ -431,7 +471,13 @@ channel**, not a neuron.
 
 ## Rules for sharing the computer
 
-The analysis computer is shared. Please:
+The analysis computer is shared, and so is the control page: everyone can hold,
+stop or reset any analysis, and change the settings. Everything is recorded
+under your name. **Before stopping, holding or resetting someone else's
+analysis, or changing the settings, ask them** — the settings (where recordings
+come from, where results go, which analyses run) apply to everyone's analyses.
+
+Please also:
 
 1. **Never change, move or delete anything in the recordings folders** on the
    NAS. The tool only reads them.

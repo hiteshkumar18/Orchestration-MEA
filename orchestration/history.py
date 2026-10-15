@@ -48,7 +48,10 @@ CREATE TABLE IF NOT EXISTS runs (
     duration_s    REAL,
     settings      TEXT,
     imported      INTEGER DEFAULT 0,
-    created       TEXT NOT NULL
+    created       TEXT NOT NULL,
+    started_by    TEXT,
+    started_by_email TEXT,
+    output_dir    TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_key ON runs(key);
 CREATE INDEX IF NOT EXISTS runs_created ON runs(created);
@@ -60,6 +63,10 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id);
 """
+
+# Columns added after the first release: a history file written before them
+# gets them on open. Who started the run, and where its results were written.
+ADDED_COLUMNS = (("started_by", "TEXT"), ("started_by_email", "TEXT"), ("output_dir", "TEXT"))
 
 # The watcher's once-a-minute "still running" note: kept as the run's current
 # detail, but not a step worth a line in its timeline.
@@ -89,6 +96,10 @@ class RunHistory:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            have = {r["name"] for r in self._db.execute("PRAGMA table_info(runs)")}
+            for col, kind in ADDED_COLUMNS:
+                if col not in have:
+                    self._db.execute(f"ALTER TABLE runs ADD COLUMN {col} {kind}")
             self._db.commit()
         # Called at dispatch to record the settings a run used.
         self._settings_snapshot = settings_snapshot or (lambda: {})
@@ -150,10 +161,11 @@ class RunHistory:
         except Exception:  # noqa: BLE001
             settings = "{}"
         self._db.execute(
-            "INSERT INTO runs(id, key, folder, project, date, job, job_label, created, settings) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO runs(id, key, folder, project, date, job, job_label, created, settings, "
+            "started_by, started_by_email, output_dir) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, key, folder, project, date, entry.get("job") or job, entry.get("job_label"),
-             _now(), settings))
+             _now(), settings, entry.get("started_by"), entry.get("started_by_email"),
+             entry.get("output_dir")))
         self._open[key] = run_id
         return run_id
 
@@ -213,6 +225,23 @@ class RunHistory:
                                  (key,)).fetchone()
             return r["id"] if r else None
 
+    def last_done(self, key: str) -> Optional[dict[str, Any]]:
+        """The most recent finished run of this folder and analysis: who
+        started it, when it finished, where its results went."""
+        with self._lock:
+            r = self._db.execute(
+                "SELECT id, started_by, started_by_email, completed_at, created, output_dir, settings "
+                "FROM runs WHERE key=? AND status='done' ORDER BY created DESC LIMIT 1",
+                (key,)).fetchone()
+        if not r:
+            return None
+        run = dict(r)
+        try:
+            run["settings"] = json.loads(run.get("settings") or "{}")
+        except ValueError:
+            run["settings"] = {}
+        return run
+
     def knows_log(self, *paths: str) -> bool:
         """Whether a log file is one this tool wrote for a recorded run."""
         with self._lock:
@@ -248,7 +277,8 @@ class RunHistory:
             total = self._db.execute("SELECT COUNT(*) " + sql, args).fetchone()[0]
             rows = [dict(r) for r in self._db.execute(
                 "SELECT id, key, folder, project, date, job, job_label, status, detail, error, log, "
-                "dispatched_at, started_at, completed_at, duration_s, imported, created "
+                "dispatched_at, started_at, completed_at, duration_s, imported, created, "
+                "started_by, started_by_email, output_dir "
                 + sql + " ORDER BY created DESC LIMIT ? OFFSET ?", (*args, limit, offset))]
             projects = [r[0] for r in self._db.execute(
                 "SELECT DISTINCT project FROM runs WHERE project IS NOT NULL ORDER BY project")]

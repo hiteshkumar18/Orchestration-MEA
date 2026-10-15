@@ -27,7 +27,7 @@ const data={
    queue_poll_seconds:2,settle_seconds:600,poll_seconds:30,logs_in_output:true,stage_locally:false,
    scratch_dir:'',stage_min_free_gb:200,activity_active_hz:0.05,h5_glob:'data.raw.h5',driver_python:''},
  '/api/schema':{groups:[]},'/api/env':{},'/api/queue':{batches:[]},'/api/handoff':{state:'idle'},'/api/overview':{running:[],attention:[],recent:[],counts:{},limits:{},active_jobs:{}},'/api/system':{ready:false},'/api/history':{total:0,runs:[],projects:[]},'/api/reports':{reports:[{project:'in',label:'260828',path:'/out/r.html',built:'2026-10-05T10:00'}]},
- '/api/logs':{lines:[]},'/api/picker':{},
+ '/api/logs':{lines:[]},'/api/picker':{},'/api/me':{user:{id:1,name:'Test Person',email:'test@lab.org'}},
  '/api/runs/checkpoints':{summary:{wells:19,complete:18,failed:1},
    wells:[{well:'well001',run_id:'000061',chip_id:'M07036',stage:10,stage_name:'Reports complete',
            progress:1,status:'complete',failed_stage:null,error:null,

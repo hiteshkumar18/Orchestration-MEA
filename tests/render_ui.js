@@ -46,7 +46,7 @@ const data = {
                    stage_locally: false, scratch_dir: '', stage_min_free_gb: 200,
                    activity_active_hz: 0.05, h5_glob: 'data.raw.h5', driver_python: '' },
   '/api/schema': { groups: [] }, '/api/env': {}, '/api/queue': { batches: [] },
-  '/api/handoff': { state: 'idle' }, '/api/overview': { running: [], attention: [], recent: [], counts: {}, limits: {}, active_jobs: {} }, '/api/system': { ready: false }, '/api/history': { total: 0, runs: [], projects: [] }, '/api/reports': { reports: [] }, '/api/logs': { lines: [] }, '/api/picker': {},
+  '/api/handoff': { state: 'idle' }, '/api/overview': { running: [], attention: [], recent: [], counts: {}, limits: {}, active_jobs: {} }, '/api/system': { ready: false }, '/api/history': { total: 0, runs: [], projects: [] }, '/api/reports': { reports: [] }, '/api/logs': { lines: [] }, '/api/picker': {}, '/api/me': { user: { id: 1, name: 'Test Person', email: 'test@lab.org' } },
 };
 w.fetch = (url) => {
   const body = data[String(url).split('?')[0]] ?? {};

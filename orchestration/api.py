@@ -19,6 +19,13 @@ Serves the single-page frontend and exposes the watcher as a REST API:
     POST /api/requirements  save the AI report requirements (any time)
     POST /api/handoff       prepare an AI report handoff folder
     GET  /api/handoff       the last handoff prepared
+    POST /api/login         sign in with a name and email (no password)
+    POST /api/logout        sign out
+    GET  /api/me            who is signed in
+    GET  /api/audit         who did what, newest first
+
+Every /api/ route needs a signed-in session (cookie), except signing in and
+the report command's status check from this machine.
 
 Run:
     pip install fastapi uvicorn
@@ -38,7 +45,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,6 +64,7 @@ from watcher import (  # noqa: E402
     has_finished_marker, list_h5,
 )
 import handoff  # noqa: E402
+from accounts import Accounts  # noqa: E402
 
 LOG = logging.getLogger("mea.api")
 HERE = Path(__file__).resolve().parent
@@ -106,6 +114,59 @@ WORK_DIR = DEFAULT_WORK_DIR
 CONFIG_PATH = WORK_DIR / "job.json"
 _watcher: Optional[Watcher] = None
 _events: list[dict] = []
+
+# --------------------------------------------------------------------------- #
+# Who is using the page
+# --------------------------------------------------------------------------- #
+SESSION_COOKIE = "mea_session"
+_accounts: Optional[Accounts] = None
+_accounts_lock = threading.Lock()
+# Open without signing in: the sign-in itself, and asking who is signed in.
+OPEN_API = {"/api/login", "/api/logout", "/api/me"}
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def get_accounts() -> Accounts:
+    global _accounts
+    with _accounts_lock:
+        if _accounts is None:
+            _accounts = Accounts(WORK_DIR / "users.sqlite")
+        return _accounts
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    """Every API call names a signed-in person. The page itself and its
+    files load without one, so the page can show the sign-in form."""
+    path = request.url.path
+    request.state.user = None
+    if path.startswith("/api/") and path not in OPEN_API:
+        user = get_accounts().user_for(request.cookies.get(SESSION_COOKIE))
+        # The report command (report/make_report.py) asks this server, from
+        # this machine, whether a date has finished.
+        local_status = (path == "/api/status" and request.method == "GET"
+                        and request.client is not None and request.client.host in LOOPBACK)
+        if user is None and not local_status:
+            return JSONResponse({"detail": "Please sign in."}, status_code=401)
+        request.state.user = user
+    return await call_next(request)
+
+
+def _user(request: Request) -> Optional[dict]:
+    return getattr(request.state, "user", None)
+
+
+def _audit(request: Request, action: str, detail: str = "") -> None:
+    """Record who did what, and say it in the activity feed."""
+    user = _user(request)
+    get_accounts().record(user, action, detail)
+    LOG.info("%s: %s%s", (user or {}).get("name") or "someone", action,
+             f" — {detail}" if detail else "")
+
+
+def _dates(paths) -> str:
+    names = sorted({Path(str(p).split("::")[0]).name for p in paths})
+    return ", ".join(names[:12]) + (f" and {len(names) - 12} more" if len(names) > 12 else "")
 
 
 def _record_event(kind: str, payload: dict) -> None:
@@ -306,7 +367,7 @@ def api_get_config():
 
 
 @app.post("/api/config")
-def api_set_config(payload: ConfigPayload):
+def api_set_config(payload: ConfigPayload, request: Request):
     watcher = get_watcher()
     if watcher.is_running:
         raise HTTPException(409, "Stop the watcher before changing configuration.")
@@ -394,6 +455,9 @@ def api_set_config(payload: ConfigPayload):
         if cleared:
             LOG.info("Dry run disabled — cleared %d detected run(s) for real analysis", cleared)
 
+    _audit(request, "saved the settings",
+           f"recordings {cfg.watch_dir or '—'}; results {cfg.output_dir or '—'}; "
+           f"analyses {', '.join(cfg.enabled_jobs()) or 'none'}")
     return {"ok": True, "saved_to": str(CONFIG_PATH), "cleared_detected": cleared}
 
 
@@ -554,19 +618,24 @@ def api_preview(payload: ConfigPayload):
 # Routes — watcher control & status
 # --------------------------------------------------------------------------- #
 @app.post("/api/watcher/start")
-def api_start(hold_interrupted: bool = False):
+def api_start(request: Request, hold_interrupted: bool = False):
     """Start watching. Interrupted runs are picked up again unless
-    ``hold_interrupted`` asks for them to be put on hold first."""
+    ``hold_interrupted`` asks for them to be put on hold first. Dates found
+    while watching are recorded as started by whoever started watching."""
     watcher = get_watcher()
     errors = watcher.cfg.validate()
     if errors:
         raise HTTPException(400, {"errors": errors})
-    watcher.start(hold_interrupted=hold_interrupted)
+    was = watcher.is_running
+    watcher.start(hold_interrupted=hold_interrupted, user=_user(request))
+    if not was:
+        _audit(request, "started watching for new recordings",
+               watcher.cfg.watch_dir + (" (interrupted dates kept on hold)" if hold_interrupted else ""))
     return {"ok": True, "running": watcher.is_running}
 
 
 @app.post("/api/watcher/stop")
-def api_stop(cancel_running: bool = False):
+def api_stop(request: Request, cancel_running: bool = False):
     """Stop scanning, and optionally cancel work already in flight.
 
     Plain stop leaves running drivers alone, which is right when settings are
@@ -578,8 +647,10 @@ def api_stop(cancel_running: bool = False):
     watcher = get_watcher()
     if cancel_running:
         result = watcher.cancel_all()
+        _audit(request, "stopped all analyses", _dates(result["runs"]) or "nothing was running")
         return {"ok": True, "running": watcher.is_running, **result}
     watcher.stop()
+    _audit(request, "paused watching")
     return {"ok": True, "running": watcher.is_running, "cancelled": 0}
 
 
@@ -762,7 +833,7 @@ def api_gpu(refresh: bool = False):
 
 
 @app.post("/api/runs/reset")
-def api_reset(payload: RunKeyPayload):
+def api_reset(payload: RunKeyPayload, request: Request):
     """Forget a run so it can be processed again.
 
     State is keyed ``<folder>::<job>`` but the settle-window fingerprint cache is
@@ -777,11 +848,12 @@ def api_reset(payload: RunKeyPayload):
     folder = payload.path.split("::")[0]
     watcher._prints.pop(folder, None)
     watcher._prints.pop(payload.path, None)   # tolerate a bare folder path
+    _audit(request, "cleared a run so it can be analysed again", payload.path)
     return {"ok": True, "cleared_fingerprint_for": folder}
 
 
 @app.post("/api/runs/hold")
-def api_hold(payload: HoldPayload):
+def api_hold(payload: HoldPayload, request: Request):
     """Take runs off the queue and keep them for later (status "held").
 
     Waiting runs leave the queue, running ones are stopped, interrupted ones
@@ -789,18 +861,23 @@ def api_hold(payload: HoldPayload):
     """
     if not payload.paths:
         raise HTTPException(400, "Choose at least one run.")
-    return {"ok": True, **get_watcher().hold(payload.paths)}
+    res = get_watcher().hold(payload.paths)
+    _audit(request, "put on hold", _dates(payload.paths))
+    return {"ok": True, **res}
 
 
 @app.post("/api/queue/reset")
-def api_queue_reset():
+def api_queue_reset(request: Request):
     """Clear the queue: stop watching, stop running analyses, and put every
     unfinished run on hold. Finished results are not touched."""
-    return {"ok": True, **get_watcher().reset_queue()}
+    res = get_watcher().reset_queue()
+    _audit(request, "reset the queue",
+           _dates(res["stopping"] + res["removed"] + res["held"]) or "nothing was waiting")
+    return {"ok": True, **res}
 
 
 @app.post("/api/runs/reset-all")
-def api_reset_all(payload: ResetAllPayload):
+def api_reset_all(payload: ResetAllPayload, request: Request):
     """Forget many runs at once, so a fresh start is one click.
 
     Anything still in flight is left alone: clearing a running job would let the
@@ -827,6 +904,7 @@ def api_reset_all(payload: ResetAllPayload):
 
     LOG.info("Cleared %d run(s) [%s]%s", len(cleared), payload.which,
              f", {len(skipped)} still running" if skipped else "")
+    _audit(request, f"cleared {len(cleared)} {payload.which} run(s)", _dates(cleared))
     return {"ok": True, "cleared": len(cleared), "runs": sorted(set(cleared)),
             "skipped": skipped}
 
@@ -1054,7 +1132,7 @@ def api_queue_inspect(payload: QueuePayload):
 
 
 @app.post("/api/queue")
-def api_queue(payload: QueuePayload):
+def api_queue(payload: QueuePayload, request: Request):
     if not payload.folders:
         raise HTTPException(400, "Select at least one folder.")
     watcher = get_watcher()
@@ -1065,11 +1143,16 @@ def api_queue(payload: QueuePayload):
     auto = watcher.cfg.auto_handoff if payload.auto_handoff is None else payload.auto_handoff
     res = watcher.queue_folders(
         payload.folders, rerun=payload.rerun,
-        on_complete=_batch_handoff if auto else None)
+        on_complete=_batch_handoff if auto else None, user=_user(request))
+    if res["queued"]:
+        _audit(request, "queued for analysis" + (" again" if payload.rerun else ""),
+               _dates(q["path"] for q in res["queued"]))
     if not res["queued"]:
         # Nothing to do is a useful answer, not an error — but say why.
-        reasons = sorted({s.get("reason", "") for s in res["skipped"]})
-        raise HTTPException(409, "Nothing was queued: " + "; ".join(reasons))
+        reasons = sorted({(Path(s["path"]).name + (f" ({JOB_LABELS.get(s['job'], s['job'])})"
+                                                   if s.get("job") else "") + ": " + s.get("reason", ""))
+                          for s in res["skipped"]})
+        raise HTTPException(409, "Nothing was queued.\n" + "\n".join(reasons))
     return res
 
 
@@ -1100,7 +1183,7 @@ class HandoffPayload(BaseModel):
 
 
 @app.post("/api/requirements")
-def api_requirements(payload: RequirementsPayload):
+def api_requirements(payload: RequirementsPayload, request: Request):
     """Save the report requirements. Allowed while running — it is not a
     pipeline setting, and the text box should never be locked."""
     watcher = get_watcher()
@@ -1108,11 +1191,14 @@ def api_requirements(payload: RequirementsPayload):
     if payload.auto_handoff is not None:
         watcher.cfg.auto_handoff = payload.auto_handoff
     watcher.cfg.save(CONFIG_PATH)
+    _audit(request, "saved the AI report instructions",
+           "" if payload.auto_handoff is None else
+           f"automatic reports {'on' if payload.auto_handoff else 'off'}")
     return {"ok": True, "chars": len(payload.text)}
 
 
 @app.post("/api/handoff")
-def api_handoff(payload: HandoffPayload):
+def api_handoff(payload: HandoffPayload, request: Request):
     """Start building reports and Claude packages; poll GET /api/handoff.
 
     In the background: a report takes a minute or so per date, and "every
@@ -1135,6 +1221,7 @@ def api_handoff(payload: HandoffPayload):
         LAST_HANDOFF.clear()
         LAST_HANDOFF.update({"state": "running", "started": time.time(), "label": label})
     threading.Thread(target=run, name="mea-report", daemon=True).start()
+    _audit(request, "asked for a report", _dates(folders) if folders else "every finished date")
     return {"state": "running"}
 
 
@@ -1194,6 +1281,53 @@ def api_report_view(path: str):
 def api_handoff_status():
     with HANDOFF_LOCK:
         return dict(LAST_HANDOFF)
+
+
+# --------------------------------------------------------------------------- #
+# Signing in
+# --------------------------------------------------------------------------- #
+class LoginPayload(BaseModel):
+    name: str = ""
+    email: str = ""
+
+
+@app.post("/api/login")
+def api_login(payload: LoginPayload, request: Request):
+    try:
+        token, user = get_accounts().login(
+            payload.name, payload.email, ip=request.client.host if request.client else "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    request.state.user = user
+    _audit(request, "signed in", request.client.host if request.client else "")
+    resp = JSONResponse({"user": user})
+    resp.set_cookie(SESSION_COOKIE, token, max_age=30 * 86400, httponly=True, samesite="lax")
+    return resp
+
+
+@app.post("/api/logout")
+def api_logout(request: Request):
+    token = request.cookies.get(SESSION_COOKIE)
+    user = get_accounts().user_for(token)
+    if user:
+        request.state.user = user
+        _audit(request, "signed out")
+    get_accounts().logout(token)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(SESSION_COOKIE)
+    return resp
+
+
+@app.get("/api/me")
+def api_me(request: Request):
+    """Who is signed in on this browser; {"user": null} if nobody."""
+    return {"user": get_accounts().user_for(request.cookies.get(SESSION_COOKIE))}
+
+
+@app.get("/api/audit")
+def api_audit(limit: int = 100):
+    return {"entries": get_accounts().audit(max(1, min(limit, 1000))),
+            "users": get_accounts().users()}
 
 
 # --------------------------------------------------------------------------- #

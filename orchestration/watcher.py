@@ -292,6 +292,17 @@ class JobConfig:
         pd_ = self.project_dir(run_dir)
         return str(pd_ / "ActivityScan") if pd_ else None
 
+    def result_dir_for(self, run_dir: Path | str, job: str) -> Optional[str]:
+        """Where one analysis of one recording folder writes its results:
+        <output>/<project>/<date> for Network, <activity output>/<date> for
+        the activity scan."""
+        date = Path(run_dir).name
+        if job == JOB_ACTIVITY:
+            base = self.activity_out_for(run_dir)
+            return str(Path(base) / date) if base else None
+        pd_ = self.project_dir(run_dir)
+        return str(pd_ / date) if pd_ else None
+
     def enabled_jobs(self) -> list[str]:
         jobs = []
         if self.run_network:
@@ -732,6 +743,18 @@ class Watcher:
         self._stage_reserved: dict[str, float] = {}
         self._stage_lock = threading.Lock()
         self.on_batch_done: Optional[Callable[[dict], None]] = None
+        # Who pressed "Watch for new": dates the scan loop picks up are
+        # recorded as started by them. {"name", "email"} or None.
+        self.watch_owner: Optional[dict] = None
+        # Deciding to start a folder and marking it started happen together:
+        # two people queueing the same date at once, or a person and the scan
+        # loop, must not both start it.
+        self._queue_lock = threading.RLock()
+        # Starting to watch takes a while (it checks the pipeline and lists
+        # the folders). A pause or a queue reset pressed meanwhile must wait
+        # for the start and then undo it, not find "not watching" and let the
+        # start finish afterwards.
+        self._life_lock = threading.RLock()
 
     def _settings_snapshot(self) -> dict:
         """What a run is launched with — stored with each run in the history."""
@@ -951,9 +974,14 @@ class Watcher:
             LOG.warning("Could not write the report kit into %s (%s)", out, exc)
             return None
 
-    def start(self, hold_interrupted: bool = False) -> None:
+    def start(self, hold_interrupted: bool = False, user: Optional[dict] = None) -> None:
+        with self._life_lock:
+            self._start(hold_interrupted, user)
+
+    def _start(self, hold_interrupted: bool, user: Optional[dict]) -> None:
         if self.is_running:
             return
+        self.watch_owner = user
         if hold_interrupted:
             interrupted = self.resumable()
             if interrupted:
@@ -987,9 +1015,10 @@ class Watcher:
 
     def stop(self, timeout: float = 5.0) -> None:
         """Stop scanning for new folders. Queued and running jobs continue."""
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=timeout)
+        with self._life_lock:
+            self._stop.set()
+            if self._thread:
+                self._thread.join(timeout=timeout)
         LOG.info("Watcher stopped (queued jobs continue)")
         self.on_event("stopped", {})
 
@@ -1066,9 +1095,10 @@ class Watcher:
         Running analyses are stopped too. Finished results stay as they are,
         and held dates can be resumed one by one later.
         """
-        was_watching = self.is_running
-        if was_watching:
-            self.stop()
+        with self._life_lock:
+            was_watching = self.is_running
+            if was_watching:
+                self.stop()
         result = self.hold()
         return {**result, "paused_watching": was_watching}
 
@@ -1352,7 +1382,9 @@ class Watcher:
                                f"{self.cfg.subfolder_for(job)}",
                         last_seen=_now())
                 elif ready:
-                    self.dispatch(run_dir, job, detail=detail)
+                    with self._queue_lock:
+                        if not self.state.is_claimed(key):
+                            self.dispatch(run_dir, job, detail=detail)
                 else:
                     self.state.update(key, status="waiting", detail=detail,
                                       job=job, run=run_dir.name, last_seen=_now())
@@ -1483,9 +1515,20 @@ class Watcher:
             cmd += ["--selection-auto", "--network-subfolder", self.cfg.assay_subfolder]
         return cmd
 
-    def dispatch(self, run_dir: Path, job: str = JOB_NETWORK, detail: str = "") -> None:
+    @staticmethod
+    def _who(user: Optional[dict]) -> dict:
+        """State fields naming the person who started a run."""
+        if not user:
+            return {}
+        return {"started_by": user.get("name"), "started_by_email": user.get("email")}
+
+    def dispatch(self, run_dir: Path, job: str = JOB_NETWORK, detail: str = "",
+                 user: Optional[dict] = None) -> None:
+        """Start one analysis of one folder. `user` started it by hand; a
+        date the scan loop found is started by whoever is watching."""
         key = self.state_key(run_dir.resolve(), job)
         label = JOB_LABELS.get(job, job)
+        who = self._who(user or self.watch_owner)
 
         # Do not spend a dispatch on an interpreter that cannot import the
         # pipeline — the driver would fail confusingly rather than clearly.
@@ -1499,7 +1542,7 @@ class Watcher:
                 self.state.update(key, status="failed", job=job, job_label=label,
                                   run=run_dir.name, completed_at=_now(),
                                   detail="environment problem, not a data problem",
-                                  error=msg)
+                                  error=msg, **who)
                 self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
                 self._batch_finished(key)
                 return
@@ -1508,7 +1551,8 @@ class Watcher:
         LOG.info("Dispatching %s [%s]:\n    %s", run_dir.name, label, printable)
 
         common = {"job": job, "job_label": label, "run": run_dir.name,
-                  "command": printable, "detail": detail}
+                  "command": printable, "detail": detail,
+                  "output_dir": self.cfg.result_dir_for(run_dir, job), **who}
 
         if self.cfg.dry_run:
             self.state.update(key, status="detected", detected_at=_now(), **{
@@ -2227,6 +2271,17 @@ class Watcher:
                     self.state.update(key, detail=f"staged on local disk: {staged}")
                     LOG.info("%s [%s] staging output at %s", run_dir.name, label, staged)
 
+        # Taken off the queue while its folder was being prepared (clearing
+        # old sorter output and staging take seconds to minutes): end it now,
+        # not after the analysis has started.
+        if key in self._cancel:
+            if staged is not None:
+                self._remove_scratch(staged)
+            if slot is not None:
+                slot.release()
+            self._end_cancelled_before_start(key)
+            return
+
         started = time.time()
         with self._active_lock:
             self._active[job] = self._active.get(job, 0) + 1
@@ -2398,22 +2453,77 @@ class Watcher:
                 out.append(row)
                 continue
             for job in jobs:
-                st = self.state.status(self.state_key(d.resolve(), job))
+                key = self.state_key(d.resolve(), job)
+                st = self.state.status(key)
+                prev = self.previous_analysis(d, job)
                 row["jobs"].append({"job": job, "label": JOB_LABELS.get(job, job),
                                     "status": st or "new",
-                                    "already_done": st in self.TERMINAL})
+                                    "already_done": st in self.TERMINAL,
+                                    "previous": prev,
+                                    "analysed": bool(prev and prev["output_exists"]),
+                                    "in_flight": self._in_flight_by(key)})
             out.append(row)
         return out
 
+    def previous_analysis(self, run_dir: Path, job: str) -> Optional[dict]:
+        """The last finished analysis of this folder: who started it, when
+        it finished, and where its results are (and whether they still are).
+        None if it was never analysed to the end."""
+        key = self.state_key(Path(run_dir).resolve(), job)
+        entry = self.state.get(key)
+        prev = None
+        if self.history is not None:
+            try:
+                prev = self.history.last_done(key)
+            except Exception:  # noqa: BLE001
+                prev = None
+        if prev is None and entry.get("status") != "done":
+            return None
+        prev = prev or {}
+        out = prev.get("output_dir") or entry.get("output_dir")
+        if not out and job == JOB_NETWORK and (prev.get("settings") or {}).get("output_dir"):
+            # Runs recorded before the results folder was: the settings they
+            # ran with say where the results went.
+            out = str(Path(prev["settings"]["output_dir"]) / Path(run_dir).parent.name
+                      / Path(run_dir).name)
+        out = out or self.cfg.result_dir_for(run_dir, job)
+        return {"by": prev.get("started_by") or entry.get("started_by"),
+                "email": prev.get("started_by_email") or entry.get("started_by_email"),
+                "finished": prev.get("completed_at") or entry.get("completed_at"),
+                "output": out, "output_exists": bool(out) and Path(out).is_dir()}
+
+    def _in_flight_by(self, key: str) -> Optional[dict]:
+        """Who started a run that is waiting or running now, if it is."""
+        e = self.state.get(key)
+        if e.get("status") not in self.IN_FLIGHT:
+            return None
+        return {"status": e.get("status"), "by": e.get("started_by"),
+                "since": e.get("dispatched_at")}
+
+    @staticmethod
+    def _say_previous(prev: dict) -> str:
+        who = f" by {prev['by']}" if prev.get("by") else ""
+        when = f" on {prev['finished'][:10]}" if prev.get("finished") else ""
+        return f"already analysed{who}{when} — the results are in {prev['output']}"
+
     def queue_folders(self, paths: list[str], rerun: bool = False,
-                      on_complete: Optional[Callable[[dict], None]] = None) -> dict:
+                      on_complete: Optional[Callable[[dict], None]] = None,
+                      user: Optional[dict] = None) -> dict:
         """Queue folders for analysis, and track them as one batch.
 
         Folders already analysed are skipped unless `rerun` is asked for: a
         Network job is an hour of GPU time, so re-running one must be a choice
-        rather than a side effect of selecting a folder twice.
+        rather than a side effect of selecting a folder twice. The skip says
+        who analysed it and where the results are. A folder whose results have
+        since been deleted counts as not analysed.
         """
         self.place_report_instructions()
+        with self._queue_lock:
+            return self._queue_folders(paths, rerun, on_complete, user)
+
+    def _queue_folders(self, paths: list[str], rerun: bool,
+                       on_complete: Optional[Callable[[dict], None]],
+                       user: Optional[dict]) -> dict:
         batch_id = f"batch-{int(time.time())}-{len(self._batches) + 1}"
         queued: list[dict] = []
         skipped: list[dict] = []
@@ -2431,15 +2541,26 @@ class Watcher:
             for job in jobs:
                 key = self.state_key(d.resolve(), job)
                 status = self.state.status(key)
-                if status in self.TERMINAL and not rerun:
-                    skipped.append({"path": str(d), "job": job,
-                                    "reason": f"already {status}"})
-                    continue
                 if status in ("detected", "dispatched", "running", "queued"):
+                    by = self.state.get(key).get("started_by")
                     skipped.append({"path": str(d), "job": job,
-                                    "reason": f"already {status}"})
+                                    "reason": f"already {status}"
+                                              + (f" — started by {by}" if by else "")})
                     continue
-                if rerun and status is not None:
+                prev = self.previous_analysis(d, job)
+                gone = bool(prev) and not prev["output_exists"]
+                # Held, interrupted or waiting: this is the date's own unfinished
+                # run being continued (Resume), not a repeat of an earlier one.
+                resuming = status in ("held", "interrupted", "waiting")
+                if prev and not gone and not rerun and not resuming:
+                    skipped.append({"path": str(d), "job": job, "previous": prev,
+                                    "reason": self._say_previous(prev)})
+                    continue
+                if status == "failed" and not rerun:
+                    skipped.append({"path": str(d), "job": job,
+                                    "reason": "already failed"})
+                    continue
+                if (rerun or gone) and status is not None:
                     self.state.reset(key)
                 queued.append({"path": str(d), "job": job, "key": key,
                                "name": d.name})
@@ -2458,7 +2579,7 @@ class Watcher:
             LOG.info("Queued %d job(s) as %s: %s", len(queued), batch_id,
                      ", ".join(sorted({q["name"] for q in queued})))
             for q in queued:
-                self.dispatch(Path(q["path"]), q["job"], detail="queued by hand")
+                self.dispatch(Path(q["path"]), q["job"], detail="queued by hand", user=user)
 
         return {"batch": batch_id if queued else None,
                 "queued": queued, "skipped": skipped}
