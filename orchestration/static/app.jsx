@@ -34,6 +34,9 @@ async function api(path,opts){
   try{ r=await fetch(path,{headers:{"Content-Type":"application/json"},...opts}); }
   catch(e){ throw new Error("The analysis server is not answering. It may be restarting — try again in a minute."); }
   const b=await r.json().catch(()=>({}));
+  // Signed out (or the session ended): back to the sign-in form.
+  if(r.status===401&&path!=="/api/login"){window.dispatchEvent(new Event("mea-signed-out"));
+    throw new Error("Please sign in again.");}
   if(!r.ok){const d=b.detail;
     throw new Error(d?.errors?d.errors.join("\n"):(typeof d==="string"?d:`Request failed (${r.status})`));}
   return b;
@@ -341,6 +344,8 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,onHold,onResume,i}){
           {busy&&sum?.wells>0&&<span className="note-l">{sum.complete} wells finished so far</span>}
           {(refined||note)&&<span className={"note-l "+(refined||note).k}>{(refined||note).t}</span>}
         </div>
+        {startedBy(net||scan)&&<div className="hint-s who">{startedBy(net||scan)}
+          {net&&scan&&scan.started_by&&scan.started_by!==net.started_by?` · activity scan ${startedBy(scan)}`:""}</div>}
         <div className="lanes">
           {[["Network",net],["Activity scan",scan]].filter(x=>x[1]).map(([n,j])=>{
             const x=jobInfo(j.status);
@@ -431,21 +436,31 @@ function AddRecordings({cfg,toast,ask,onQueued}){
   },[toast]);
   useEffect(()=>{if(cfg.watch_dir)load(cfg.watch_dir);},[cfg.watch_dir,load]);
 
-  // "Analysed" only when every analysis for the date is finished.
-  const done=p=>{const j=info[p]?.jobs||[];return j.length>0&&j.every(x=>x.status==="done");};
-  const partly=p=>!done(p)&&(info[p]?.jobs||[]).some(x=>x.status==="done");
+  // "Analysed" only when every analysis for the date is finished and its
+  // results are still there (whoever ran it).
+  const done=p=>{const j=info[p]?.jobs||[];return j.length>0&&j.every(x=>x.analysed);};
+  const partly=p=>!done(p)&&(info[p]?.jobs||[]).some(x=>x.analysed);
+  const busyBy=p=>(info[p]?.jobs||[]).find(x=>x.in_flight);
+  const gone=p=>(info[p]?.jobs||[]).some(x=>x.previous&&!x.previous.output_exists);
+  const byWhom=p=>[...new Set((info[p]?.jobs||[]).filter(x=>x.analysed&&x.previous.by).map(x=>x.previous.by))].join(", ");
+  const prevLines=p=>(info[p]?.jobs||[]).filter(x=>x.analysed).map(x=>{const v=x.previous;
+    return `${x.label}: analysed${v.by?` by ${v.by}`:""}${v.finished?` on ${whenStarted(v.finished)}`:""}. Results: ${v.output}`;});
   const chosen=Object.keys(sel).filter(k=>sel[k]);
   const chosenDone=chosen.filter(done).length;
   const fresh=(entries||[]).filter(x=>!done(x.path)&&x.finished!==false);
 
   const go=async()=>{
     if(chosenDone&&again&&!(await ask({title:"Analyse again?",ok:"Analyse again",
-      body:`${chosenDone} of these dates were already analysed. Their results will be computed again and replaced.`})))return;
+      body:`${chosenDone} of these dates were already analysed. Their results will be computed again and replaced.\n\n`+
+        chosen.filter(done).map(p=>`${prettyDate(p.split("/").pop()).big} ${prettyDate(p.split("/").pop()).year}\n`+
+          prevLines(p).map(l=>"  • "+l).join("\n")).join("\n\n")})))return;
     setBusy(true);
     try{
       const r=await api("/api/queue",{method:"POST",body:JSON.stringify({folders:chosen,rerun:again})});
       const n=new Set(r.queued.map(q=>q.path)).size;
-      toast(`${n} date${n===1?"":"s"} added`,"They will be analysed in order. Follow them under Progress.");
+      const sk=(r.skipped||[]).filter(x=>x.job);
+      toast(`${n} date${n===1?"":"s"} added`,"They will be analysed in order. Follow them under Progress."+
+        (sk.length?`\n\nNot added:\n`+sk.map(x=>`${x.path.split("/").pop()}: ${x.reason}`).join("\n"):""));
       setSel({});onQueued();
     }catch(e){toast("Nothing was added",e.message,"error");}
     finally{setBusy(false);}
@@ -478,16 +493,21 @@ function AddRecordings({cfg,toast,ask,onQueued}){
             </div>
             <div className="tiles">
               {entries.map((x,k)=>{
-                const dt=prettyDate(x.name), on=!!sel[x.path], dn=done(x.path);
+                const dt=prettyDate(x.name), on=!!sel[x.path], dn=done(x.path), fl=busyBy(x.path)?.in_flight;
                 const jobs=(info[x.path]?.jobs||[]).map(j=>j.label).join(" + ");
+                const who=dn?byWhom(x.path):"";
                 return (
                   <label key={x.path} className="tile" data-on={on} data-done={dn} style={{"--i":k}}>
                     <input type="checkbox" checked={on} onChange={()=>setSel(v=>({...v,[x.path]:!v[x.path]}))}/>
-                    {dn?<span className="t-tag done">analysed</span>:partly(x.path)?<span className="t-tag copy">partly done</span>
+                    {fl?<span className="t-tag copy">{fl.status==="running"?"analysing":"in queue"}</span>
+                      :dn?<span className="t-tag done">analysed</span>:partly(x.path)?<span className="t-tag copy">partly done</span>
                       :x.finished===false?<span className="t-tag copy">copying</span>:null}
                     <div className="t-date">{dt.big}</div>
                     <div className="t-code">{dt.year} · {x.name}</div>
                     <div className="t-what">{jobs||info[x.path]?.note||" "}</div>
+                    {fl&&fl.by&&<div className="t-who">started by {fl.by}</div>}
+                    {!fl&&who&&<div className="t-who">by {who}</div>}
+                    {!fl&&!dn&&gone(x.path)&&<div className="t-who">earlier results were deleted</div>}
                     <span className="t-tick">{on&&<Check s={13} w={3}/>}</span>
                   </label>);})}
             </div>
@@ -496,9 +516,14 @@ function AddRecordings({cfg,toast,ask,onQueued}){
     {chosen.length>0&&<div className="sticky">
       <div style={{flex:1,minWidth:200}}>
         <b>{chosen.length} date{chosen.length===1?"":"s"} selected</b>
-        {chosenDone>0&&<label style={{display:"flex",gap:8,alignItems:"center",marginTop:4,fontSize:13,cursor:"pointer"}}>
-          <input type="checkbox" checked={again} onChange={e=>setAgain(e.target.checked)}/>
-          Also redo the {chosenDone} already analysed</label>}
+        {chosenDone>0&&<div className="dup">
+          <div className="dup-t"><Info s={14}/> {chosenDone===1?"This date was":`${chosenDone} of these dates were`} already analysed — the results exist:</div>
+          {chosen.filter(done).map(p=><div key={p} className="dup-i">
+            <b>{prettyDate(p.split("/").pop()).big} {prettyDate(p.split("/").pop()).year}</b>
+            {prevLines(p).map((l,i)=><div key={i} className="mono-s">{l}</div>)}</div>)}
+          <label style={{display:"flex",gap:8,alignItems:"center",marginTop:6,fontSize:13,cursor:"pointer"}}>
+            <input type="checkbox" checked={again} onChange={e=>setAgain(e.target.checked)}/>
+            Run {chosenDone===1?"it":"them"} again anyway (otherwise {chosenDone===1?"it is":"they are"} skipped)</label></div>}
       </div>
       <button className="btn lite" disabled={busy} onClick={go}>
         {busy?<span className="spin"/>:<Play s={12}/>} Analyse {chosen.length} date{chosen.length===1?"":"s"}</button>
@@ -746,6 +771,10 @@ const jobName=j=>j==="activity"?"Activity scan":"Network analysis";
 // The watcher's once-a-minute "still running" note; not a step.
 const HEARTBEAT=/^running .+ · last log output .+ ago$/;
 const goRun=id=>{if(id)location.hash="run/"+id;};
+const whenStarted=iso=>{if(!iso)return"";const t=new Date(iso);if(isNaN(t))return"";
+  return t.toLocaleString([], {day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});};
+// "started by Ana · 14 Oct, 09:12" for a run that names who started it.
+const startedBy=r=>r&&r.started_by?`started by ${r.started_by}${r.dispatched_at||r.created?` · ${whenStarted(r.dispatched_at||r.created)}`:""}`:"";
 
 function Meter({value,max,label,sub,danger}){
   const f=max?Math.min(100,100*value/max):0;
@@ -805,6 +834,7 @@ function RunCard({r}){
   return (<button className="runcard rise" onClick={()=>goRun(r.id)}>
     <div className="rc-top"><span className="rc-date">{dt.big} {dt.year}</span><span className={"stamp "+k}>{say}</span></div>
     <div className="hint-s">{prettyProject(r.project)} · {jobName(r.job)}</div>
+    {r.started_by&&<div className="hint-s">{startedBy(r)}</div>}
     {r.job==="network"&&<>
       <div className="bar"><i style={{width:`${p.fraction?Math.round(100*p.fraction):3}%`}}/></div>
       <div className="rc-meta">{p.total?<b>{p.done} of {p.total} wells</b>:<b>{p.done||0} wells finished</b>}
@@ -837,11 +867,12 @@ function HistoryTable({fixedLimit}){
     </div>}
     {data.runs.length===0?<div className="hint" style={{padding:"10px 2px"}}>No runs match.</div>:
     <div className="tw"><table className="tbl hover"><thead><tr><th>Recording date</th><th>Project</th><th>Analysis</th>
-      <th>Outcome</th><th className="n">Took</th><th>Finished</th></tr></thead><tbody>
+      <th>Outcome</th><th>Started by</th><th className="n">Took</th><th>Finished</th></tr></thead><tbody>
       {data.runs.map(r=>{const [say,k]=runSay(r.status),dt=prettyDate(r.date);return(
         <tr key={r.id} onClick={()=>goRun(r.id)} tabIndex={0} onKeyDown={e=>e.key==="Enter"&&goRun(r.id)}>
           <td><b>{dt.big}</b> <span className="hint-s">{dt.year}</span></td><td>{prettyProject(r.project)}</td>
           <td>{jobName(r.job)}</td><td><span className={"stamp "+k}>{say}</span></td>
+          <td>{r.started_by||<span className="hint-s">—</span>}{r.started_by&&<div className="hint-s">{whenStarted(r.created)}</div>}</td>
           <td className="n">{r.duration_s!=null?dur(r.duration_s):"—"}</td><td className="hint-s">{r.completed_at?ago(r.completed_at):"—"}</td></tr>);})}
     </tbody></table></div>}
     {!fixedLimit&&data.total>data.runs.length&&<div style={{marginTop:10}}>
@@ -892,7 +923,29 @@ function Dashboard(){
       <div className="sec-h"><div className="sec-t">Run history</div><div className="sec-d">Every analysis run, newest first</div></div>
       <div className="card"><div className="card-b"><HistoryTable/></div></div>
     </div>
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Who did what</div><div className="sec-d">Sign-ins, queueing, holds, stops and settings changes</div></div>
+      <div className="card"><div className="card-b"><Audit/></div></div>
+    </div>
   </div>);
+}
+
+function Audit(){
+  const [d,setD]=useState(null);
+  const [n,setN]=useState(15);
+  useEffect(()=>{const load=()=>{if(!document.hidden)api(`/api/audit?limit=${n}`).then(setD).catch(()=>{});};
+    load();const t=setInterval(load,15000);return()=>clearInterval(t);},[n]);
+  if(!d) return <div className="skel" style={{height:80}}/>;
+  if(!(d.entries||[]).length) return <div className="hint">Nothing yet.</div>;
+  return (<>
+    <div className="tw"><table className="tbl"><thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead><tbody>
+      {d.entries.map((e,i)=><tr key={i}><td className="hint-s" style={{whiteSpace:"nowrap"}}>{whenStarted(e.time)}</td>
+        <td title={e.email||""}>{e.name||"—"}</td>
+        <td style={{whiteSpace:"normal"}}>{e.action}{e.detail?<span className="hint-s"> — {e.detail}</span>:null}</td></tr>)}
+    </tbody></table></div>
+    {d.entries.length>=n&&<button className="btn sm" style={{marginTop:10}} onClick={()=>setN(x=>x+50)}>Show more</button>}
+  </>);
 }
 
 /* ── Run detail ───────────────────────────────────────────────────────── */
@@ -929,6 +982,8 @@ function RunDetail({id,onLog,onBack}){
     </div>
 
     <div className="tally" style={{marginBottom:22}}>
+      <div className="tal"><div className="tal-k">Started by</div><div className="rd-v">{d.started_by||"—"}</div>
+        {d.created&&<div className="hint-s">{whenStarted(d.created)}{d.started_by_email?` · ${d.started_by_email}`:""}</div>}</div>
       <div className="tal"><div className="tal-k">Started</div><div className="rd-v">{d.started_at?ago(d.started_at):"—"}</div></div>
       <div className="tal"><div className="tal-k">{["done","failed","interrupted","held"].includes(d.status)?"Took":"Running for"}</div><div className="rd-v">{d.elapsed_s!=null?dur(d.elapsed_s):"—"}</div></div>
       <div className="tal"><div className="tal-k">Finished</div><div className="rd-v">{d.completed_at?ago(d.completed_at):"not yet"}</div></div>
@@ -1015,7 +1070,7 @@ function RunDetail({id,onLog,onBack}){
 }
 
 /* ── App ──────────────────────────────────────────────────────────────── */
-function App(){
+function App({user,onSignOut}){
   const [schema,setSchema]=useState(null);
   const [cfg,setCfg]=useState(null);
   const [status,setStatus]=useState(null);
@@ -1249,6 +1304,8 @@ function App(){
             ? <button className="btn" disabled={busy} onClick={pauseWatch}><Pause s={14}/> Pause watching</button>
             : <button className="btn" disabled={busy} onClick={startWatch} title="Automatically analyse new dates as they are copied in"><Play s={12}/> Watch for new</button>}
           {active>0&&<button className="btn red" disabled={busy} onClick={stopAll}><Stop s={12}/> Stop all</button>}
+          <span className="me" title={user.email}>{user.name}
+            <button className="btn ghost sm" onClick={onSignOut}>Sign out</button></span>
         </div>
       </header>
 
@@ -1288,4 +1345,45 @@ function App(){
     </div>);
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+/* ── Signing in ───────────────────────────────────────────────────────── */
+function Login({onIn}){
+  const [name,setName]=useState(()=>{try{return localStorage.getItem("mea-name")||"";}catch(e){return"";}});
+  const [email,setEmail]=useState(()=>{try{return localStorage.getItem("mea-email")||"";}catch(e){return"";}});
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState(false);
+  const go=async e=>{e.preventDefault();setErr("");setBusy(true);
+    try{const r=await api("/api/login",{method:"POST",body:JSON.stringify({name,email})});
+      try{localStorage.setItem("mea-name",name);localStorage.setItem("mea-email",email);}catch(x){}
+      onIn(r.user);}
+    catch(x){setErr(x.message);}finally{setBusy(false);}};
+  return (<div className="wrap"><div className="card rise login" style={{maxWidth:440,margin:"12vh auto"}}><div className="card-b">
+    <div className="brand">MEA <i>Bench</i></div>
+    <div className="brand-sub" style={{marginBottom:20}}>Ben-Shalom Lab · recordings in, reports out</div>
+    <form onSubmit={go} noValidate>
+      <label className="f"><span className="f-l">Your name</span>
+        <input className="inp" name="name" autoComplete="name" value={name} onChange={e=>setName(e.target.value)} autoFocus/></label>
+      <label className="f"><span className="f-l">Email</span>
+        <input className="inp" name="email" type="email" autoComplete="email" value={email} onChange={e=>setEmail(e.target.value)}/></label>
+      <div className="hint-s" style={{margin:"4px 0 14px"}}>No password. Your name is shown on every analysis you start, so others know whose it is.</div>
+      {err&&<div style={{marginBottom:12}}><Callout kind="red" icon={<Alert s={16}/>}>{err}</Callout></div>}
+      <button className="btn ink" type="submit" disabled={busy}>{busy?<span className="spin"/>:null} Sign in</button>
+    </form>
+  </div></div></div>);
+}
+
+function Root(){
+  const [user,setUser]=useState(undefined);          // undefined: still asking
+  const [err,setErr]=useState("");
+  useEffect(()=>{api("/api/me").then(r=>setUser(r.user||null)).catch(e=>setErr(e.message));
+    const out=()=>setUser(null);addEventListener("mea-signed-out",out);
+    return()=>removeEventListener("mea-signed-out",out);},[]);
+  const signOut=async()=>{try{await api("/api/logout",{method:"POST"});}catch(e){}setUser(null);};
+  if(err) return (<div className="wrap"><div className="card rise" style={{maxWidth:560,margin:"12vh auto"}}><div className="card-b">
+      <div className="sec-t" style={{color:"var(--red)"}}>Can’t reach the analysis server</div>
+      <p className="hint">{err}</p><button className="btn ink" onClick={()=>location.reload()}>Try again</button></div></div></div>);
+  if(user===undefined) return <div className="wrap"><div className="skel" style={{height:50,width:300}}/></div>;
+  if(!user) return <Login onIn={setUser}/>;
+  return <App key={user.email} user={user} onSignOut={signOut}/>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root/>);

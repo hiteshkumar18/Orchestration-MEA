@@ -51,7 +51,7 @@ const data = {
                    run_activity: true, max_concurrent_network: 2, max_concurrent_activity: 2, settle_seconds: 600,
                    poll_seconds: 30, logs_in_output: true, h5_glob: 'data.raw.h5', driver_python: '' },
   '/api/schema': { groups: [] }, '/api/queue': { batches: [] }, '/api/handoff': { state: 'idle' },
-  '/api/reports': { reports: [] }, '/api/logs': { lines: [] }, '/api/picker': {},
+  '/api/reports': { reports: [] }, '/api/logs': { lines: [] }, '/api/picker': {}, '/api/me': { user: { id: 1, name: 'Test Person', email: 'test@lab.org' } },
   '/api/runs/log': { lines: ['[2026-10-05 17:03:52,183] INFO: Processing : x well_id : well002', 'ERROR: boom'] },
   '/api/overview': { watching: true, active_jobs: { network: 1, activity: 0 }, limits: { network: 2, activity: 2 },
     running: [{ ...detail, conversion_summary: detail.log_summary.conversion_summary, counts: detail.log_summary.counts }],

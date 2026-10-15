@@ -91,8 +91,17 @@ Binds to `127.0.0.1` by default. At the machine itself, open
 <http://localhost:8000>. From anywhere else, forward the port over SSH — see
 [section 4](#4-connecting-from-your-own-computer).
 
-Override with `UI_HOST=0.0.0.0 ./run.sh` only if you have a reason to; the UI is
-unauthenticated and can browse the filesystem.
+**One shared page for the lab.** Set `UI_HOST=0.0.0.0` in `config.env` and the
+page is reachable from the network at `http://<server>:<UI_PORT>`. Everyone
+signs in with a name and email (no password); every run records who started it
+and when, and every action (queue, hold, stop, reset, settings) is logged under
+the person's name — in `users.sqlite` and `run_history.sqlite` in the work
+folder, and on the Dashboard under *Who did what*. Signing in says who did
+something; it does not keep anyone out. Anyone who can reach the port can sign
+in, start and stop analyses and list server folders, so only open it on a
+trusted network (campus/VPN), never to the internet. The report command's
+status check from the server itself is the only API call allowed without
+signing in.
 
 ---
 

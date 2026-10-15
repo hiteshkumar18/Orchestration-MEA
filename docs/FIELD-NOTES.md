@@ -368,8 +368,18 @@ cache is given back before anything is killed.
   the independence, and it is deliberate.
 * **The input directory is read-only.** The watcher never writes into the folder
   it watches.
-* **The UI is unauthenticated** and binds 127.0.0.1. The SSH tunnel is the
-  security boundary.
+* **Sign-in names people; it does not keep them out.** Name and email, no
+  password: a session cookie, `users.sqlite` (users, sessions, who-did-what)
+  and the person's name on every run (state entry and `run_history.sqlite`).
+  Bound to 127.0.0.1 by default (the SSH tunnel is the security boundary); the
+  lab's shared page sets `UI_HOST=0.0.0.0`, where the trusted network is. Every
+  `/api/` call needs a session except signing in and `GET /api/status` from the
+  server itself, which `report/make_report.py` uses.
+* **Queueing is one decision at a time.** Checking whether a folder is free
+  and marking it started happen under one lock (`Watcher._queue_lock`), so two
+  people queueing the same date at once — or a person and the scan loop — start
+  it once. A date counts as already analysed while the results folder its last
+  finished run wrote still exists; deleted results mean "not analysed".
 * **This tool does not write reports.** It prepares an AI handoff folder
   (`handoff.py`, `skills/skills.md`) under the *output* directory. The rules in
   `skills.md` — every number from a file, the well as the unit of replication,

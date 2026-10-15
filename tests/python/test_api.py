@@ -6,6 +6,7 @@ a running test server (never the live one):
 Skipped when no server answers. Read-only apart from resetting a key that
 does not exist.
 """
+import http.cookiejar
 import json
 import os
 import time
@@ -14,15 +15,19 @@ import urllib.error
 import urllib.request
 
 URL = os.environ.get("MEA_TEST_URL", "http://localhost:8766").rstrip("/")
+# Every call is made as a signed-in test user (see login()).
+JAR = http.cookiejar.CookieJar()
+SIGNED_IN = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(JAR))
+ANON = urllib.request.build_opener()
 
 
-def call(path, body=None, timeout=30):
+def call(path, body=None, timeout=30, opener=None):
     req = urllib.request.Request(URL + path, method="POST" if body is not None else "GET",
                                  data=json.dumps(body).encode() if body is not None else None,
                                  headers={"Content-Type": "application/json"})
     t = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with (opener or SIGNED_IN).open(req, timeout=timeout) as r:
             raw = r.read()
             code = r.status
     except urllib.error.HTTPError as e:
@@ -36,11 +41,11 @@ def call(path, body=None, timeout=30):
 
 
 def up():
-    """A just-started server can take a minute; wait for it."""
+    """A just-started server can take a minute; wait for it. Then sign in."""
     for _ in range(int(os.environ.get("MEA_TEST_WAIT", "90")) // 3 or 1):
         try:
             if call("/api/status", timeout=5)[0] == 200:
-                return True
+                return call("/api/login", {"name": "API Test", "email": "api-test@lab.org"})[0] == 200
         except OSError:
             pass
         time.sleep(3)
@@ -164,3 +169,44 @@ class ApiTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(up(), f"no test server at {URL}")
+class LoginTest(unittest.TestCase):
+    def test_api_needs_a_signed_in_person(self):
+        for path in ("/api/config", "/api/history", "/api/audit", "/api/queue"):
+            self.assertEqual(call(path, opener=ANON)[0], 401, path)
+        self.assertEqual(call("/api/queue", {"folders": ["/x"]}, opener=ANON)[0], 401)
+        self.assertEqual(call("/api/watcher/stop?cancel_running=true", {}, opener=ANON)[0], 401)
+
+    def test_page_and_sign_in_are_open(self):
+        self.assertEqual(call("/", opener=ANON)[0], 200)
+        self.assertEqual(call("/static/app.js", opener=ANON)[0], 200)
+        code, me, _ = call("/api/me", opener=ANON)
+        self.assertEqual((code, me), (200, {"user": None}))
+
+    def test_report_command_can_ask_for_status_from_this_machine(self):
+        self.assertEqual(call("/api/status", opener=ANON)[0], 200)
+
+    def test_bad_sign_in_is_refused_plainly(self):
+        code, body, _ = call("/api/login", {"name": "", "email": "x@y.org"}, opener=ANON)
+        self.assertEqual(code, 400)
+        self.assertIn("name", body["detail"])
+        code, body, _ = call("/api/login", {"name": "X", "email": "nope"}, opener=ANON)
+        self.assertEqual(code, 400)
+
+    def test_signed_in_and_logged(self):
+        code, me, _ = call("/api/me")
+        self.assertEqual(me["user"]["email"], "api-test@lab.org")
+        code, audit, _ = call("/api/audit")
+        self.assertEqual(code, 200)
+        self.assertTrue(any(e["action"] == "signed in" and e["email"] == "api-test@lab.org"
+                            for e in audit["entries"]))
+
+    def test_sign_out(self):
+        jar = http.cookiejar.CookieJar()
+        op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        self.assertEqual(call("/api/login", {"name": "Brief", "email": "brief@lab.org"}, opener=op)[0], 200)
+        self.assertEqual(call("/api/config", opener=op)[0], 200)
+        self.assertEqual(call("/api/logout", {}, opener=op)[0], 200)
+        self.assertEqual(call("/api/config", opener=op)[0], 401)

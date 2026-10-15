@@ -207,6 +207,10 @@ async function api(path, opts) {
     throw new Error("The analysis server is not answering. It may be restarting — try again in a minute.");
   }
   const b = await r.json().catch(() => ({}));
+  if (r.status === 401 && path !== "/api/login") {
+    window.dispatchEvent(new Event("mea-signed-out"));
+    throw new Error("Please sign in again.");
+  }
   if (!r.ok) {
     const d = b.detail;
     throw new Error(d?.errors ? d.errors.join("\n") : typeof d === "string" ? d : `Request failed (${r.status})`);
@@ -847,7 +851,9 @@ function Line({
     className: "note-l"
   }, sum.complete, " wells finished so far"), (refined || note) && React.createElement("span", {
     className: "note-l " + (refined || note).k
-  }, (refined || note).t)), React.createElement("div", {
+  }, (refined || note).t)), startedBy(net || scan) && React.createElement("div", {
+    className: "hint-s who"
+  }, startedBy(net || scan), net && scan && scan.started_by && scan.started_by !== net.started_by ? ` · activity scan ${startedBy(scan)}` : ""), React.createElement("div", {
     className: "lanes"
   }, [["Network", net], ["Activity scan", scan]].filter(x => x[1]).map(([n, j]) => {
     const x = jobInfo(j.status);
@@ -1050,9 +1056,16 @@ function AddRecordings({
   }, [cfg.watch_dir, load]);
   const done = p => {
     const j = info[p]?.jobs || [];
-    return j.length > 0 && j.every(x => x.status === "done");
+    return j.length > 0 && j.every(x => x.analysed);
   };
-  const partly = p => !done(p) && (info[p]?.jobs || []).some(x => x.status === "done");
+  const partly = p => !done(p) && (info[p]?.jobs || []).some(x => x.analysed);
+  const busyBy = p => (info[p]?.jobs || []).find(x => x.in_flight);
+  const gone = p => (info[p]?.jobs || []).some(x => x.previous && !x.previous.output_exists);
+  const byWhom = p => [...new Set((info[p]?.jobs || []).filter(x => x.analysed && x.previous.by).map(x => x.previous.by))].join(", ");
+  const prevLines = p => (info[p]?.jobs || []).filter(x => x.analysed).map(x => {
+    const v = x.previous;
+    return `${x.label}: analysed${v.by ? ` by ${v.by}` : ""}${v.finished ? ` on ${whenStarted(v.finished)}` : ""}. Results: ${v.output}`;
+  });
   const chosen = Object.keys(sel).filter(k => sel[k]);
   const chosenDone = chosen.filter(done).length;
   const fresh = (entries || []).filter(x => !done(x.path) && x.finished !== false);
@@ -1060,7 +1073,7 @@ function AddRecordings({
     if (chosenDone && again && !(await ask({
       title: "Analyse again?",
       ok: "Analyse again",
-      body: `${chosenDone} of these dates were already analysed. Their results will be computed again and replaced.`
+      body: `${chosenDone} of these dates were already analysed. Their results will be computed again and replaced.\n\n` + chosen.filter(done).map(p => `${prettyDate(p.split("/").pop()).big} ${prettyDate(p.split("/").pop()).year}\n` + prevLines(p).map(l => "  • " + l).join("\n")).join("\n\n")
     }))) return;
     setBusy(true);
     try {
@@ -1072,7 +1085,8 @@ function AddRecordings({
         })
       });
       const n = new Set(r.queued.map(q => q.path)).size;
-      toast(`${n} date${n === 1 ? "" : "s"} added`, "They will be analysed in order. Follow them under Progress.");
+      const sk = (r.skipped || []).filter(x => x.job);
+      toast(`${n} date${n === 1 ? "" : "s"} added`, "They will be analysed in order. Follow them under Progress." + (sk.length ? `\n\nNot added:\n` + sk.map(x => `${x.path.split("/").pop()}: ${x.reason}`).join("\n") : ""));
       setSel({});
       onQueued();
     } catch (e) {
@@ -1173,8 +1187,10 @@ function AddRecordings({
   }, entries.map((x, k) => {
     const dt = prettyDate(x.name),
       on = !!sel[x.path],
-      dn = done(x.path);
+      dn = done(x.path),
+      fl = busyBy(x.path)?.in_flight;
     const jobs = (info[x.path]?.jobs || []).map(j => j.label).join(" + ");
+    const who = dn ? byWhom(x.path) : "";
     return React.createElement("label", {
       key: x.path,
       className: "tile",
@@ -1190,7 +1206,9 @@ function AddRecordings({
         ...v,
         [x.path]: !v[x.path]
       }))
-    }), dn ? React.createElement("span", {
+    }), fl ? React.createElement("span", {
+      className: "t-tag copy"
+    }, fl.status === "running" ? "analysing" : "in queue") : dn ? React.createElement("span", {
       className: "t-tag done"
     }, "analysed") : partly(x.path) ? React.createElement("span", {
       className: "t-tag copy"
@@ -1202,7 +1220,13 @@ function AddRecordings({
       className: "t-code"
     }, dt.year, " \xB7 ", x.name), React.createElement("div", {
       className: "t-what"
-    }, jobs || info[x.path]?.note || " "), React.createElement("span", {
+    }, jobs || info[x.path]?.note || " "), fl && fl.by && React.createElement("div", {
+      className: "t-who"
+    }, "started by ", fl.by), !fl && who && React.createElement("div", {
+      className: "t-who"
+    }, "by ", who), !fl && !dn && gone(x.path) && React.createElement("div", {
+      className: "t-who"
+    }, "earlier results were deleted"), React.createElement("span", {
       className: "t-tick"
     }, on && React.createElement(Check, {
       s: 13,
@@ -1215,12 +1239,24 @@ function AddRecordings({
       flex: 1,
       minWidth: 200
     }
-  }, React.createElement("b", null, chosen.length, " date", chosen.length === 1 ? "" : "s", " selected"), chosenDone > 0 && React.createElement("label", {
+  }, React.createElement("b", null, chosen.length, " date", chosen.length === 1 ? "" : "s", " selected"), chosenDone > 0 && React.createElement("div", {
+    className: "dup"
+  }, React.createElement("div", {
+    className: "dup-t"
+  }, React.createElement(Info, {
+    s: 14
+  }), " ", chosenDone === 1 ? "This date was" : `${chosenDone} of these dates were`, " already analysed \u2014 the results exist:"), chosen.filter(done).map(p => React.createElement("div", {
+    key: p,
+    className: "dup-i"
+  }, React.createElement("b", null, prettyDate(p.split("/").pop()).big, " ", prettyDate(p.split("/").pop()).year), prevLines(p).map((l, i) => React.createElement("div", {
+    key: i,
+    className: "mono-s"
+  }, l)))), React.createElement("label", {
     style: {
       display: "flex",
       gap: 8,
       alignItems: "center",
-      marginTop: 4,
+      marginTop: 6,
       fontSize: 13,
       cursor: "pointer"
     }
@@ -1228,7 +1264,7 @@ function AddRecordings({
     type: "checkbox",
     checked: again,
     onChange: e => setAgain(e.target.checked)
-  }), "Also redo the ", chosenDone, " already analysed")), React.createElement("button", {
+  }), "Run ", chosenDone === 1 ? "it" : "them", " again anyway (otherwise ", chosenDone === 1 ? "it is" : "they are", " skipped)"))), React.createElement("button", {
     className: "btn lite",
     disabled: busy,
     onClick: go
@@ -1972,6 +2008,18 @@ const HEARTBEAT = /^running .+ · last log output .+ ago$/;
 const goRun = id => {
   if (id) location.hash = "run/" + id;
 };
+const whenStarted = iso => {
+  if (!iso) return "";
+  const t = new Date(iso);
+  if (isNaN(t)) return "";
+  return t.toLocaleString([], {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+};
+const startedBy = r => r && r.started_by ? `started by ${r.started_by}${r.dispatched_at || r.created ? ` · ${whenStarted(r.dispatched_at || r.created)}` : ""}` : "";
 function Meter({
   value,
   max,
@@ -2133,7 +2181,9 @@ function RunCard({
     className: "stamp " + k
   }, say)), React.createElement("div", {
     className: "hint-s"
-  }, prettyProject(r.project), " \xB7 ", jobName(r.job)), r.job === "network" && React.createElement(React.Fragment, null, React.createElement("div", {
+  }, prettyProject(r.project), " \xB7 ", jobName(r.job)), r.started_by && React.createElement("div", {
+    className: "hint-s"
+  }, startedBy(r)), r.job === "network" && React.createElement(React.Fragment, null, React.createElement("div", {
     className: "bar"
   }, React.createElement("i", {
     style: {
@@ -2241,7 +2291,7 @@ function HistoryTable({
     className: "tw"
   }, React.createElement("table", {
     className: "tbl hover"
-  }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Recording date"), React.createElement("th", null, "Project"), React.createElement("th", null, "Analysis"), React.createElement("th", null, "Outcome"), React.createElement("th", {
+  }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Recording date"), React.createElement("th", null, "Project"), React.createElement("th", null, "Analysis"), React.createElement("th", null, "Outcome"), React.createElement("th", null, "Started by"), React.createElement("th", {
     className: "n"
   }, "Took"), React.createElement("th", null, "Finished"))), React.createElement("tbody", null, data.runs.map(r => {
     const [say, k] = runSay(r.status),
@@ -2255,7 +2305,11 @@ function HistoryTable({
       className: "hint-s"
     }, dt.year)), React.createElement("td", null, prettyProject(r.project)), React.createElement("td", null, jobName(r.job)), React.createElement("td", null, React.createElement("span", {
       className: "stamp " + k
-    }, say)), React.createElement("td", {
+    }, say)), React.createElement("td", null, r.started_by || React.createElement("span", {
+      className: "hint-s"
+    }, "\u2014"), r.started_by && React.createElement("div", {
+      className: "hint-s"
+    }, whenStarted(r.created))), React.createElement("td", {
       className: "n"
     }, r.duration_s != null ? dur(r.duration_s) : "—"), React.createElement("td", {
       className: "hint-s"
@@ -2366,7 +2420,66 @@ function Dashboard() {
     className: "card"
   }, React.createElement("div", {
     className: "card-b"
-  }, React.createElement(HistoryTable, null)))));
+  }, React.createElement(HistoryTable, null)))), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Who did what"), React.createElement("div", {
+    className: "sec-d"
+  }, "Sign-ins, queueing, holds, stops and settings changes")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement(Audit, null)))));
+}
+function Audit() {
+  const [d, setD] = useState(null);
+  const [n, setN] = useState(15);
+  useEffect(() => {
+    const load = () => {
+      if (!document.hidden) api(`/api/audit?limit=${n}`).then(setD).catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, [n]);
+  if (!d) return React.createElement("div", {
+    className: "skel",
+    style: {
+      height: 80
+    }
+  });
+  if (!(d.entries || []).length) return React.createElement("div", {
+    className: "hint"
+  }, "Nothing yet.");
+  return React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "tw"
+  }, React.createElement("table", {
+    className: "tbl"
+  }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "When"), React.createElement("th", null, "Who"), React.createElement("th", null, "What"))), React.createElement("tbody", null, d.entries.map((e, i) => React.createElement("tr", {
+    key: i
+  }, React.createElement("td", {
+    className: "hint-s",
+    style: {
+      whiteSpace: "nowrap"
+    }
+  }, whenStarted(e.time)), React.createElement("td", {
+    title: e.email || ""
+  }, e.name || "—"), React.createElement("td", {
+    style: {
+      whiteSpace: "normal"
+    }
+  }, e.action, e.detail ? React.createElement("span", {
+    className: "hint-s"
+  }, " \u2014 ", e.detail) : null)))))), d.entries.length >= n && React.createElement("button", {
+    className: "btn sm",
+    style: {
+      marginTop: 10
+    },
+    onClick: () => setN(x => x + 50)
+  }, "Show more"));
 }
 function RunDetail({
   id,
@@ -2464,6 +2577,14 @@ function RunDetail({
       marginBottom: 22
     }
   }, React.createElement("div", {
+    className: "tal"
+  }, React.createElement("div", {
+    className: "tal-k"
+  }, "Started by"), React.createElement("div", {
+    className: "rd-v"
+  }, d.started_by || "—"), d.created && React.createElement("div", {
+    className: "hint-s"
+  }, whenStarted(d.created), d.started_by_email ? ` · ${d.started_by_email}` : "")), React.createElement("div", {
     className: "tal"
   }, React.createElement("div", {
     className: "tal-k"
@@ -2706,7 +2827,10 @@ function RunDetail({
     text: d.command
   }))))));
 }
-function App() {
+function App({
+  user,
+  onSignOut
+}) {
   const [schema, setSchema] = useState(null);
   const [cfg, setCfg] = useState(null);
   const [status, setStatus] = useState(null);
@@ -3182,7 +3306,13 @@ function App() {
     onClick: stopAll
   }, React.createElement(Stop, {
     s: 12
-  }), " Stop all"))), React.createElement("nav", {
+  }), " Stop all"), React.createElement("span", {
+    className: "me",
+    title: user.email
+  }, user.name, React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: onSignOut
+  }, "Sign out")))), React.createElement("nav", {
     className: "tabs",
     role: "tablist"
   }, TABS.map(([k, l, n]) => React.createElement("button", {
@@ -3275,4 +3405,166 @@ function App() {
     close: id => setToasts(t => t.filter(x => x.id !== id))
   }));
 }
-ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App, null));
+function Login({
+  onIn
+}) {
+  const [name, setName] = useState(() => {
+    try {
+      return localStorage.getItem("mea-name") || "";
+    } catch (e) {
+      return "";
+    }
+  });
+  const [email, setEmail] = useState(() => {
+    try {
+      return localStorage.getItem("mea-email") || "";
+    } catch (e) {
+      return "";
+    }
+  });
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const go = async e => {
+    e.preventDefault();
+    setErr("");
+    setBusy(true);
+    try {
+      const r = await api("/api/login", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          email
+        })
+      });
+      try {
+        localStorage.setItem("mea-name", name);
+        localStorage.setItem("mea-email", email);
+      } catch (x) {}
+      onIn(r.user);
+    } catch (x) {
+      setErr(x.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return React.createElement("div", {
+    className: "wrap"
+  }, React.createElement("div", {
+    className: "card rise login",
+    style: {
+      maxWidth: 440,
+      margin: "12vh auto"
+    }
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("div", {
+    className: "brand"
+  }, "MEA ", React.createElement("i", null, "Bench")), React.createElement("div", {
+    className: "brand-sub",
+    style: {
+      marginBottom: 20
+    }
+  }, "Ben-Shalom Lab \xB7 recordings in, reports out"), React.createElement("form", {
+    onSubmit: go,
+    noValidate: true
+  }, React.createElement("label", {
+    className: "f"
+  }, React.createElement("span", {
+    className: "f-l"
+  }, "Your name"), React.createElement("input", {
+    className: "inp",
+    name: "name",
+    autoComplete: "name",
+    value: name,
+    onChange: e => setName(e.target.value),
+    autoFocus: true
+  })), React.createElement("label", {
+    className: "f"
+  }, React.createElement("span", {
+    className: "f-l"
+  }, "Email"), React.createElement("input", {
+    className: "inp",
+    name: "email",
+    type: "email",
+    autoComplete: "email",
+    value: email,
+    onChange: e => setEmail(e.target.value)
+  })), React.createElement("div", {
+    className: "hint-s",
+    style: {
+      margin: "4px 0 14px"
+    }
+  }, "No password. Your name is shown on every analysis you start, so others know whose it is."), err && React.createElement("div", {
+    style: {
+      marginBottom: 12
+    }
+  }, React.createElement(Callout, {
+    kind: "red",
+    icon: React.createElement(Alert, {
+      s: 16
+    })
+  }, err)), React.createElement("button", {
+    className: "btn ink",
+    type: "submit",
+    disabled: busy
+  }, busy ? React.createElement("span", {
+    className: "spin"
+  }) : null, " Sign in")))));
+}
+function Root() {
+  const [user, setUser] = useState(undefined);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    api("/api/me").then(r => setUser(r.user || null)).catch(e => setErr(e.message));
+    const out = () => setUser(null);
+    addEventListener("mea-signed-out", out);
+    return () => removeEventListener("mea-signed-out", out);
+  }, []);
+  const signOut = async () => {
+    try {
+      await api("/api/logout", {
+        method: "POST"
+      });
+    } catch (e) {}
+    setUser(null);
+  };
+  if (err) return React.createElement("div", {
+    className: "wrap"
+  }, React.createElement("div", {
+    className: "card rise",
+    style: {
+      maxWidth: 560,
+      margin: "12vh auto"
+    }
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("div", {
+    className: "sec-t",
+    style: {
+      color: "var(--red)"
+    }
+  }, "Can\u2019t reach the analysis server"), React.createElement("p", {
+    className: "hint"
+  }, err), React.createElement("button", {
+    className: "btn ink",
+    onClick: () => location.reload()
+  }, "Try again"))));
+  if (user === undefined) return React.createElement("div", {
+    className: "wrap"
+  }, React.createElement("div", {
+    className: "skel",
+    style: {
+      height: 50,
+      width: 300
+    }
+  }));
+  if (!user) return React.createElement(Login, {
+    onIn: setUser
+  });
+  return React.createElement(App, {
+    key: user.email,
+    user: user,
+    onSignOut: signOut
+  });
+}
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(Root, null));

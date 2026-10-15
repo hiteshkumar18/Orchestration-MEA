@@ -57,9 +57,11 @@ DRIVER_PYTHON="${DRIVER_PYTHON:-$CFG_DRIVER_PYTHON}"
 PORT="${UI_PORT:-${CFG_UI_PORT:-8000}}"
 WORK="${WORK_DIR:-${CFG_WORK_DIR:-$HERE/.mea-watcher}}"
 
-# Bind to localhost by default: the UI is unauthenticated and can browse the
-# filesystem, so it should be reached over an SSH tunnel rather than exposed.
+# Bind to localhost by default and reach it over an SSH tunnel:
 #   ssh -N -L 8000:127.0.0.1:8000 user@server
+# For one shared page for the lab, set UI_HOST=0.0.0.0 in config.env. People
+# sign in with a name and email (no password): that records who did what, it
+# does not keep anyone out, so only on a trusted network.
 HOST="${UI_HOST:-${CFG_UI_HOST:-127.0.0.1}}"
 
 # Interpreter that runs this tool. In shared mode this is the pipeline's own

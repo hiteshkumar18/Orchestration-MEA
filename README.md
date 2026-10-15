@@ -99,8 +99,10 @@ The MEA checkout is located in this order: `--mea-repo` → `$MEA_REPO` →
 silently overridden — if it has no driver, that is an error rather than a reason
 to fall back to a different checkout.
 
-Reach the UI over an SSH tunnel rather than exposing the port; it is
-unauthenticated and can browse the filesystem:
+Reach the UI over an SSH tunnel, or run it as one shared page for the lab with
+`UI_HOST=0.0.0.0` (see docs/DEPLOYMENT.md). Users sign in with a name and email
+— no password: it records who started each run and who did what, it does not
+keep anyone out. Over a tunnel:
 
 ```bash
 ssh -N -L 8000:127.0.0.1:8000 user@server        # macOS/Linux, and Windows PowerShell
@@ -429,7 +431,8 @@ uncompressed spike data.
 
 ## Known limitations
 
-* The UI has no authentication — reach it over an SSH tunnel.
+* Sign-in has no password — it identifies people, it does not keep anyone out.
+  Expose the port only on a trusted network, or reach it over an SSH tunnel.
 * The analyzer stage (~37% of per-well time) runs on a single core, because no
   CLI flag reaches SpikeInterface's `n_jobs`. Fixing it needs a change in
   MEA-Analysis, which is deliberately not modified — see
