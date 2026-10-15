@@ -716,6 +716,8 @@ class Watcher:
 
         self._batches: dict[str, dict] = {}
         self._batch_lock = threading.Lock()
+        # Runs queued by hand and not yet ended: their batch reports them.
+        self._hand_queued: set[str] = set()
         # Scratch space promised to staged runs still in flight, so two jobs
         # starting together cannot each pass the free-space check and then
         # jointly take the disk below stage_min_free_gb.
@@ -908,7 +910,11 @@ class Watcher:
                     "#!/bin/sh\n"
                     "# Written by Orchestration-MEA: runs the lab's standard MEA report with\n"
                     "# the Python that has its libraries. See AI_REPORT_INSTRUCTIONS.md.\n"
-                    f'exec "{self.cfg.resolve_driver_python()}" "{script}" "$@"\n'),
+                    # The server that analysed these results, so the report
+                    # checks with it whether a date has finished.
+                    + (f'export MEA_STATUS_URL="${{MEA_STATUS_URL:-{os.environ["MEA_STATUS_URL"]}}}"\n'
+                       if os.environ.get("MEA_STATUS_URL") else "")
+                    + f'exec "{self.cfg.resolve_driver_python()}" "{script}" "$@"\n'),
             }
             for dest, text in files.items():
                 if not dest.exists() or dest.read_text() != text:
@@ -2231,6 +2237,7 @@ class Watcher:
             # Terminal either way — a failed job must still close its batch, or
             # the batch would never finish and no report would ever be built.
             self._batch_finished(key)
+            self._date_finished(key)
 
     # -- queueing ------------------------------------------------------------ #
     TERMINAL = {"done", "failed"}
@@ -2304,6 +2311,7 @@ class Watcher:
 
         if queued:
             with self._batch_lock:
+                self._hand_queued.update(q["key"] for q in queued)
                 self._batches[batch_id] = {
                     "id": batch_id,
                     "keys": {q["key"] for q in queued},
@@ -2345,6 +2353,22 @@ class Watcher:
                                      daemon=True).start()
                 except Exception:  # noqa: BLE001
                     LOG.exception("Could not start the batch-completion hook")
+
+    def _date_finished(self, key: str) -> None:
+        """Announce a date the watcher analysed on its own once its last job
+        has ended, so its report can be made. Dates queued by hand belong to a
+        batch, which reports through its own hook when the whole batch ends."""
+        with self._batch_lock:
+            if key in self._hand_queued:
+                self._hand_queued.discard(key)
+                return
+        folder = key.split("::")[0]
+        entries = {k: e for k, e in self.state.all().items() if k.split("::")[0] == folder}
+        if any(e.get("status") in self.IN_FLIGHT for e in entries.values()):
+            return
+        if not any(e.get("status") == "done" for e in entries.values()):
+            return
+        self.on_event("date_finished", {"folder": folder, "run": Path(folder).name})
 
     def batches(self) -> list[dict]:
         with self._batch_lock:

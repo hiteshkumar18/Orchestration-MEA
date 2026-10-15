@@ -1217,9 +1217,21 @@ function AiReport({
   const [auto, setAuto] = useState(cfg.auto_handoff !== false);
   const [busy, setBusy] = useState(false);
   const [last, setLast] = useState(null);
+  const building = last?.state === "running";
   useEffect(() => {
-    api("/api/handoff").then(d => d?.state && d.state !== "idle" && setLast(d)).catch(() => {});
-  }, []);
+    let t = null,
+      stop = false;
+    const poll = () => api("/api/handoff").then(d => {
+      if (stop) return;
+      if (d?.state && d.state !== "idle") setLast(d);
+      if (d?.state === "running") t = setTimeout(poll, 2500);
+    }).catch(() => {});
+    poll();
+    return () => {
+      stop = true;
+      clearTimeout(t);
+    };
+  }, [busy]);
   const save = async (a = auto) => {
     try {
       await api("/api/requirements", {
@@ -1241,18 +1253,14 @@ function AiReport({
     setBusy(true);
     try {
       if (text !== saved && !(await save())) return;
-      const r = await api("/api/handoff", {
+      await api("/api/handoff", {
         method: "POST",
         body: JSON.stringify({
           folders: []
         })
       });
-      setLast({
-        state: "done",
-        ...r
-      });
     } catch (e) {
-      toast("Could not prepare", e.message, "error");
+      toast("Could not make the report", e.message, "error");
     } finally {
       setBusy(false);
     }
@@ -1280,7 +1288,7 @@ function AiReport({
     className: "empty-t"
   }, "No reports yet"), React.createElement("div", {
     className: "empty-d"
-  }, "Reports appear here as each recording date finishes, a few minutes after its analyses complete."))) : Object.entries(byP).map(([p, rs]) => React.createElement("div", {
+  }, auto ? "A report is made automatically when analysed dates finish. You can also make them below." : "Switch on automatic reports below, or press “Make reports” to make them now."))) : Object.entries(byP).map(([p, rs]) => React.createElement("div", {
     className: "ledger",
     key: p,
     style: {
@@ -1354,29 +1362,34 @@ function AiReport({
     className: "chev"
   }, React.createElement(Chev, {
     s: 14
-  })), "Report packages for Claude"), React.createElement(Switch, {
+  })), "Making reports"), React.createElement(Switch, {
     id: "ai-auto",
     checked: auto,
     onChange: v => {
       setAuto(v);
       save(v);
     },
-    label: "Make a package when a batch of added dates finishes",
-    hint: "Leave this off while the lab's report service is writing a report for each date \u2014 otherwise every batch gets two packages."
+    label: "Make the report automatically when dates finish",
+    hint: "Builds the lab's standard report for each finished date \u2014 Network analysis, Activity scan, or both, whichever was run \u2014 and lists it above."
   }), React.createElement("div", {
     className: "hint",
     style: {
       margin: "6px 0 12px"
     }
-  }, "Bundles all results with these instructions into one folder that Claude can turn into a report covering every date."), React.createElement("button", {
+  }, "Every report folder also holds a short note for Claude. To have Claude add what your instructions above ask for and explain the results, run the command shown when a report is ready."), React.createElement("button", {
     className: "btn",
-    disabled: busy,
+    disabled: busy || building,
     onClick: prepare
-  }, busy ? React.createElement("span", {
+  }, busy || building ? React.createElement("span", {
     className: "spin"
   }) : React.createElement(Doc, {
     s: 14
-  }), " Prepare package for all results"), last?.state === "done" && last.prompt && React.createElement("div", {
+  }), " Make reports for every finished date"), building && React.createElement("div", {
+    className: "hint",
+    style: {
+      marginTop: 10
+    }
+  }, "Making the report", last.projects?.length > 1 ? "s" : "", "\u2026 about a minute per date. You can leave this page."), last?.state === "done" && last.prompt && React.createElement("div", {
     style: {
       marginTop: 12
     }
@@ -1385,13 +1398,22 @@ function AiReport({
     icon: React.createElement(Check, {
       s: 17
     })
-  }, "Package ready \u2014 ", last.network_wells, " wells, ", last.activity_runs, " scans. In a terminal on the analysis computer, run:"), React.createElement("div", {
+  }, "Report ready \u2014 ", last.network_wells, " wells, ", last.activity_runs, " scans", last.packages?.length > 1 ? ` in ${last.packages.length} projects` : "", ". It is listed above. For Claude, in a terminal on the analysis computer, run:"), React.createElement("div", {
     style: {
       marginTop: 8
     }
   }, React.createElement(Code, {
     text: last.instruction
-  }))), last?.state === "error" && React.createElement("div", {
+  })), last.errors?.length > 0 && React.createElement("div", {
+    style: {
+      marginTop: 8
+    }
+  }, React.createElement(Callout, {
+    kind: "amber",
+    icon: React.createElement(Alert, {
+      s: 17
+    })
+  }, last.errors.join(" · ")))), last?.state === "error" && React.createElement("div", {
     style: {
       marginTop: 12
     }

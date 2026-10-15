@@ -500,7 +500,15 @@ function AiReport({cfg,reports,toast}){
   const [auto,setAuto]=useState(cfg.auto_handoff!==false);
   const [busy,setBusy]=useState(false);
   const [last,setLast]=useState(null);
-  useEffect(()=>{api("/api/handoff").then(d=>d?.state&&d.state!=="idle"&&setLast(d)).catch(()=>{});},[]);
+  const building=last?.state==="running";
+  // Reports are made in the background (about a minute per date): follow along.
+  useEffect(()=>{
+    let t=null,stop=false;
+    const poll=()=>api("/api/handoff").then(d=>{if(stop)return;
+      if(d?.state&&d.state!=="idle")setLast(d);
+      if(d?.state==="running")t=setTimeout(poll,2500);}).catch(()=>{});
+    poll();return()=>{stop=true;clearTimeout(t);};
+  },[busy]);
   const save=async(a=auto)=>{
     try{await api("/api/requirements",{method:"POST",body:JSON.stringify({text,auto_handoff:a})});
         setSaved(text);toast("Saved","Every new report will follow these instructions.");return true;}
@@ -509,9 +517,8 @@ function AiReport({cfg,reports,toast}){
   const prepare=async()=>{
     setBusy(true);
     try{if(text!==saved&&!(await save()))return;
-        const r=await api("/api/handoff",{method:"POST",body:JSON.stringify({folders:[]})});
-        setLast({state:"done",...r});}
-    catch(e){toast("Could not prepare",e.message,"error");}
+        await api("/api/handoff",{method:"POST",body:JSON.stringify({folders:[]})});}
+    catch(e){toast("Could not make the report",e.message,"error");}
     finally{setBusy(false);}
   };
   const list=Object.values(reports);
@@ -522,7 +529,8 @@ function AiReport({cfg,reports,toast}){
         <div className="sec-d">One report per recording date. It opens in a new tab.</div></div>
       {list.length===0
         ? <div className="card"><div className="empty"><div className="empty-t">No reports yet</div>
-            <div className="empty-d">Reports appear here as each recording date finishes, a few minutes after its analyses complete.</div></div></div>
+            <div className="empty-d">{auto?"A report is made automatically when analysed dates finish. You can also make them below.":
+              "Switch on automatic reports below, or press “Make reports” to make them now."}</div></div></div>
         : Object.entries(byP).map(([p,rs])=>(
           <div className="ledger" key={p} style={{marginBottom:16}}>
             <div className="proj"><span className="proj-n">{prettyProject(p)||"Reports"}</span><span className="proj-c">{rs.length} report{rs.length===1?"":"s"}</span></div>
@@ -547,17 +555,20 @@ function AiReport({cfg,reports,toast}){
           <span className="hint-s">Anything you leave out follows the lab’s standard report.</span>
         </div>
         <details className="adv">
-          <summary><span className="chev"><Chev s={14}/></span>Report packages for Claude</summary>
+          <summary><span className="chev"><Chev s={14}/></span>Making reports</summary>
           <Switch id="ai-auto" checked={auto} onChange={v=>{setAuto(v);save(v);}}
-                  label="Make a package when a batch of added dates finishes"
-                  hint="Leave this off while the lab's report service is writing a report for each date — otherwise every batch gets two packages."/>
-          <div className="hint" style={{margin:"6px 0 12px"}}>Bundles all results with these instructions into one folder that
-            Claude can turn into a report covering every date.</div>
-          <button className="btn" disabled={busy} onClick={prepare}>{busy?<span className="spin"/>:<Doc s={14}/>} Prepare package for all results</button>
+                  label="Make the report automatically when dates finish"
+                  hint="Builds the lab's standard report for each finished date — Network analysis, Activity scan, or both, whichever was run — and lists it above."/>
+          <div className="hint" style={{margin:"6px 0 12px"}}>Every report folder also holds a short note for Claude. To have Claude
+            add what your instructions above ask for and explain the results, run the command shown when a report is ready.</div>
+          <button className="btn" disabled={busy||building} onClick={prepare}>{busy||building?<span className="spin"/>:<Doc s={14}/>} Make reports for every finished date</button>
+          {building&&<div className="hint" style={{marginTop:10}}>Making the report{last.projects?.length>1?"s":""}… about a minute per date. You can leave this page.</div>}
           {last?.state==="done"&&last.prompt&&<div style={{marginTop:12}}>
-            <Callout kind="green" icon={<Check s={17}/>}>Package ready — {last.network_wells} wells, {last.activity_runs} scans.
-              In a terminal on the analysis computer, run:</Callout>
-            <div style={{marginTop:8}}><Code text={last.instruction}/></div></div>}
+            <Callout kind="green" icon={<Check s={17}/>}>Report ready — {last.network_wells} wells, {last.activity_runs} scans
+              {last.packages?.length>1?` in ${last.packages.length} projects`:""}. It is listed above.
+              For Claude, in a terminal on the analysis computer, run:</Callout>
+            <div style={{marginTop:8}}><Code text={last.instruction}/></div>
+            {last.errors?.length>0&&<div style={{marginTop:8}}><Callout kind="amber" icon={<Alert s={17}/>}>{last.errors.join(" · ")}</Callout></div>}</div>}
           {last?.state==="error"&&<div style={{marginTop:12}}><Callout kind="red" icon={<Alert s={17}/>}>{last.error}</Callout></div>}
         </details>
       </div></div>

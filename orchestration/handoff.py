@@ -2,9 +2,10 @@
 """
 Prepare an AI report handoff for finished analyses.
 
-This replaces the built-in report generator. Instead of rendering a report,
-it writes a small folder that an AI assistant (Claude Code on this server) is
-pointed at:
+The control page makes packages with report/make_report.py, which builds the
+standard report, and write_prompt() below, which tells Claude what is left to
+do. generate() is the older form, kept for the command line: it writes a
+package without building the report, for an AI to write one from scratch:
 
     <output>/AI_HANDOFF/<timestamp>/
         PROMPT.md        what to do, with the exact paths — give this to the AI
@@ -139,6 +140,99 @@ def _prompt(hdir: Path, output_dir: Path, activity_dir: Optional[Path],
         "",
     ]
     return "\n".join(lines)
+
+
+def _pretty_date(code: str) -> str:
+    try:
+        return datetime.strptime(code, "%y%m%d").strftime("%-d %b %Y")
+    except ValueError:
+        return code
+
+
+def write_prompt(package: Path, *, project: str, dates: list[str], network_wells: int,
+                 activity_runs: int, built: dict, results_dir: str, input_dir: str = "") -> Path:
+    """PROMPT.md for a package whose standard report make_report.py has built.
+
+    The report already exists when Claude is pointed at the package, so its job
+    is only to check it, add what REQUIREMENTS.md asks beyond it, and explain
+    it. Everything it needs to know is stated here, so it has no reason to ask:
+    the old prompt told it to write a report from scratch with both a Network
+    and an Activity page, and on a date analysed with the activity scan only it
+    stopped to ask what to do about the missing Network results.
+    """
+    report = package / "report"
+    multi = len(dates) > 1
+    if network_wells and activity_runs:
+        what = (f"Network analysis ({network_wells} wells) and Activity scan "
+                f"({activity_runs} scans).")
+    elif activity_runs:
+        what = (f"Activity scan only ({activity_runs} scans). These dates were analysed "
+                "without the Network analysis, so the report's Network page says there are "
+                "no Network results. That is expected — do not ask about it, and do not try "
+                "to run the Network analysis.")
+    elif network_wells:
+        what = (f"Network analysis only ({network_wells} wells). There are no Activity scan "
+                "results for these dates; the report's Activity page says so. That is "
+                "expected — do not ask about it.")
+    else:
+        what = "No results were found for these dates."
+    failed = [d for d, ok in built.items() if not ok]
+    tables = ("`report/tables/`" if not multi else
+              "`report/overview_dates.csv`, `report/network_all_dates.csv`, "
+              "`report/activity_all_dates.csv`, and each date's `report/dates/<date>/tables/`")
+    lines = [
+        "# MEA report request",
+        "",
+        f"Prepared {datetime.now():%Y-%m-%d %H:%M}.",
+        "",
+        f"- **Project:** {project}",
+        f"- **Dates:** " + ", ".join(f"{_pretty_date(d)} ({d})" for d in dates),
+        f"- **What was analysed:** {what}",
+        "",
+        "## The standard report is already built",
+        "",
+        f"`{report / 'report.html'}`" + (" — an overview with one full report per date in "
+                                        "`report/dates/<date>/`." if multi else "."),
+        f"Every table is also saved as CSV ({tables}).",
+    ]
+    if failed:
+        lines += ["", f"**These dates could not be built:** {', '.join(failed)}. Say so in your "
+                      "reply; do not try to repair the analysis or the report script."]
+    lines += [
+        "",
+        "## What to do",
+        "",
+        "1. Read `skills.md` in this folder: the rules (binding) and what every measurement means.",
+        "2. Read `REQUIREMENTS.md` in this folder.",
+        "   - If it asks for the standard report, or only for things the standard report "
+        "already contains, there is nothing to add.",
+        "   - If it asks for more, add it in `report/extras/` (create it): your scripts, "
+        "figures, tables and a `README.md` saying what each file is. Never edit the "
+        "standard report or its tables.",
+        "   - If it asks for something these results cannot give (for example Network "
+        "results for a date that only had the activity scan), do not ask — say in your "
+        "reply what could not be done and why.",
+        f"3. Check the numbers in the tables ({tables}): the well counts and the wells "
+        "flagged in quality control.",
+        "4. Reply with: where the report is (it is also listed in the control page under "
+        "**AI report**); five to eight plain-language bullets, each with its number and n "
+        "(wells), taken from the tables; what to be careful about from the QC tables; and "
+        "anything you could not do.",
+        "",
+        "Ask a question only if `REQUIREMENTS.md` contradicts itself or the rules. Keep "
+        "the reply short and free of jargon.",
+        "",
+        "## Paths",
+        "",
+        f"- This package: `{package}` — write only inside its `report/` folder.",
+        f"- Results (read-only): `{results_dir}`",
+        f"- Raw recordings (read-only — never write, move or delete anything here): "
+        f"`{input_dir or 'not recorded'}`",
+        "",
+    ]
+    path = package / "PROMPT.md"
+    path.write_text("\n".join(lines))
+    return path
 
 
 def generate(output_dir: Path, requirements: str = "", *,
