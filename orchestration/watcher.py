@@ -400,16 +400,14 @@ class JobConfig:
                 return errs
         out = self.output_dir
         if out:
-            try:
-                Path(out).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                errs.append(f"Output path is not writable: {out} ({exc})")
+            problem = cannot_write(out)
+            if problem:
+                errs.append(f"Output path is not writable: {out} ({problem})")
         act = self.activity_out if self.run_activity else None
-        if act:
-            try:
-                Path(act).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                errs.append(f"Activity scan output path is not writable: {act} ({exc})")
+        if act and act != out:
+            problem = cannot_write(act)
+            if problem:
+                errs.append(f"Activity scan output path is not writable: {act} ({problem})")
         if self.settle_seconds < 1:
             errs.append("settle_seconds must be >= 1")
         if self.poll_seconds < 1:
@@ -651,6 +649,27 @@ def path_is_within(child: str | Path, parent: str | Path) -> bool:
     except (OSError, RuntimeError):
         return False
     return c == p or p in c.parents
+
+
+def cannot_write(folder: str | Path) -> Optional[str]:
+    """Why this server cannot save results in ``folder``, or None if it can.
+    An existing folder can still belong to someone else, so actually try
+    creating (and removing) a file there rather than trusting mkdir."""
+    path = Path(folder).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".mea-write-test-{os.getpid()}-{threading.get_ident()}"
+        probe.write_text("")
+        probe.unlink()
+    except OSError as exc:
+        try:
+            import pwd
+            me = pwd.getpwuid(os.getuid()).pw_name
+        except Exception:                                   # noqa: BLE001
+            me = "this server"
+        return (f"{exc.strerror or exc}. The analysis runs as the user '{me}', which may not "
+                "save files there. Ask the folder's owner to allow it, or choose another folder")
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1581,9 +1600,10 @@ class Watcher:
             return self.cfg.resolve_driver_python()
         return cmd[0] if cmd else ""
 
-    def _env_banner(self, cmd: list[str], env: dict, interp: str = "") -> list[str]:
+    def _env_banner(self, cmd: list[str], env: dict, interp: str = "",
+                    job: str = JOB_NETWORK) -> list[str]:
         """What will actually run, resolved — written at the top of each log."""
-        out = [f"# {_now()}  {JOB_LABELS.get('network', '')}".rstrip(),
+        out = [f"# {_now()}  {JOB_LABELS.get(job, job)}".rstrip(),
                f"# driver interpreter : {interp or (cmd[0] if cmd else '?')}"]
         try:
             which = subprocess.run(["bash", "-lc", "command -v python3"], env=env,
@@ -1592,6 +1612,11 @@ class Watcher:
         except Exception:                                   # noqa: BLE001
             resolved = "(could not resolve)"
         out.append(f"# child 'python3'   : {resolved}")
+        # Only the Network pipeline needs pandas; for the activity scan a
+        # "MISSING" line here would be a false alarm.
+        if job != JOB_NETWORK:
+            out.append("# command           : " + " ".join(shlex.quote(c) for c in cmd))
+            return out
         try:
             chk = subprocess.run(["python3", "-c", "import pandas;print(pandas.__version__)"],
                                  env=env, capture_output=True, text=True, timeout=120)
@@ -2314,7 +2339,7 @@ class Watcher:
             with open(log_path, "w") as fh:
                 # Header first: every failure so far has come down to which
                 # interpreter ran what, and that was invisible in every log.
-                for line in self._env_banner(cmd, env, interp):
+                for line in self._env_banner(cmd, env, interp, job):
                     fh.write(line + "\n")
                 mem_limit = self._memory_limit(job)
                 run_cmd = cmd
