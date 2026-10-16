@@ -1274,6 +1274,7 @@ def main(argv=None) -> None:
     LOG.info("Processing %d recording(s)", len(targets))
 
     summaries = []
+    failed = 0
     for t in targets:
         try:
             s = process_file(t, a.output_dir, figures=not a.no_figures,
@@ -1286,7 +1287,14 @@ def main(argv=None) -> None:
             if s:
                 summaries.append(s)
         except Exception as exc:  # noqa: BLE001 - one bad file must not stop the batch
+            failed += 1
             LOG.exception("Failed on %s: %s", t, exc)
+
+    # Every recording failed: say so with the exit code, or the run would be
+    # reported as done with nothing saved.
+    if failed and failed == len(targets):
+        raise SystemExit(f"All {failed} recording(s) failed — nothing was saved. "
+                         "See the errors above.")
 
     if summaries:
         a.output_dir.mkdir(parents=True, exist_ok=True)
