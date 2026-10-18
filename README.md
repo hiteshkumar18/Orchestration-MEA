@@ -17,6 +17,11 @@ actually goes, the failure modes seen in production and why each fix is shaped
 the way it is, a debugging playbook, and the handful of things that look like
 bugs but are not.
 
+**Planning analysis across a line, its trials and chips?** See the
+[line-analysis workflow diagrams](docs/workflows/line-analysis/README.md), including
+the proposed NWB-first/Nextflow flow and analyst review gates. The diagrams distinguish
+existing processing from study controls still to implement.
+
 ---
 
 ## Relationship to MEA-Analysis
