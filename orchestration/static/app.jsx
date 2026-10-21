@@ -694,6 +694,10 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
         <Switch id="stg" checked={!!cfg.stage_locally} disabled={locked} onChange={v=>setT("stage_locally",v)}
                 label="Use the fast local disk while working"
                 hint="Keeps big temporary files on the computer's fast disk and deletes them afterwards. Several times faster."/>
+        {cfg.stage_locally&&<Switch id="cln" checked={!!cfg.driver_options.clean_up} disabled={locked} onChange={v=>setO("clean_up",v)}
+                label="Delete each well's working files as soon as it finishes"
+                hint={cfg.driver_options.clean_up?"On (recommended): only one well's working files, up to about 150 GB, are on the fast disk at a time.":
+                  "Off: every well's working files stay until the whole date has finished. A big date can need several TB, the fast disk can fill up, and the remaining wells then fail."}/>}
       </div></div>
     </div>
 

@@ -74,9 +74,20 @@ version divided by the well count and underestimated by six times (13 GB
 predicted against 81 GB actual). The `.h5` is compressed; its size on disk tells
 you very little about the uncompressed working set.
 
+That figure is for one well at a time, which holds only with **"Delete each
+well's working files as soon as it finishes"** (`clean_up`) on. With it off,
+every well's binary stays until the date ends. The estimate is then **14 × all
+the run's recordings together** (11.4–12.7 measured). Before 2026-10-21 the
+estimate assumed clean-up either way, and 261003 (472 GB of recordings, about
+6.5 TB of binaries) filled a 3.6 TB SSD. The settings page now shows the
+clean-up switch right below the fast-disk switch.
+
 It declines rather than fills a disk: if staging would take the volume below
 `stage_min_free_gb` (200 by default), it logs why and runs against the output
-directory as normal.
+directory as normal. The floor is also watched while the job runs. A staged job
+is stopped once the scratch disk drops below it (20 GB at the least), with a
+plain reason, so the remaining wells do not each fail in turn with "No space
+left on device".
 
 ---
 
@@ -199,6 +210,27 @@ desktop session holds `nvidia_drm`, so this needs a reboot.
 `check_gpu()` now probes before a Network job takes the slot, with its own 90 s
 deadline, and fails the job with a readable message instead of hanging.
 `GET /api/gpu` gives the same answer on demand.
+
+### The first full run on the SSD (2026-10-20/21)
+
+All 26 IPN and B6J dates, detection only, scratch on `/mnt/STUART_SSD_SCRATCH`,
+two Network jobs at once. Four things went wrong. All are fixed.
+
+* **The SSD filled** (3.6 TB): clean-up was off and the space estimate assumed
+  it was on (see Local staging). 261003, 260901 and 260907 lost 27 of 66,
+  18 of 34 and 8 of 14 wells, nearly all to "No space left on device".
+* **Five dates were killed whole** by systemd-oomd (see the memory ceiling in
+  §6) and showed "failed" with no reason. A job that ends with a non-zero code
+  now always says why, in words: "stopped by the system (killed)…".
+* **Well counts were inflated.** With the disk full, one of the driver's log
+  handlers failed and Python printed every message twice (once quoting the
+  source line), so 261003 read "77 of 116 failed". Counts are now of distinct
+  wells. Wells missing from their recording ("stream_id wellNNN is not in
+  [...]") are counted apart, not as failures.
+* **Saving the settings page reset the job.json-only settings**
+  (`memory_limit_gb`, `stall_minutes`, `max_runtime_hours`,
+  `kill_grace_seconds`, `max_poll_seconds`) to their defaults. A save now keeps
+  them.
 
 ---
 
@@ -346,8 +378,27 @@ bound to its own service (`memguard.stop_orphans`) and logs "Stopped N analysis
 job(s) left running by the previous server". Scopes of other servers and other
 users are never touched.
 
-The ceiling counts the file cache the job fills as well as its own memory, but
-cache is given back before anything is killed.
+The ceiling counts the file cache the job fills as well as its own memory. The
+kernel gives cache back before it kills anything, but **systemd-oomd does not
+wait for that**. Ubuntu turns it on for every user's service manager
+(`ManagedOOMMemoryPressure=kill`, 50% for 20 s, from
+`/usr/lib/systemd/system/user@.service.d/10-oomd-user-service-defaults.conf`).
+A job at its ceiling is mostly cache, from the working file of up to ~145 GB
+it writes for each well, and is reclaimed constantly. oomd reads that as
+pressure and kills the whole scope: every well of the date, exit code -9,
+nothing in the log. On 2026-10-21 five dates died this way, all while writing
+that file, with under 2 GB of real memory in use. `oomctl dump` lists the
+accounts it watches. The fix takes root and covers one account only (here
+s-user-b, uid 1011):
+
+    sudo mkdir -p /etc/systemd/system/user@1011.service.d
+    printf '[Service]\nManagedOOMMemoryPressure=auto\n' | \
+        sudo tee /etc/systemd/system/user@1011.service.d/90-mea-no-oomd-pressure.conf
+    sudo systemctl daemon-reload
+
+The ceiling still protects the machine. While oomd is set to kill for the
+server's account, the server logs a warning, System health shows one, and a
+job killed that way says so.
 
 ### Other open items
 
@@ -356,7 +407,7 @@ cache is given back before anything is killed.
   and writing into it. A hung FUSE mount blocks every process that touches the
   path. Institutional tenants usually need admin consent for the app
   registration, which is the real blocker.
-* **`/mnt/Vol20tb1` is at 99%** (332 GB free of 19 TB). Not used for anything
+* **`/mnt/Vol20tb1` is full** (146 GB free of 19 TB on 2026-10-21). Not used for anything
   here any more, but worth knowing.
 
 ---

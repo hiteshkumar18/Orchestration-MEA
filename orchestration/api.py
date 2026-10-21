@@ -35,6 +35,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import os
 import sys
@@ -421,6 +422,14 @@ def api_set_config(payload: ConfigPayload, request: Request):
         nwb_python=payload.nwb_python,
         nwb_compression=payload.nwb_compression if payload.nwb_compression in ("gzip", "maxwell") else "gzip",
     )
+    # Some settings live only in job.json: the memory ceiling, the stall
+    # watchdog, the run-time cap and the like. The page does not send them,
+    # so building the config from the page alone put them back to their
+    # defaults on every save. Keep what is set now.
+    sent = set(ConfigPayload.model_fields) | {"work_dir"}
+    for f in dataclasses.fields(JobConfig):
+        if f.name not in sent:
+            setattr(cfg, f.name, getattr(watcher.cfg, f.name))
     errors = cfg.validate()
     if errors:
         raise HTTPException(400, {"errors": errors})

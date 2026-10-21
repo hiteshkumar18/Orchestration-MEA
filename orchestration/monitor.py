@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import memguard
+
 PIPELINE_MARKERS = {
     "run_pipeline_driver.py": "Network driver",
     "mea_analysis_routine.py": "Network well",
@@ -145,6 +147,8 @@ class SystemMonitor:
             "gpu": self._gpu,
             "disks": dict(self._disks),
             "processes": procs,
+            # Checked every ten minutes at most (memguard caches it).
+            "oomd_kills_whole_jobs": memguard.available() and memguard.oomd_kills_whole_jobs(),
         }
         snap["warnings"] = warnings(snap)
         with self._lock:
@@ -278,6 +282,10 @@ def warnings(s: dict[str, Any]) -> list[dict[str, str]]:
             if (label == "Fast disk" and d["free"] < 200 * 2**30) or frac < 0.03:
                 out.append({"level": "bad" if frac < 0.03 else "warn",
                             "text": f"{label} is nearly full: {d['free'] / 2**30:.0f} GB free ({frac:.0%})."})
+    if s.get("oomd_kills_whole_jobs"):
+        out.append({"level": "warn", "text": "The computer's memory watchdog (systemd-oomd) can stop a "
+                    "whole analysis, every well of the date, when it reaches its memory limit. "
+                    "An administrator can switch this off for this account; see FIELD-NOTES."})
     c = s.get("cpu") or {}
     if c.get("iowait_percent") and c["iowait_percent"] > 40:
         out.append({"level": "warn", "text": f"Processors are waiting on disks {c['iowait_percent']:.0f}% of "
