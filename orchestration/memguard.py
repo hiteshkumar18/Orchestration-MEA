@@ -10,7 +10,8 @@ systemd scope with a memory ceiling.
 When a job reaches the ceiling the kernel ends its largest process, which is
 the well that is using the memory. The driver reports that well as failed and
 carries on with the next one, so the rest of the date and every other job are
-unaffected.
+unaffected. That holds only while systemd-oomd leaves the job alone; see
+oomd_kills_whole_jobs().
 
 Nothing here is required: without systemd, or without the memory controller,
 the job simply runs with no ceiling, exactly as before.
@@ -18,8 +19,10 @@ the job simply runs with no ceiling, exactly as before.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +37,9 @@ MIN_AUTO_GB = 4.0
 KILLED_MARK = "Exit Code: -9"
 
 _available: Optional[bool] = None
+# (answer, when it was checked): an administrator can change it at any time.
+_oomd: Optional[tuple[bool, float]] = None
+OOMD_RECHECK_S = 600
 
 
 def total_ram_gb(meminfo: Optional[str] = None) -> float:
@@ -101,6 +107,40 @@ def available(refresh: bool = False) -> bool:
             ok = False
     _available = ok
     return ok
+
+
+def oomd_kills_whole_jobs(refresh: bool = False) -> bool:
+    """Whether systemd-oomd may end a whole job rather than its greedy well.
+
+    Ubuntu turns systemd-oomd on for every user's service manager
+    (ManagedOOMMemoryPressure=kill, 50% for 20 s), and that covers the scopes
+    started here. A job at its ceiling is mostly file cache, from the
+    working file of up to ~145 GB it writes per well, and the kernel keeps
+    reclaiming it. oomd reads that as memory pressure and kills the whole
+    scope: every well of the date, with nothing in its log. On 2026-10-21
+    five dates ended with code -9 this way. The kernel's own limit, which
+    stops only the largest process, never got the chance.
+
+    Switching it off for one account takes root, so all this can do is say so.
+    """
+    global _oomd
+    if _oomd is not None and not refresh and time.time() - _oomd[1] < OOMD_RECHECK_S:
+        return _oomd[0]
+    kills = False
+    if shutil.which("systemctl"):
+        try:
+            active = subprocess.run(["systemctl", "is-active", "systemd-oomd"],
+                                    capture_output=True, text=True, timeout=20).stdout.strip()
+            if active == "active":
+                policy = subprocess.run(
+                    ["systemctl", "show", f"user@{os.getuid()}.service",
+                     "-p", "ManagedOOMMemoryPressure", "--value"],
+                    capture_output=True, text=True, timeout=20).stdout.strip()
+                kills = policy == "kill"
+        except (OSError, subprocess.SubprocessError):
+            kills = False
+    _oomd = (kills, time.time())
+    return kills
 
 
 def wrap(cmd: list[str], limit_gb: float, bind_unit: Optional[str] = None) -> list[str]:

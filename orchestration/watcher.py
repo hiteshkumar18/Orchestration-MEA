@@ -47,6 +47,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -65,6 +66,13 @@ from driver_schema import build_driver_args, default_options  # noqa: E402
 from mea_repo import find_mea_repo, find_driver_python, check_python, required_imports  # noqa: E402
 
 LOG = logging.getLogger("mea.watcher")
+
+# A well the driver reports as failed, with its recording when given. Also
+# matches the "Message: '...'" copy Python prints when logging itself fails,
+# but not the quoted source line, which reads "{stream_id}".
+WELL_FAILED = re.compile(r"Subprocess failed for (well\d+)(?: in ([^\s']+))?")
+WELL_NOT_IN_RECORDING = re.compile(r"stream_id (well\d+) is not in")
+WELL_CONV_FAILED = re.compile(r"NWB conversion failed for (\S+?)(?: in (\S+))?: ")
 
 # This repo (Orchestration-MEA), not the analysis repo.
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1563,7 +1571,7 @@ class Watcher:
                                   detail="environment problem, not a data problem",
                                   error=msg, **who)
                 self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
-                self._batch_finished(key)
+                self._ended_early(key)
                 return
         cmd = self.build_command(run_dir, job)
         printable = " ".join(shlex.quote(c) for c in cmd)
@@ -1577,7 +1585,7 @@ class Watcher:
             self.state.update(key, status="detected", detected_at=_now(), **{
                 **common, "detail": f"dry run — {detail}" if detail else "dry run"})
             self.on_event("detected", {"run": run_dir.name, "job": job, "command": printable})
-            self._batch_finished(key)
+            self._ended_early(key)
             return
 
         log_path = self._log_path_for(run_dir, job)
@@ -1785,6 +1793,22 @@ class Watcher:
             return None
 
     @staticmethod
+    def exit_reason(rc: int, oomd: bool = False, network: bool = True) -> str:
+        """Why a job ended with a non-zero code, in words a lab member can act on."""
+        again = ("Finished wells are kept; queue the date again to finish the rest."
+                 if network else "Queue the date again to retry it.")
+        if rc in (-9, 137):
+            why = ("stopped by the system (killed). The usual cause is the computer "
+                   "running short of memory")
+            if oomd:
+                why += (": its memory watchdog (systemd-oomd) ends a whole analysis, "
+                        "not just the well using the memory")
+            return f"{why}. {again}"
+        if rc < 0:
+            return f"stopped by the system (signal {-rc}). {again}"
+        return f"the analysis ended with an error (code {rc}); the log says where. {again}"
+
+    @staticmethod
     def read_driver_verdict(log_path: Path) -> Optional[str]:
         """Whether a zero exit code actually meant the wells were analysed.
 
@@ -1798,17 +1822,45 @@ class Watcher:
             text = log_path.read_text(errors="ignore")
         except OSError:
             return None
-        launched = text.count("[DRIVER] Launching:")
+        # Distinct wells, not matching lines. When one of the driver's log
+        # handlers fails (a full disk), Python prints a traceback quoting the
+        # source line (`... Launching: {command}`) and then the message as
+        # `Message: '...'`, while the other handler logs it normally. Counting
+        # lines made 66 wells with 27 failures read "77 of 116 failed".
+        launched = len({line.split("[DRIVER] Launching:", 1)[1].strip().strip("'\"")
+                        for line in text.splitlines()
+                        if "[DRIVER] Launching:" in line and "{command}" not in line})
         # NWB route: a well that could not be converted was never launched.
-        conv_failed = text.count("NWB conversion failed for")
+        conv_failed = len(set(WELL_CONV_FAILED.findall(text)))
         launched += conv_failed
-        failed = text.count("Subprocess failed for") + conv_failed
-        if launched and failed >= launched:
+        # A well listed for a recording that does not contain it fails with
+        # "stream_id wellNNN is not in [...]" just before the driver reports
+        # it. Nothing went wrong there and nothing can be done about it, so
+        # it is counted apart rather than as a failure.
+        failed, missing = set(), set()
+        last_missing = None
+        for line in text.splitlines():
+            if "[DRIVER] Launching:" in line:
+                last_missing = None
+            m = WELL_NOT_IN_RECORDING.search(line)
+            if m:
+                last_missing = m.group(1)
+            for hit in WELL_FAILED.findall(line):
+                (missing if hit[0] == last_missing else failed).add(hit)
+        missing -= failed
+        n_failed = len(failed) + conv_failed
+        if launched and n_failed and n_failed + len(missing) >= launched:
             return (f"the driver exited 0 but all {launched} well subprocess(es) "
                     "failed — see the driver log")
-        if failed:
-            return (f"{failed} of {launched} well subprocess(es) failed "
-                    "— see the driver log")
+        said = []
+        if n_failed:
+            said.append(f"{n_failed} of {launched} well subprocess(es) failed "
+                        "— see the driver log")
+        if missing:
+            said.append(f"{len(missing)} well(s) are not in their recording file, "
+                        "so there was nothing to analyse")
+        if said:
+            return "; ".join(said)
         if "No data files found" in text:
             return "the driver found no recordings to analyse"
         return None
@@ -1874,6 +1926,27 @@ class Watcher:
         except subprocess.TimeoutExpired:
             LOG.error("pid %s did not die even after SIGKILL", proc.pid)
 
+    # A staged job is stopped below this much free scratch space even when the
+    # configured floor is lower: past it, every remaining well would fail.
+    SCRATCH_STOP_MIN_GB = 20
+
+    def _scratch_too_low(self, scratch: Optional[Path]) -> Optional[str]:
+        """Why a staged job must stop for lack of scratch space, or None."""
+        if scratch is None:
+            return None
+        try:
+            free_gb = shutil.disk_usage(scratch).free / 2**30
+        except OSError:
+            return None
+        floor = max(self.cfg.stage_min_free_gb, self.SCRATCH_STOP_MIN_GB)
+        if free_gb >= floor:
+            return None
+        advice = ("run fewer dates at once" if self.cfg.driver_options.get("clean_up") else
+                  "turn on \"Delete each well's working files as soon as it finishes\"")
+        return (f"stopped because the scratch disk ({self._scratch_root()}) was down to "
+                f"{free_gb:.0f} GB free, and at least {floor} GB must stay free. Finished "
+                f"wells are kept; {advice}, then queue the date again to finish the rest.")
+
     def _memory_limit(self, job: str) -> Optional[float]:
         """The memory ceiling for this job in GB, or None to run without one."""
         if job != JOB_NETWORK:
@@ -1889,10 +1962,18 @@ class Watcher:
                             "memory-limited job (systemd-run --user --scope). "
                             "Jobs run as before, without one.")
             return None
+        if memguard.oomd_kills_whole_jobs() and not getattr(self, "_oomd_warned", False):
+            self._oomd_warned = True
+            LOG.warning("systemd-oomd is set to kill on memory pressure for this account "
+                        "(user@%d.service). A job that reaches its memory ceiling can then "
+                        "be ended whole, every well of the date, instead of only the well "
+                        "using the memory. An administrator can switch this off for this "
+                        "account only; see docs/FIELD-NOTES.md.", os.getuid())
         return limit
 
     def _supervise(self, cmd: list[str], env: dict, fh, log_path: Path,
-                   run_name: str, label: str, key: str) -> tuple[int, Optional[str]]:
+                   run_name: str, label: str, key: str,
+                   scratch: Optional[Path] = None) -> tuple[int, Optional[str]]:
         """Run the driver, watching for a hang. Returns (returncode, stall reason).
 
         A crash is easy: the process exits and the log says why. A hang says
@@ -1900,6 +1981,12 @@ class Watcher:
         GPU slot is only released when the job ends, every queued job behind it
         waits too. So progress is judged by whether the log is still growing,
         and a job that has gone quiet is killed and reported rather than left.
+
+        A staged job (`scratch` set) is also stopped if the scratch disk runs
+        down to its floor. The estimate made before it started can be wrong,
+        and once the disk is full every remaining well fails in turn with "No
+        space left on device"; on a shared disk, everyone else's work fails
+        too. Stopping keeps the finished wells and says why.
         """
         stall_s = max(0, self.cfg.stall_minutes) * 60
         cap_s = max(0.0, self.cfg.max_runtime_hours) * 3600
@@ -1954,6 +2041,11 @@ class Watcher:
                 self.state.update(key, detail=(
                     f"running {_hms(elapsed)} · last log output "
                     f"{_hms(quiet)} ago"))
+                low = self._scratch_too_low(scratch)
+                if low:
+                    LOG.error("%s [%s] %s — ending pid %s", run_name, label, low, proc.pid)
+                    self._kill_tree(proc)
+                    return proc.returncode or -1, low
 
             if stall_s and quiet > stall_s:
                 self._kill_tree(proc)
@@ -2091,21 +2183,34 @@ class Watcher:
     # a shared volume at 99% full, and the cost of guessing low there falls on
     # other people.
     BINARY_VS_RAW = 3.5
+    # Every well's binary together against the size of all the run's .h5
+    # files, for when no well's binary is deleted before the run ends.
+    # Measured on 2026-10-21: 11.4 (260907), 11.5 (260901) and 12.7 (261003).
+    # The binary is float32, twice the 16-bit samples on disk, and the .h5
+    # is gzip-compressed about six-fold. Rounded up, as above.
+    ALL_WELLS_VS_RAW = 14.0
 
     def _staging_estimate_gb(self, run_dir: Path) -> float:
-        """Roughly how much scratch one well of this run needs.
+        """Roughly how much scratch this run needs at its peak.
 
-        Only one well's working set exists at a time — --clean-up removes the
-        binary and sorter_output as each well finishes — so the peak is set by
-        the largest single recording, not by the run as a whole.
+        With "Delete each well's working files as soon as it finishes"
+        (--clean-up) on, only one well's working set exists at a time, because
+        the binary and sorter_output go as each well finishes. The peak is then set by the
+        largest single recording. With it off, every well's binary stays
+        until the run ends, so the peak is all of them together. The estimate
+        once assumed clean-up regardless: on 2026-10-20 it judged a 3.6 TB
+        scratch disk big enough for 261003, which needed about 6.5 TB, and
+        the disk filled.
         """
         try:
             recs = find_recordings(run_dir, self.cfg.h5_glob,
                                    self.cfg.subfolder_for(JOB_NETWORK))
-            biggest = max((p.stat().st_size for p in recs), default=0)
+            sizes = [p.stat().st_size for p in recs]
         except OSError:
             return float("inf")            # unknown size: decline to stage
-        return biggest * self.BINARY_VS_RAW / 2**30
+        if self.cfg.driver_options.get("clean_up"):
+            return max(sizes, default=0) * self.BINARY_VS_RAW / 2**30
+        return sum(sizes) * self.ALL_WELLS_VS_RAW / 2**30
 
     def _stage_in(self, run_dir: Path) -> Optional[tuple[Path, list[str]]]:
         """Prepare a local output directory, returning it and the patched flag.
@@ -2136,8 +2241,11 @@ class Watcher:
                     "%s: not staging — %.0f GB free at %s, %.0f GB already promised "
                     "to other staged runs, this run needs about %.0f GB, and %d GB "
                     "must stay free. Running against the output directory instead "
-                    "(slower, but it cannot fill the disk).", run_dir.name, free_gb,
-                    self._scratch_root(), reserved, need_gb, floor)
+                    "(slower, but it cannot fill the scratch disk).%s", run_dir.name, free_gb,
+                    self._scratch_root(), reserved, need_gb, floor,
+                    "" if self.cfg.driver_options.get("clean_up") else
+                    " With \"Delete each well's working files as soon as it finishes\" "
+                    "on, only one well's working files would be on the disk at a time.")
                 self._remove_scratch(local)
                 return None
             LOG.info("%s: staging locally — %.0f GB free, %.0f GB promised elsewhere, "
@@ -2227,7 +2335,7 @@ class Watcher:
                 self.state.update(key, status="failed", completed_at=_now(), error=msg)
                 LOG.error("%s [%s] %s", run_dir.name, label, msg)
                 self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
-                self._batch_finished(key)
+                self._ended_early(key)
                 return
 
         # Wait for a slot before starting. Kilosort4 reserves many GB of VRAM,
@@ -2350,7 +2458,7 @@ class Watcher:
                 fh.write("-" * 72 + "\n")
                 fh.flush()
                 rc, stall = self._supervise(run_cmd, env, fh, log_path,
-                                            run_dir.name, label, key)
+                                            run_dir.name, label, key, scratch=staged)
             # The driver carries on after a killed well, so the job can still
             # end "done". Say so, or the missing well is a mystery later.
             mem_note = None
@@ -2399,20 +2507,29 @@ class Watcher:
                 LOG.warning("%s [%s]: %s", run_dir.name, label, verdict)
             if all_failed or (verdict and verdict.startswith("the driver found no")):
                 ok = False
+            error = None
+            if not ok:
+                # A failed job must say why. Killed by the system, the driver
+                # has no chance to log anything, and the run showed only
+                # "failed" with no reason at all.
+                error = verdict if rc == 0 else self.exit_reason(
+                    rc, oomd=mem_limit is not None and memguard.oomd_kills_whole_jobs(),
+                    network=job == JOB_NETWORK)
             self.state.update(
                 key,
                 status="done" if ok else "failed",
                 completed_at=_now(),
                 returncode=rc,
-                error=verdict if verdict and not ok else None,
+                error=error,
                 detail=("; ".join(x for x in (verdict, mem_note) if x) or None) if ok else None,
                 duration_s=round(time.time() - started, 1),
             )
             (LOG.info if ok else LOG.error)(
-                "%s [%s] finished with code %s (log: %s)",
-                run_dir.name, label, rc, log_path)
+                "%s [%s] finished with code %s (log: %s)%s",
+                run_dir.name, label, rc, log_path, f": {error}" if error else "")
             self.on_event("done" if ok else "failed",
-                          {"run": run_dir.name, "job": job, "returncode": rc})
+                          {"run": run_dir.name, "job": job, "returncode": rc,
+                           **({"error": error} if error else {})})
         except Exception as exc:  # noqa: BLE001
             self.state.update(key, status="failed", completed_at=_now(), error=str(exc))
             LOG.exception("%s [%s]: dispatch raised", run_dir.name, label)
@@ -2451,7 +2568,7 @@ class Watcher:
                               error="cancelled — stopped by hand before it started")
         self.on_event("held" if outcome == "held" else "failed",
                       {"run": Path(key.split("::")[0]).name})
-        self._batch_finished(key)
+        self._ended_early(key)
         return True
 
     # -- queueing ------------------------------------------------------------ #
@@ -2634,6 +2751,18 @@ class Watcher:
                                      daemon=True).start()
                 except Exception:  # noqa: BLE001
                     LOG.exception("Could not start the batch-completion hook")
+
+    def _ended_early(self, key: str) -> None:
+        """Close a job that ended before it ran (not started, dry run,
+        cancelled while waiting) within its batch.
+
+        Such a job never reaches _date_finished, which is what lets go of a
+        hand-queued key. Left in _hand_queued, the key swallowed the report of
+        the next time the scan loop analysed that date on its own.
+        """
+        self._batch_finished(key)
+        with self._batch_lock:
+            self._hand_queued.discard(key)
 
     def _date_finished(self, key: str) -> None:
         """Announce a date the watcher analysed on its own once its last job
