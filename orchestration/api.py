@@ -263,6 +263,7 @@ class ConfigPayload(BaseModel):
     stage_locally: bool = False
     scratch_dir: str = ""
     stage_min_free_gb: int = 200
+    copy_input_first: bool = False
     dry_run: bool = False
 
 
@@ -357,6 +358,7 @@ def api_get_config():
         "stage_locally": cfg.stage_locally,
         "scratch_dir": cfg.scratch_dir,
         "stage_min_free_gb": cfg.stage_min_free_gb,
+        "copy_input_first": cfg.copy_input_first,
         "dry_run": cfg.dry_run,
         "work_dir": cfg.work_dir,
         "ai_requirements": cfg.ai_requirements,
@@ -414,6 +416,7 @@ def api_set_config(payload: ConfigPayload, request: Request):
         stage_locally=payload.stage_locally,
         scratch_dir=payload.scratch_dir,
         stage_min_free_gb=payload.stage_min_free_gb,
+        copy_input_first=payload.copy_input_first,
         work_dir=str(WORK_DIR),
         dry_run=payload.dry_run,
         ai_requirements=payload.ai_requirements,
