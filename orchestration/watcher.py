@@ -175,6 +175,15 @@ class JobConfig:
     # 99% full, so staging must be able to decline. Running someone else's
     # volume to zero would be a worse failure than a slow analysis.
     stage_min_free_gb: int = 200
+    # Also copy the date's recordings to the scratch disk first, and analyse
+    # the copies. The analysis reads a recording in small pieces, and from
+    # the NAS that ran at 15-38 MB/s where one plain copy ran at ~115 MB/s,
+    # the whole network link. Measured 2026-10-23, one run at a time:
+    # 260825 15.1 min staged, 11.9 min copied first (98 s of it copying);
+    # 260926 31.1 and 27.6 min (349 s). Needs stage_locally. The copies are
+    # inside the run's scratch folder, so they go when it goes; the
+    # recordings themselves are only ever read.
+    copy_input_first: bool = False
 
     # --- Watchdog -----------------------------------------------------------
     # A driver that hangs rather than exits is worse than one that crashes: it
@@ -636,6 +645,21 @@ def find_recordings(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network
     return [p for p in found if assay_subfolder in p.parts]
 
 
+NETWORK_FS = {"cifs", "smb3", "smbfs", "nfs", "nfs4", "fuse.sshfs", "afs"}
+
+
+def network_mounts() -> list[str]:
+    """Mount points of network filesystems, such as the lab NAS. Scratch
+    clean-up refuses to delete anything that overlaps one."""
+    try:
+        with open("/proc/mounts") as fh:
+            rows = [line.split() for line in fh]
+    except OSError:
+        return []
+    # /proc/mounts escapes spaces in mount points as \040.
+    return [r[1].replace("\\040", " ") for r in rows if len(r) > 2 and r[2] in NETWORK_FS]
+
+
 def find_recording(run_dir: Path, h5_glob: str, assay_subfolder: str = "Network") -> Optional[Path]:
     """First qualifying recording, falling back to any recording.
 
@@ -792,6 +816,7 @@ class Watcher:
             "spike_sorting": not c.driver_options.get("skip_spikesorting"),
             "nwb_convert": c.nwb_convert, "nwb_compression": c.nwb_compression,
             "stage_locally": c.stage_locally, "scratch_dir": c.scratch_dir,
+            "copy_input_first": c.copy_input_first,
             "max_concurrent_network": c.max_concurrent_network,
             "max_concurrent_activity": c.max_concurrent_activity,
             "driver_options": {k: v for k, v in c.driver_options.items()
@@ -2156,8 +2181,11 @@ class Watcher:
             # binary/ is a well's uncompressed scratch copy (up to ~130 GB). It
             # is left behind only by a well that failed, it is never a result,
             # and copying it once made a copy-back outlive the server.
+            # INPUT_DIR holds copies of the recordings (copy_input_first),
+            # which are not results either.
             proc = subprocess.run(
                 [rsync, "-a", "--partial", "--exclude=binary/",
+                 f"--exclude=/{self.INPUT_DIR}/",
                  f"{src}{os.sep}", f"{dst}{os.sep}"],
                 capture_output=True, text=True)
             if proc.returncode == 0:
@@ -2165,7 +2193,7 @@ class Watcher:
             LOG.warning("rsync failed (%s); falling back to a plain copy",
                         (proc.stderr.strip().splitlines() or ["?"])[-1])
         shutil.copytree(src, dst, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("binary"))
+                        ignore=shutil.ignore_patterns("binary", self.INPUT_DIR))
 
     def _scratch_root(self) -> Path:
         return Path(self.cfg.scratch_dir or (Path(self.cfg.work_dir) / "scratch"))
@@ -2208,9 +2236,61 @@ class Watcher:
             sizes = [p.stat().st_size for p in recs]
         except OSError:
             return float("inf")            # unknown size: decline to stage
+        # Copied first, every recording sits on the scratch disk for the
+        # whole run, next to the working files.
+        copies = sum(sizes) if self.cfg.copy_input_first else 0
         if self.cfg.driver_options.get("clean_up"):
-            return max(sizes, default=0) * self.BINARY_VS_RAW / 2**30
-        return sum(sizes) * self.ALL_WELLS_VS_RAW / 2**30
+            return (max(sizes, default=0) * self.BINARY_VS_RAW + copies) / 2**30
+        return (sum(sizes) * self.ALL_WELLS_VS_RAW + copies) / 2**30
+
+    # Inside a run's scratch folder: the copies of its recordings. Excluded
+    # from the copy back, and deleted with the folder.
+    INPUT_DIR = ".input"
+
+    def _copy_input(self, run_dir: Path, local: Path, key: str) -> Optional[Path]:
+        """Copy the run's recordings into <local>/INPUT_DIR and return the
+        folder to give the driver, or None to read the originals as before.
+
+        Only reads the originals. The copy keeps <project>/<date>/<chip>/
+        Network/<run>/ because MEA-Analysis takes project, date and chip from
+        those path components; any other layout is left uncopied. Stops early,
+        returning None, if the run is cancelled meanwhile.
+        """
+        dest = local / self.INPUT_DIR / self.cfg.project_of(run_dir) / run_dir.name
+        source = run_dir.resolve()
+        target = dest.resolve()
+        # The copies are deleted later. They must never be, or sit inside,
+        # anything that is input.
+        inputs = [source] + ([Path(self.cfg.watch_dir).resolve()] if self.cfg.watch_dir else [])
+        if any(target == p or p in target.parents or target in p.parents for p in inputs):
+            LOG.error("%s: not copying recordings to %s: it overlaps the input folder",
+                      run_dir.name, target)
+            return None
+        recs = find_recordings(run_dir, self.cfg.h5_glob, self.cfg.subfolder_for(JOB_NETWORK))
+        rels = [r.relative_to(run_dir) for r in recs]
+        if not recs or any(len(r.parts) != 4 for r in rels):
+            LOG.info("%s: recordings are not laid out as <chip>/Network/<run>/; "
+                     "reading them where they are", run_dir.name)
+            return None
+        total = sum(r.stat().st_size for r in recs)
+        done = 0
+        started = time.time()
+        for i, (rec, rel) in enumerate(zip(recs, rels), 1):
+            if key in self._cancel:
+                return None
+            self.state.update(key, detail=f"copying recordings to the fast disk "
+                                          f"({i} of {len(recs)}, {done / 2**30:.0f} of "
+                                          f"{total / 2**30:.0f} GB)")
+            out = dest / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(rec, out)
+            meta = rec.parent / ".metadata"
+            if meta.is_file():
+                shutil.copyfile(meta, out.parent / ".metadata")
+            done += rec.stat().st_size
+        LOG.info("%s: copied %d recording(s), %.1f GB, to %s in %s", run_dir.name,
+                 len(recs), total / 2**30, dest, _hms(time.time() - started))
+        return dest
 
     def _stage_in(self, run_dir: Path) -> Optional[tuple[Path, list[str]]]:
         """Prepare a local output directory, returning it and the patched flag.
@@ -2224,7 +2304,7 @@ class Watcher:
         # scratch below.
         local = self._scratch_root() / self.cfg.project_of(run_dir) / run_dir.name
         try:
-            if local.exists():
+            if local.exists() and self._may_delete(local.resolve()):
                 shutil.rmtree(local, ignore_errors=True)
             local.mkdir(parents=True, exist_ok=True)
             need_gb = self._staging_estimate_gb(run_dir)
@@ -2263,6 +2343,24 @@ class Watcher:
             return None
         return local, []
 
+    def _may_delete(self, target: Path) -> bool:
+        """Whether a scratch path may be deleted: inside the scratch root, and
+        clear of the input folder and of every network mount (the NAS holds
+        the original recordings; nothing here ever deletes there)."""
+        root = self._scratch_root().resolve()
+        if root not in target.parents:
+            LOG.error("Refusing to delete %s: not inside the scratch root %s", target, root)
+            return False
+        guarded = [Path(m) for m in network_mounts()]
+        if self.cfg.watch_dir:
+            guarded.append(Path(self.cfg.watch_dir).resolve())
+        for g in guarded:
+            if target == g or g in target.parents or target in g.parents:
+                LOG.error("Refusing to delete %s: it overlaps %s, which holds input data",
+                          target, g)
+                return False
+        return True
+
     def _remove_scratch(self, local: Path) -> None:
         """Delete one run's scratch, release its reservation, and remove the
         project folder and scratch root once nothing else is staged there.
@@ -2277,8 +2375,7 @@ class Watcher:
             target = local.resolve()
         except OSError:
             return
-        if root not in target.parents:
-            LOG.error("Refusing to delete %s: not inside the scratch root %s", target, root)
+        if not self._may_delete(target):
             return
         shutil.rmtree(target, ignore_errors=True)
         for d in (target.parent, root):
@@ -2404,6 +2501,27 @@ class Watcher:
                     self.state.update(key, detail=f"staged on local disk: {staged}")
                     LOG.info("%s [%s] staging output at %s", run_dir.name, label, staged)
 
+        # Counted in the run's time: it is part of what the analysis costs.
+        prep_started: Optional[float] = None
+        if staged is not None and self.cfg.copy_input_first and not self.cfg.nwb_convert:
+            prep_started = time.time()
+            try:
+                copied = self._copy_input(run_dir, staged, key)
+            except OSError as exc:
+                LOG.warning("%s: could not copy the recordings to the fast disk (%s); "
+                            "reading them where they are", run_dir.name, exc)
+                copied = None
+                partial = (staged / self.INPUT_DIR).resolve()
+                if self._may_delete(partial):
+                    shutil.rmtree(partial, ignore_errors=True)
+            if copied is not None:
+                src = str(run_dir)
+                cmd = [str(copied) if c == src else
+                       str(copied / Path(c).relative_to(run_dir))
+                       if c.startswith(src + os.sep) else c
+                       for c in cmd]
+                self.state.update(key, detail=f"analysing the copies on the fast disk: {copied}")
+
         # Taken off the queue while its folder was being prepared (clearing
         # old sorter output and staging take seconds to minutes): end it now,
         # not after the analysis has started.
@@ -2415,7 +2533,7 @@ class Watcher:
             self._end_cancelled_before_start(key)
             return
 
-        started = time.time()
+        started = prep_started or time.time()
         with self._active_lock:
             self._active[job] = self._active.get(job, 0) + 1
         self.state.update(key, status="running", started_at=_now())

@@ -1737,6 +1737,13 @@ function Settings({
     onChange: v => setO("clean_up", v),
     label: "Delete each well's working files as soon as it finishes",
     hint: cfg.driver_options.clean_up ? "On (recommended): only one well's working files, up to about 150 GB, are on the fast disk at a time." : "Off: every well's working files stay until the whole date has finished. A big date can need several TB, the fast disk can fill up, and the remaining wells then fail."
+  }), cfg.stage_locally && React.createElement(Switch, {
+    id: "cpy",
+    checked: !!cfg.copy_input_first,
+    disabled: locked || cfg.nwb_convert,
+    onChange: v => setT("copy_input_first", v),
+    label: "Copy the recordings to the fast disk first",
+    hint: cfg.nwb_convert ? "Not used while NWB conversion is on." : cfg.copy_input_first ? "On: each date's recordings are copied to the fast disk in one go, analysed there, and the copies deleted afterwards. The originals are only read. Needs room for the date's recordings." : "Off: the analysis reads the recordings from where they are, in small pieces. From the NAS that is slower."
   })))), React.createElement("details", {
     className: "adv"
   }, React.createElement("summary", null, React.createElement("span", {
@@ -3102,6 +3109,7 @@ function App({
     stage_locally: !!cfg.stage_locally,
     scratch_dir: cfg.scratch_dir || "",
     stage_min_free_gb: Number(cfg.stage_min_free_gb) || 200,
+    copy_input_first: !!cfg.copy_input_first,
     dry_run: !!cfg.dry_run,
     ai_requirements: cfg.ai_requirements || "",
     auto_handoff: cfg.auto_handoff !== false,
