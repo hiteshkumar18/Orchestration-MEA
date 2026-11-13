@@ -109,7 +109,15 @@ DEFAULT_WORK_DIR = Path(os.environ.get("MEA_WATCHER_HOME", Path.home() / ".mea-w
 class JobConfig:
     """Everything the UI supplies for a watch job."""
 
-    watch_dir: str = ""                     # input path on the data server (read-only)
+    # The project folders being watched, each {"path", "added_by",
+    # "added_by_email", "added_at", "paused"}. Several projects record in the
+    # same month and different people look after them, so one server watches
+    # them all, with one queue, and each date is credited to the person who
+    # added its project. All of them are input: only ever read.
+    watch_dirs: list = field(default_factory=list)
+    # One folder to watch, for the command line and configs saved before the
+    # list existed. Moved into watch_dirs when the config is built.
+    watch_dir: str = ""
     driver_options: dict = field(default_factory=default_options)  # all driver flags
 
     # --- Analyses -----------------------------------------------------------
@@ -268,6 +276,50 @@ class JobConfig:
     # "gzip" (portable: DANDI and any reader) or "maxwell" (needs MaxWell's plugin).
     nwb_compression: str = "gzip"
 
+    def __post_init__(self) -> None:
+        self.watch_dirs = [dict(e) for e in self.watch_dirs or [] if e.get("path")]
+        if self.watch_dir:
+            self.add_watch(self.watch_dir)
+            self.watch_dir = ""
+
+    # -- watched projects ---------------------------------------------------- #
+    def add_watch(self, path: str, user: Optional[dict] = None) -> dict:
+        """Add a project folder to watch (no checks; see check_watch_folder)."""
+        path = str(path).rstrip("/") or "/"
+        for e in self.watch_dirs:
+            if same_path(e["path"], path):
+                return e
+        entry = {"path": path, "added_by": (user or {}).get("name") or "",
+                 "added_by_email": (user or {}).get("email") or "",
+                 "added_at": _now() if user else "", "paused": False}
+        self.watch_dirs.append(entry)
+        return entry
+
+    def watch_entry(self, path: str) -> Optional[dict]:
+        return next((e for e in self.watch_dirs if same_path(e["path"], path)), None)
+
+    def watched(self, include_paused: bool = False) -> list[Path]:
+        """Project folders to scan: the active ones, or all of them."""
+        return [Path(e["path"]) for e in list(self.watch_dirs)
+                if include_paused or not e.get("paused")]
+
+    def input_roots(self) -> list[Path]:
+        """Every watched folder, paused or not. Nothing may be written or
+        deleted inside any of them."""
+        return self.watched(include_paused=True)
+
+    def watch_for(self, run_dir: Path | str) -> Optional[dict]:
+        """The watched project a recording folder belongs to."""
+        for e in list(self.watch_dirs):
+            if path_is_within(run_dir, e["path"]):
+                return e
+        return None
+
+    def watch_path_for_project(self, name: str) -> str:
+        """The watched folder of a project, by its name; "" if not watched."""
+        return next((e["path"] for e in list(self.watch_dirs)
+                     if Path(e["path"]).name == name), "")
+
     @property
     def output_dir(self) -> Optional[str]:
         return self.driver_options.get("output_dir")
@@ -375,12 +427,41 @@ class JobConfig:
         tmp.write_text(json.dumps(data, indent=2))
         tmp.replace(path)
 
+    def write_paths(self) -> dict[str, Optional[str]]:
+        """Everywhere this tool or the pipeline writes."""
+        return {
+            "Output path": self.output_dir,
+            "Activity scan output path": self.activity_out if self.run_activity else None,
+            "Checkpoint directory": self.driver_options.get("checkpoint_dir"),
+            "Scratch directory": self.scratch_dir if self.stage_locally else None,
+            "Work directory": self.work_dir,
+        }
+
+    def writes_inside_input(self) -> dict[str, list[str]]:
+        """{watched folder: names of the write paths inside it}."""
+        out: dict[str, list[str]] = {}
+        for root in self.input_roots():
+            inside = [name for name, path in self.write_paths().items()
+                      if path and path_is_within(path, root)]
+            if inside:
+                out[str(root)] = inside
+        return out
+
+    def validate_watching(self) -> list[str]:
+        """validate(), plus what watching for new recordings needs."""
+        errs = self.validate()
+        if not self.watched():
+            errs.insert(0, "Add a project to watch first (Settings → Watched projects)"
+                        if not self.watch_dirs else
+                        "Every watched project is paused. Resume one to watch for new recordings.")
+        return errs
+
     def validate(self) -> list[str]:
         errs: list[str] = []
-        if not self.watch_dir:
-            errs.append("Input path is required.")
-        elif not Path(self.watch_dir).is_dir():
-            errs.append(f"Input path does not exist or is not a directory: {self.watch_dir}")
+        for root in self.watched():
+            if not root.is_dir():
+                errs.append(f"The watched project folder does not exist or cannot be read: "
+                            f"{root}. Pause or remove it under Settings → Watched projects.")
         if not self.enabled_jobs():
             errs.append("Enable at least one analysis (Network or Activity scan).")
         if self.run_network and not self.driver:
@@ -397,24 +478,17 @@ class JobConfig:
                 f"{self.resolve_nwb_python()}. Run ./setup-nwb.sh once, or turn NWB conversion off.")
         if self.run_activity and not ACTIVITY_SCRIPT.exists():
             errs.append(f"activity_scan.py not found at: {ACTIVITY_SCRIPT}")
-        # The input directory is read-only, always. Anything this tool or the
-        # pipeline writes must land outside it, so refuse before creating a
-        # single directory — the mkdir checks below would otherwise create one.
-        if self.watch_dir and Path(self.watch_dir).is_dir():
-            writes = {
-                "Output path": self.output_dir,
-                "Activity scan output path": self.activity_out if self.run_activity else None,
-                "Checkpoint directory": self.driver_options.get("checkpoint_dir"),
-                "Scratch directory": self.scratch_dir if self.stage_locally else None,
-                "Work directory": self.work_dir,
-            }
-            inside = [name for name, path in writes.items()
-                      if path and path_is_within(path, self.watch_dir)]
-            if inside:
-                errs.append(
-                    f"{', '.join(inside)} lies inside the input folder {self.watch_dir}. "
-                    "The input folder is read-only — choose a location outside it.")
-                return errs
+        # The input directories are read-only, always. Anything this tool or
+        # the pipeline writes must land outside every one of them, so refuse
+        # before creating a single directory — the mkdir checks below would
+        # otherwise create one.
+        inside = self.writes_inside_input()
+        for root, names in inside.items():
+            errs.append(
+                f"{', '.join(names)} lies inside the watched project folder {root}. "
+                "Recordings are read-only — choose a location outside it.")
+        if inside:
+            return errs
         out = self.output_dir
         if out:
             problem = cannot_write(out)
@@ -683,6 +757,81 @@ def path_is_within(child: str | Path, parent: str | Path) -> bool:
     return c == p or p in c.parents
 
 
+def same_path(a: str | Path, b: str | Path) -> bool:
+    return path_is_within(a, b) and path_is_within(b, a)
+
+
+# MaxWell date folders are YYMMDD.
+DATE_FOLDER = re.compile(r"^\d{6}$")
+# Assay folders inside a chip folder: <date>/<chip>/<assay>/<run>/data.raw.h5.
+ASSAY_FOLDERS = ("Network", "ActivityScan")
+
+
+def _subdirs(path: Path) -> list[Path]:
+    try:
+        return sorted(c for c in path.iterdir() if c.is_dir() and not c.name.startswith("."))
+    except OSError:
+        return []
+
+
+def check_watch_folder(path: str | Path) -> dict:
+    """Whether a folder is a project folder that can be watched.
+
+    The lab's layout is <lab>/<project>/<project>/<date>/<chip>/<assay>/<run>,
+    and only the inner <project> folder works: the watcher treats each folder
+    inside the watched one as a recording date. Picking the lab folder, or the
+    outer of the two project folders, used to be accepted silently, and every
+    project then looked like one date. This says which folder was picked and
+    which to pick instead. It only lists folders (two levels at most), so it
+    is quick on the NAS.
+
+    Returns {"ok", "kind", "say", "suggestions", "dates"}. kind is one of
+    project, new (no dates yet), other (no date folders), lab, outer, date,
+    missing.
+    """
+    p = Path(str(path).rstrip("/") or "/").expanduser()
+    if not p.is_dir():
+        return {"ok": False, "kind": "missing", "dates": 0, "suggestions": [],
+                "say": f"This folder does not exist or cannot be read: {p}"}
+    kids = _subdirs(p)
+    dates = [c for c in kids if DATE_FOLDER.match(c.name)]
+
+    if DATE_FOLDER.match(p.name) and any((c / a).is_dir() for c in kids for a in ASSAY_FOLDERS):
+        return {"ok": False, "kind": "date", "dates": 0, "suggestions": [str(p.parent)],
+                "say": f"{p.name} is a recording date, not a project. Watch the project "
+                       f"folder that holds the dates: {p.parent}"}
+    twin = p / p.name
+    if not dates and twin.is_dir():
+        return {"ok": False, "kind": "outer", "dates": 0, "suggestions": [str(twin)],
+                "say": f"This is the outer {p.name} folder. The recording dates are one level "
+                       f"down, in {twin}. Watch that one."}
+    if dates:
+        return {"ok": True, "kind": "project", "dates": len(dates), "suggestions": [],
+                "say": f"Project {p.name}: {len(dates)} recording date"
+                       f"{'' if len(dates) == 1 else 's'} found."}
+    # A lab folder: its folders are projects, each <project>/<project>/<date>
+    # or <project>/<date>.
+    projects = []
+    for c in kids:
+        inner = c / c.name
+        if inner.is_dir():
+            projects.append(str(inner))
+        elif any(DATE_FOLDER.match(g.name) for g in _subdirs(c)):
+            projects.append(str(c))
+    if projects:
+        return {"ok": False, "kind": "lab", "dates": 0, "suggestions": projects,
+                "say": f"This folder holds {len(projects)} project"
+                       f"{'' if len(projects) == 1 else 's'}, not recording dates. "
+                       "Pick one project to watch."}
+    if not kids:
+        return {"ok": True, "kind": "new", "dates": 0, "suggestions": [],
+                "say": f"Project {p.name}: no recordings yet. New dates are picked up "
+                       "as they are copied in."}
+    return {"ok": True, "kind": "other", "dates": 0, "suggestions": [],
+            "say": f"No date folders (like 260929) were found in {p.name}. Each folder in it "
+                   "will be treated as one recording date."}
+
+
 def cannot_write(folder: str | Path) -> Optional[str]:
     """Why this server cannot save results in ``folder``, or None if it can.
     An existing folder can still belong to someone else, so actually try
@@ -758,6 +907,12 @@ class Watcher:
             JOB_NETWORK: threading.Semaphore(max(1, cfg.max_concurrent_network)),
             JOB_ACTIVITY: threading.Semaphore(max(1, cfg.max_concurrent_activity)),
         }
+        # The order jobs take a free slot in: first come, first served, across
+        # every watched project. A semaphore on its own mostly keeps that
+        # order but does not promise it (a job arriving just as a slot frees
+        # can go first), and cannot say where in line a job is.
+        self._line: dict[str, list[str]] = {JOB_NETWORK: [], JOB_ACTIVITY: []}
+        self._line_cv = threading.Condition()
         self._active: dict[str, int] = {JOB_NETWORK: 0, JOB_ACTIVITY: 0}
         self._preexisting: set[str] = set()
         self._preflight: Optional[dict] = None
@@ -776,6 +931,8 @@ class Watcher:
         # does, so the result is shared between the scan loop and the UI.
         self._cand_cache: Optional[tuple[float, list]] = None
         self._cand_lock = threading.Lock()
+        # Watched folder -> when the scan last listed it.
+        self._checked_at: dict[str, str] = {}
         self._cand_refreshing = False
         # pids this server started, so processes it did not can be spotted.
         self._own_pids: set[int] = set()
@@ -807,11 +964,14 @@ class Watcher:
         # start finish afterwards.
         self._life_lock = threading.RLock()
 
-    def _settings_snapshot(self) -> dict:
-        """What a run is launched with — stored with each run in the history."""
+    def _settings_snapshot(self, folder: Optional[str] = None) -> dict:
+        """What a run is launched with — stored with each run in the history.
+        "watch_dir" is the watched project the run's folder belongs to."""
         c = self.cfg
+        entry = c.watch_for(folder) if folder else None
         return {
-            "watch_dir": c.watch_dir, "output_dir": c.output_dir,
+            "watch_dir": entry["path"] if entry else (str(Path(folder).parent) if folder else ""),
+            "output_dir": c.output_dir,
             "run_network": c.run_network, "run_activity": c.run_activity,
             "spike_sorting": not c.driver_options.get("skip_spikesorting"),
             "nwb_convert": c.nwb_convert, "nwb_compression": c.nwb_compression,
@@ -998,8 +1158,8 @@ class Watcher:
             return None
         try:
             root = Path(out)
-            if self.cfg.watch_dir and path_is_within(root, self.cfg.watch_dir):
-                return None                      # the input folder is read-only
+            if any(path_is_within(root, r) for r in self.cfg.input_roots()):
+                return None                      # the input folders are read-only
             tools = root / "report_tools"
             tools.mkdir(parents=True, exist_ok=True)
             script = REPORT_INSTRUCTIONS.parent.parent / "report" / "make_report.py"
@@ -1062,8 +1222,9 @@ class Watcher:
 
         self._thread = threading.Thread(target=self._loop, name="mea-watcher", daemon=True)
         self._thread.start()
-        LOG.info("Watcher started on %s", self.cfg.watch_dir)
-        self.on_event("started", {"watch_dir": self.cfg.watch_dir})
+        roots = [str(r) for r in self.cfg.watched()]
+        LOG.info("Watcher started on %d project(s): %s", len(roots), ", ".join(roots))
+        self.on_event("started", {"watch_dirs": roots})
 
     def stop(self, timeout: float = 5.0) -> None:
         """Stop scanning for new folders. Queued and running jobs continue."""
@@ -1337,12 +1498,13 @@ class Watcher:
         return None
 
     def _walk_now(self) -> list[tuple[Path, list[str]]]:
-        root = Path(self.cfg.watch_dir)
-        if not root.is_dir():
-            found: list[tuple[Path, list[str]]] = []
-        else:
+        found: list[tuple[Path, list[str]]] = []
+        checked: dict[str, str] = {}
+        for root in self.cfg.watched():
+            if not root.is_dir():
+                continue
             started = time.time()
-            found, walked = [], 0
+            walked, before = 0, len(found)
             for child in sorted(root.iterdir()):
                 if not child.is_dir():
                     continue
@@ -1353,6 +1515,7 @@ class Watcher:
                     walked += 1
                 if jobs:
                     found.append((child, jobs))
+            checked[str(root)] = _now()
             elapsed = time.time() - started
             # A scan that deep-read nothing is the healthy steady state, and
             # calling five seconds of it "slow" at WARNING level buried the
@@ -1361,14 +1524,70 @@ class Watcher:
             if walked and elapsed > 30:
                 LOG.warning("Scanning %s took %s — %d of %d folder(s) needed a "
                             "full read; the watch directory is slow",
-                            root, _hms(elapsed), walked, len(found))
+                            root, _hms(elapsed), walked, len(found) - before)
             elif elapsed > 5:
                 LOG.debug("Scanned %s in %s (%d of %d folder(s) read)",
-                          root, _hms(elapsed), walked, len(found))
+                          root, _hms(elapsed), walked, len(found) - before)
 
         with self._cand_lock:
             self._cand_cache = (time.time(), list(found))
+            self._checked_at.update(checked)
         return found
+
+    def forget_candidates(self) -> None:
+        """Drop the cached folder list, after the watched projects changed."""
+        with self._cand_lock:
+            self._cand_cache = None
+
+    def _project_owner(self, run_dir: Path) -> Optional[dict]:
+        """Who added the watched project this folder belongs to."""
+        e = self.cfg.watch_for(run_dir)
+        if e and e.get("added_by"):
+            return {"name": e["added_by"], "email": e.get("added_by_email") or ""}
+        return None
+
+    def projects_status(self) -> list[dict]:
+        """Each watched project with what is happening in it, for the page.
+
+        From the state file and the cached folder list only: this is part of
+        /api/status, polled every few seconds, and must never walk the NAS.
+        """
+        with self._cand_lock:
+            cached = self._cand_cache
+            checked = dict(self._checked_at)
+        found = [d for d, _ in cached[1]] if cached else None
+        entries = self.state.all()
+
+        # By text, not path_is_within: that resolves every path, and on the
+        # NAS each resolve is a round trip. State keys are resolved already.
+        def under(p: str, root: str) -> bool:
+            return p == root or p.startswith(root.rstrip("/") + "/")
+
+        out = []
+        for e in list(self.cfg.watch_dirs):
+            root = e["path"]
+            try:
+                real = str(Path(root).resolve())
+            except OSError:
+                real = root
+            counts: dict[str, int] = {}
+            dates: set[str] = set()
+            for key, st in entries.items():
+                folder = key.split("::")[0]
+                if under(folder, real) or under(folder, root):
+                    dates.add(folder)
+                    s = st.get("status") or "unknown"
+                    counts[s] = counts.get(s, 0) + 1
+            out.append({
+                **e, "name": Path(root).name,
+                "exists": Path(root).is_dir(),
+                "dates_found": (None if found is None else
+                                sum(1 for d in found if under(str(d), root))),
+                "dates_tracked": len(dates),
+                "counts": counts,
+                "last_checked": checked.get(root),
+            })
+        return out
 
     def candidate_runs(self) -> Optional[list[Path]]:
         """Folders the watcher would consider, or None while unknown.
@@ -1401,7 +1620,7 @@ class Watcher:
         try:
             self.scan_candidates(max_age=0)
         except Exception:                                   # noqa: BLE001
-            LOG.exception("Background scan of %s failed", self.cfg.watch_dir)
+            LOG.exception("Background scan of the watched projects failed")
         finally:
             with self._cand_lock:
                 self._cand_refreshing = False
@@ -1580,7 +1799,7 @@ class Watcher:
         date the scan loop found is started by whoever is watching."""
         key = self.state_key(run_dir.resolve(), job)
         label = JOB_LABELS.get(job, job)
-        who = self._who(user or self.watch_owner)
+        who = self._who(user or self._project_owner(run_dir) or self.watch_owner)
 
         # Do not spend a dispatch on an interpreter that cannot import the
         # pipeline — the driver would fail confusingly rather than clearly.
@@ -1621,6 +1840,9 @@ class Watcher:
                           log=str(log_path), **common)
         self.on_event("dispatched", {"run": run_dir.name, "job": job, "log": str(log_path)})
 
+        # In line now, in the order dates are started, not when the thread
+        # gets round to it.
+        self._join_line(job, key)
         threading.Thread(
             target=self._run_job, args=(run_dir, job, key, cmd, log_path),
             name=f"mea-{job}-{run_dir.name}", daemon=True,
@@ -2261,7 +2483,7 @@ class Watcher:
         target = dest.resolve()
         # The copies are deleted later. They must never be, or sit inside,
         # anything that is input.
-        inputs = [source] + ([Path(self.cfg.watch_dir).resolve()] if self.cfg.watch_dir else [])
+        inputs = [source] + [r.resolve() for r in self.cfg.input_roots()]
         if any(target == p or p in target.parents or target in p.parents for p in inputs):
             LOG.error("%s: not copying recordings to %s: it overlaps the input folder",
                       run_dir.name, target)
@@ -2352,8 +2574,7 @@ class Watcher:
             LOG.error("Refusing to delete %s: not inside the scratch root %s", target, root)
             return False
         guarded = [Path(m) for m in network_mounts()]
-        if self.cfg.watch_dir:
-            guarded.append(Path(self.cfg.watch_dir).resolve())
+        guarded += [r.resolve() for r in self.cfg.input_roots()]
         for g in guarded:
             if target == g or g in target.parents or target in g.parents:
                 LOG.error("Refusing to delete %s: it overlaps %s, which holds input data",
@@ -2411,8 +2632,55 @@ class Watcher:
         LOG.info("%s: scratch at %s deleted", run_dir.name, local)
         return True
 
+    def _join_line(self, job: str, key: str) -> None:
+        with self._line_cv:
+            line = self._line.setdefault(job, [])
+            if key not in line:
+                line.append(key)
+
+    def _leave_line(self, job: str, key: str) -> None:
+        with self._line_cv:
+            line = self._line.setdefault(job, [])
+            if key in line:
+                line.remove(key)
+                self._line_cv.notify_all()
+
+    def _take_slot(self, job: str, key: str, slot: threading.Semaphore,
+                   timeout: float = 0) -> bool:
+        """Take a slot when it is this job's turn: it is first in line and a
+        slot is free. Waits up to `timeout` seconds."""
+        deadline = time.time() + timeout
+        with self._line_cv:
+            line = self._line.setdefault(job, [])
+            if key not in line:
+                line.append(key)
+            while True:
+                if line and line[0] == key and slot.acquire(blocking=False):
+                    line.pop(0)
+                    self._line_cv.notify_all()
+                    return True
+                left = deadline - time.time()
+                if left <= 0:
+                    return False
+                # A freed slot does not notify; the wait is short instead.
+                self._line_cv.wait(min(left, 1.0))
+
+    def queue_position(self, job: str, key: str) -> Optional[int]:
+        """1 for the next job to start, None if it is not waiting."""
+        with self._line_cv:
+            line = self._line.get(job, [])
+            return line.index(key) + 1 if key in line else None
+
     def _run_job(self, run_dir: Path, job: str, key: str,
                  cmd: list[str], log_path: Path) -> None:
+        try:
+            self._run_job_inner(run_dir, job, key, cmd, log_path)
+        finally:
+            # However the job ended, it must not hold up the line.
+            self._leave_line(job, key)
+
+    def _run_job_inner(self, run_dir: Path, job: str, key: str,
+                       cmd: list[str], log_path: Path) -> None:
         label = JOB_LABELS.get(job, job)
         slot = self._slots.get(job)
         limit = (self.cfg.max_concurrent_network if job == JOB_NETWORK
@@ -2438,16 +2706,17 @@ class Watcher:
         # Wait for a slot before starting. Kilosort4 reserves many GB of VRAM,
         # so two concurrent Network jobs OOM on a single GPU. The run stays
         # "Queued" while waiting and holds nothing.
-        if slot is not None and not slot.acquire(blocking=False):
+        if slot is not None and not self._take_slot(job, key, slot):
             with self._active_lock:
                 busy = self._active.get(job, 0)
-            LOG.info("%s [%s] queued — %d/%d %s slot(s) busy",
-                     run_dir.name, label, busy, limit, label.lower())
+            pos = self.queue_position(job, key) or 1
+            LOG.info("%s [%s] queued — %d/%d %s slot(s) busy, %d in line ahead",
+                     run_dir.name, label, busy, limit, label.lower(), pos - 1)
             self.state.update(key, detail=f"queued — waiting for a free {label.lower()} slot")
             self.on_event("queued", {"run": run_dir.name, "job": job})
             wait = max(1, self.cfg.queue_poll_seconds)
             while not self._halt.is_set() and key not in self._cancel:
-                if slot.acquire(timeout=wait):
+                if self._take_slot(job, key, slot, timeout=wait):
                     break
             else:
                 if self._end_cancelled_before_start(key):
@@ -2919,6 +3188,12 @@ class Watcher:
                 **entry,
             })
         runs.sort(key=lambda r: (r.get("run", ""), r.get("job", "")))
+        with self._line_cv:
+            line = {job: list(keys) for job, keys in self._line.items()}
+        for r in runs:
+            keys = line.get(r["job"], [])
+            if r.get("status") in ("dispatched", "queued") and r["path"] in keys:
+                r["line_position"] = keys.index(r["path"]) + 1
         counts: dict[str, int] = {}
         by_job: dict[str, dict[str, int]] = {}
         for r in runs:
@@ -2927,7 +3202,7 @@ class Watcher:
             by_job.setdefault(r["job"], {})[st] = by_job.setdefault(r["job"], {}).get(st, 0) + 1
         return {
             "running": self.is_running,
-            "watch_dir": self.cfg.watch_dir,
+            "projects": self.projects_status(),
             "output_dir": self.cfg.output_dir,
             "activity_output_dir": self.cfg.activity_out,
             "enabled_jobs": self.cfg.enabled_jobs(),
@@ -2994,7 +3269,7 @@ def main(argv=None) -> None:
     if repo:
         cfg.driver = str(repo / "run_pipeline_driver.py")
     if a.watch_dir:
-        cfg.watch_dir = str(a.watch_dir)
+        cfg.add_watch(str(a.watch_dir))
     if a.output_dir:
         cfg.driver_options["output_dir"] = str(a.output_dir)
     if a.config:

@@ -102,7 +102,7 @@ class RunHistory:
                     self._db.execute(f"ALTER TABLE runs ADD COLUMN {col} {kind}")
             self._db.commit()
         # Called at dispatch to record the settings a run used.
-        self._settings_snapshot = settings_snapshot or (lambda: {})
+        self._settings_snapshot = settings_snapshot or (lambda folder=None: {})
         self._open: dict[str, str] = {}          # key -> open run id
         with self._lock:
             for r in self._db.execute(
@@ -157,7 +157,11 @@ class RunHistory:
         folder, job, project, date = split_key(key)
         run_id = uuid.uuid4().hex[:12]
         try:
-            settings = json.dumps(self._settings_snapshot())
+            try:
+                snap = self._settings_snapshot(folder)
+            except TypeError:               # a snapshot that takes no folder
+                snap = self._settings_snapshot()
+            settings = json.dumps(snap)
         except Exception:  # noqa: BLE001
             settings = "{}"
         self._db.execute(

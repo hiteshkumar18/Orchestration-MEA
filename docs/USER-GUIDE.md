@@ -218,12 +218,34 @@ press **Ctrl + C** in it). The analyses keep running on the analysis computer.
 
 Open the **Settings** tab.
 
-**Where things are**
+**Watched projects**
+
+One MEA Bench watches several projects at once — for example the two or three
+projects recording in the same month — with one queue for all of them. The
+list shows every watched project, its folder, who added it, and what is
+happening in it (dates found, waiting, in line, analysing, done, needing
+attention). The Dashboard shows the same list.
+
+To add yours, under **Watch another project** paste or **Choose** your project
+folder on the NAS and press **Check**. The right folder is the one whose
+folders are the recording dates (like `260818`), which on the NAS is the
+*inner* of the two folders with your project's name:
+`…/BenShalomLab/<project>/<project>`. If you picked the lab folder, the outer
+project folder or a date folder by mistake, the page says so and offers the
+right folder — press **Watch this one**. Project folders are only ever read.
+
+Anyone signed in can add a project. Each project's dates are credited to the
+person who added it. **Pause** stops picking up a project's new dates;
+**Remove** takes it off the list. Neither deletes anything, and neither stops
+dates already in line or analysing. Pausing or removing someone else's project
+asks first, and is recorded under your name in **Who did what**. You can add,
+pause and remove projects while analyses are running.
+
+**Where results go**
 
 | Setting | What to put |
 |---|---|
-| **Recordings come from** | Your project folder on the NAS — the folder that contains the date folders (like `260818`, `260821`). Press **Choose** to browse. This folder is only ever read. |
-| **Results go to** | A folder for your results, on the large analysis disk — for example `/mnt/Vol20tb2/<your-name>_mea_analysis/spike_detection`. It is created if it does not exist. Each project gets its own folder inside it. **Never** choose a folder inside the recordings folder (the tool refuses). |
+| **Results go to** | A folder for your results, on the large analysis disk — for example `/mnt/Vol20tb2/<your-name>_mea_analysis/spike_detection`. It is created if it does not exist. Each project gets its own folder inside it. **Never** choose a folder inside a project's recordings (the tool refuses). |
 
 **What to analyse** — recommended:
 
@@ -252,7 +274,9 @@ There are two ways. Most people use the first.
 
 ### Choose dates yourself — "Add recordings" tab
 
-1. Open **Add recordings**. You see a card for every recording date in your project.
+1. Open **Add recordings**. You see a card for every recording date in a watched
+   project; pick another watched project from the list at the top, or **Look
+   somewhere else** for any other folder.
    - **analysed** — already done.
    - **partly done** — one of the two analyses is done.
    - **copying** — the recording is still being copied from the rig; wait.
@@ -274,10 +298,13 @@ earlier results have been deleted, the date counts as not analysed.
 ### Automatic — "Watch for new"
 
 Press **Watch for new** (top right). From then on, every new recording date that
-appears in your project folder is analysed automatically, once its copy has
-finished. Those dates are shown as started by whoever pressed **Watch for new**.
-Press **Pause watching** to stop picking up new dates (analyses that are already
-running carry on).
+appears in any watched project (see Part 3) is analysed automatically, once its
+copy has finished. Each date is shown as started by the person who added its
+project. Dates from all projects wait in **one line, first come, first served**:
+a date waiting for its turn says so on **Progress** (*Next in line*, *2nd in
+line*…). Press **Pause watching** to stop picking up new dates in every project
+(analyses that are already running carry on); to stop just one project, pause it
+in **Settings → Watched projects**.
 
 ### Who started what
 

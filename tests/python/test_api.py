@@ -61,7 +61,7 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(code, 200, path)
             self.assertLess(took, 5, path)
         code, cfg, _ = call("/api/config")
-        for k in ("watch_dir", "driver_options", "run_network", "run_activity"):
+        for k in ("watch_dirs", "driver_options", "run_network", "run_activity"):
             self.assertIn(k, cfg)
 
     def test_status_rows_link_to_history(self):

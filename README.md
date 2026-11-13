@@ -140,6 +140,17 @@ If the copy finished *before* you started watching, enable **Folders already
 here are ready** to skip that wait for folders present at start. Later arrivals
 still get the full window.
 
+**Several projects at once.** The watcher scans a list of project folders
+(`watch_dirs` in `job.json`; Settings → Watched projects), each recorded with
+who added it, and paused or active. Anyone signed in can add, pause or remove
+one while analyses run, through `/api/projects/{check,add,pause,remove}`.
+Adding checks the folder first: the lab folder, the outer `<project>` folder
+and a date folder are refused with the right folder suggested. Dates found by
+the scan are credited to whoever added their project. A config saved with the
+older single `watch_dir` becomes the first entry of the list on load. Every
+watched folder, paused or not, is covered by the read-only guards: nothing may
+be written or deleted inside any of them.
+
 ### Two independent analyses
 
 |  | Network | Activity scan |
@@ -305,6 +316,9 @@ and appear in the UI's **AI report** tab.
 
 Folders can be queued explicitly rather than waiting for detection — select
 them, and the AI handoff is prepared automatically when the batch completes.
+Queued and detected dates of every project share one line per analysis type,
+first come, first served; `/api/status` gives each waiting run its
+`line_position`.
 Already-analysed folders are reported as such before anything starts rather than
 silently skipped.
 
