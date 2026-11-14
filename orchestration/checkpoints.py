@@ -58,7 +58,10 @@ def _norm(state: dict, path: Path) -> dict:
     # (it names the scratch path, deleted after the results were copied back).
     here = path.parent.parent
     recorded = state.get("output_dir")
-    out_dir = recorded if recorded and Path(recorded).is_dir() else str(here)
+    try:
+        out_dir = recorded if recorded and Path(recorded).is_dir() else str(here)
+    except OSError:                     # a folder this machine may not enter
+        out_dir = str(here)
     detection_done = (detection_only and stage >= 2
                       and (Path(out_dir) / "network_results.json").is_file())
 
@@ -122,19 +125,24 @@ def recording_in_folder(data_dir: str, folder: str | Path) -> bool:
 
     Raw route: the recording lies inside the folder. NWB route: the recording is
     <output>/<project>/NWB/<project>/<date>/..., matched by project and date.
+    A copy of the recordings (.input/<project>/<date>/...) is matched the same way.
     """
     if not data_dir:
         return False
     f = Path(folder)
     if str(f) in data_dir:
         return True
-    try:
-        if str(f.resolve()) in str(Path(data_dir).resolve()):
-            return True
-    except (OSError, RuntimeError):
-        pass
     project, date = f.parent.name, f.name
-    return bool(project and date) and f"/{project}/NWB/{project}/{date}/" in data_dir
+    # A copy of the recordings, analysed on a fast disk or a cluster
+    # computer, is laid out as .../.input/<project>/<date>/... Checked before
+    # resolving, which costs a round trip to the NAS for every well.
+    if project and date and (f"/{project}/NWB/{project}/{date}/" in data_dir
+                             or f"/.input/{project}/{date}/" in data_dir):
+        return True
+    try:
+        return str(f.resolve()) in str(Path(data_dir).resolve())
+    except (OSError, RuntimeError):
+        return False
 
 
 def read_checkpoints(search_roots: list[Path], run_dir: Optional[Path] = None,

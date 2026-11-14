@@ -102,6 +102,11 @@ function plainNote(job){
     return{t:n===1?"Next in line for a free slot":n?`${ordinal(n)} in line for a free slot`:"Waiting for a free slot",k:""};}
   m=/^running (.+?) · last log output (.+)$/.exec(d);
   if(m)return{t:`Running for ${m[1].replace(/(\d+)h/,"$1 h ").replace(/(\d+)m/,"$1 min")} · last activity ${m[2].replace(/(\d+)m ago/,"$1 min ago").replace(/(\d+)s ago/,"$1 s ago")}`,k:""};
+  m=/^waiting in the cluster queue(?: \((.+)\))?/.exec(d);
+  if(m)return{t:"Waiting for a free computer in the lab cluster"+(m[1]&&!/^(Priority|None)$/.test(m[1])?` (${m[1]==="Resources"?"all busy":m[1]})`:""),k:""};
+  if(/^sending to the cluster/.test(d))return{t:"Sending to the lab cluster…",k:""};
+  if(/^copying (earlier )?results (from|for) the cluster/.test(d))return{t:/earlier/.test(d)?"Copying earlier results for the cluster…":"Copying results back from the cluster…",k:""};
+  if(/^analysing on /.test(d))return{t:"Analysing on "+d.slice(13),k:""};
   if(/staged on local disk/i.test(d))return{t:"Working on the fast local disk",k:""};
   if(/copying results/i.test(d))return{t:"Copying results back…",k:""};
   return d?{t:d.slice(0,160),k:""}:null;
@@ -343,6 +348,7 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,onHold,onResume,i}){
       <div className="mid">
         <div className="say">
           <span className={"stamp "+ji.k}>{ji.say}</span>
+          {busy&&net?.worker&&<span className="note-l">on {net.worker}</span>}
           {busy&&sum?.wells>0&&<span className="note-l">{sum.complete} wells finished so far</span>}
           {(refined||note)&&<span className={"note-l "+(refined||note).k}>{(refined||note).t}</span>}
         </div>
@@ -734,6 +740,92 @@ function WatchedProjects({projects,user,toast,ask,onChange,watching}){
     </div>);
 }
 
+/* ── Where analyses run: this computer or the lab's Slurm cluster ───── */
+// The lab's three computers as set up on 2026-11-13 (each one's own paths).
+const LAB_NODES=[
+  {node:"benshalom-labtower1",python:"/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python3",
+   mea_repo:"/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis",nas:"/mnt/benshalom-nas"},
+  {node:"benshalom-labtower2",python:"/mnt/Vol20tb1/hitesh/MEA-Analysis/.venv/bin/python3",
+   mea_repo:"/mnt/Vol20tb1/hitesh/MEA-Analysis",nas:"/mnt/benshalom-nas"},
+  {node:"BenShalomLabServer",python:"/mnt/harddrive-2/mea-bench/MEA-Analysis/.venv/bin/python3",
+   mea_repo:"/mnt/harddrive-2/mea-bench/MEA-Analysis",nas:"/mnt/ben-shalom_nas"},
+];
+
+function ClusterSettings({cfg,setT,locked,toast,sorting}){
+  const [chk,setChk]=useState(null);
+  const on=cfg.executor==="slurm";
+  const nodes=cfg.slurm_nodes||[];
+  const setNode=(i,k,v)=>setT("slurm_nodes",nodes.map((n,j)=>j===i?{...n,[k]:v}:n));
+  const check=async()=>{setChk({checking:true});
+    try{setChk(await api("/api/cluster/check",{method:"POST",body:JSON.stringify({slurm_nodes:nodes,slurm_nas_here:cfg.slurm_nas_here||""})}));}
+    catch(e){setChk({ok:false,server:[{what:"Check",ok:false,say:e.message}],nodes:[]});}};
+  const num=(k,label,hint,min,max,step=1)=><div className="f"><label className="f-l" htmlFor={"cl-"+k}>{label}</label>
+    <input id={"cl-"+k} className="inp tnum" type="number" min={min} max={max} step={step} value={cfg[k]??""} disabled={locked}
+           onChange={e=>setT(k,e.target.value===""?"":Number(e.target.value))}/>{hint&&<span className="hint-s">{hint}</span>}</div>;
+  const Steps=({steps})=><ul className="hsteps">{steps.map((x,i)=>
+    <li key={i} className={x.ok?"ok":"bad"}><span className="hs-i">{x.ok?<Check s={15}/>:<Alert s={15}/>}</span>
+      <div><b>{x.what}</b>{x.say?` — ${x.say}`:""}</div></li>)}</ul>;
+  return (
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Where analyses run</div>
+        <div className="sec-d">Network analyses can run on this computer, or on the lab’s cluster: the three lab computers share one
+          queue, and each date runs on whichever is free. Activity scans always run here.</div></div>
+      <div className="card"><div className="card-b">
+        <div className="seg" role="radiogroup" aria-label="Where analyses run" style={{marginBottom:on?14:0}}>
+          {[["local","This computer"],["slurm","The lab cluster"]].map(([v,l])=>
+            <label key={v} className={"seg-o"+((cfg.executor||"local")===v?" on":"")}>
+              <input type="radio" name="executor" value={v} checked={(cfg.executor||"local")===v} disabled={locked||(v==="slurm"&&!cfg.cluster_ready&&!on)}
+                     onChange={()=>setT("executor",v)}/>{l}</label>)}
+        </div>
+        {!cfg.cluster_ready&&!on&&<div className="hint-s" style={{marginTop:8}}>The cluster client ({cfg.slurm_client}) is not installed on this computer.</div>}
+        {on&&<>
+          <div className="hint-s" style={{marginBottom:12}}>Each date’s recordings are copied to the fast disk of the computer that runs it,
+            analysed there, and the results copied back to the results folder above. Nothing is written to the NAS.</div>
+          <div className="f"><span className="f-l">The cluster’s computers</span>
+            <span className="hint-s">Each one’s own paths: the analysis Python, the MEA-Analysis folder and where the NAS is mounted on it.</span></div>
+          <div className="ledger" style={{marginBottom:10}}>
+            {nodes.length===0&&<div className="empty"><div className="empty-t">No computers listed</div></div>}
+            {nodes.map((n,i)=><div key={i} className="cl-node">
+              <input aria-label="Computer" className="inp mono" placeholder="computer name" value={n.node||""} disabled={locked} onChange={e=>setNode(i,"node",e.target.value)}/>
+              <input aria-label="Analysis Python" className="inp mono" placeholder="…/MEA-Analysis/.venv/bin/python3" value={n.python||""} disabled={locked} onChange={e=>setNode(i,"python",e.target.value)}/>
+              <input aria-label="MEA-Analysis folder" className="inp mono" placeholder="…/MEA-Analysis" value={n.mea_repo||""} disabled={locked} onChange={e=>setNode(i,"mea_repo",e.target.value)}/>
+              <input aria-label="NAS on it" className="inp mono" placeholder="/mnt/benshalom-nas" value={n.nas||""} disabled={locked} onChange={e=>setNode(i,"nas",e.target.value)}/>
+              <button className="btn ghost sm" aria-label={`Remove ${n.node||"computer"}`} disabled={locked} onClick={()=>setT("slurm_nodes",nodes.filter((_,j)=>j!==i))}><X s={13}/></button>
+            </div>)}
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+            <button className="btn sm" disabled={locked} onClick={()=>setT("slurm_nodes",[...nodes,{node:"",python:"",mea_repo:"",nas:""}])}>Add a computer</button>
+            {nodes.length===0&&<button className="btn sm" disabled={locked} onClick={()=>setT("slurm_nodes",LAB_NODES)}>Use the lab’s three computers</button>}
+          </div>
+          <div className="f"><label className="f-l" htmlFor="cl-nas">The NAS on this computer</label>
+            <input id="cl-nas" className="inp mono" placeholder="/mnt/benshalom-nas" value={cfg.slurm_nas_here||""} disabled={locked} onChange={e=>setT("slurm_nas_here",e.target.value)}/>
+            <span className="hint-s">Dates must be on the NAS for the cluster’s computers to read them.</span></div>
+          <div className="row2">
+            {num("slurm_cpus","CPUs per date","1 to 24.",1,24)}
+            {num("slurm_mem_gb","Memory per date (GB)","Up to 48. A date that needs more is stopped.",1,48)}
+            {num("slurm_hours","Time limit per date (hours)","Up to 24.",0.1,24,0.5)}
+            {num("slurm_max_jobs","Dates sent to the cluster at once","The rest wait in line here, where they can still be held.",1,30)}
+          </div>
+          {sorting&&<div className="f"><label className="f-l" htmlFor="cl-gpu">Spike sorting runs on</label>
+            <select id="cl-gpu" className="sel" value={cfg.slurm_gpu_node||""} disabled={locked} onChange={e=>setT("slurm_gpu_node",e.target.value)}>
+              <option value="">Any computer with a free graphics card</option>
+              {nodes.filter(n=>n.node).map(n=><option key={n.node} value={n.node}>{n.node}</option>)}</select>
+            <span className="hint-s">Pick the one with the most graphics memory for large recordings (labtower1: 32 GB; the others: 12 GB).</span></div>}
+          <button id="cl-check" className="btn ink" disabled={!!chk?.checking||!nodes.length} onClick={check}>
+            {chk?.checking?<span className="spin"/>:null} Check the cluster</button>
+          <span className="hint-s" style={{marginLeft:10}}>Sends a small test job to each computer; takes about a minute.</span>
+          {chk&&!chk.checking&&<div style={{marginTop:14}}>
+            {(chk.server||[]).some(x=>!x.ok)&&<Steps steps={chk.server}/>}
+            {(chk.nodes||[]).map(r=><div key={r.node} style={{marginTop:10}}>
+              <div className="f-l" style={{marginBottom:6}}>{r.node} <span className={"stamp "+(r.ok?"ok":"bad")}>{r.ok?"Ready":"Not ready"}</span></div>
+              <Steps steps={r.steps}/></div>)}
+            {chk.ok&&<div style={{marginTop:10}}><Callout kind="green" icon={<Check s={17}/>}>Every computer is ready. Save settings to start using the cluster.</Callout></div>}
+          </div>}
+        </>}
+      </div></div>
+    </div>);
+}
+
 /* ── Settings tab ─────────────────────────────────────────────────────── */
 function Field({spec,value,onChange}){
   const set=v=>onChange(spec.key,v);
@@ -821,6 +913,8 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast,ask,user,projects,
                   "Off: the analysis reads the recordings from where they are, in small pieces. From the NAS that is slower."}/>}
       </div></div>
     </div>
+
+    <ClusterSettings cfg={cfg} setT={setT} locked={locked} toast={toast} sorting={sorting&&cfg.run_network}/>
 
     <details className="adv">
       <summary><span className="chev"><Chev s={14}/></span>Advanced settings — for whoever maintains the pipeline</summary>
@@ -1019,7 +1113,7 @@ function Dashboard({user,goSettings}){
     <div className="slots">
       <span className={"dot "+(ov.watching&&on.length?"ok":"wait")}/>{ov.watching&&on.length
         ?`Watching ${on.length} project${on.length===1?"":"s"} for new recordings`:"Not watching for new recordings"}
-      <span className="hint-s">· Network analyses running {act.network||0} of {lim.network||1} · Activity scans {act.activity||0} of {lim.activity||1}</span>
+      <span className="hint-s">· Network analyses {ov.executor==="slurm"?"on the lab cluster":"running"} {act.network||0} of {lim.network||1} · Activity scans {act.activity||0} of {lim.activity||1}</span>
     </div>
 
     <div className="sec">
@@ -1340,6 +1434,9 @@ function App({user,onSignOut}){
     stage_min_free_gb:Number(cfg.stage_min_free_gb)||200,copy_input_first:!!cfg.copy_input_first,dry_run:!!cfg.dry_run,
     ai_requirements:cfg.ai_requirements||"",auto_handoff:cfg.auto_handoff!==false,
     nwb_convert:!!cfg.nwb_convert,nwb_python:cfg.nwb_python||"",nwb_compression:cfg.nwb_compression||"gzip",
+    ...("executor" in cfg?{executor:cfg.executor||"local",slurm_nodes:(cfg.slurm_nodes||[]).filter(n=>(n.node||"").trim()),
+      slurm_nas_here:cfg.slurm_nas_here||"",slurm_cpus:Number(cfg.slurm_cpus)||8,slurm_mem_gb:Number(cfg.slurm_mem_gb)||32,
+      slurm_hours:Number(cfg.slurm_hours)||24,slurm_max_jobs:Number(cfg.slurm_max_jobs)||1,slurm_gpu_node:cfg.slurm_gpu_node||""}:{}),
   });
   const run_=async(fn,ok,m)=>{setBusy(true);try{await fn();if(ok)toast(ok,m);refresh(true);}
     catch(e){toast("That didn’t work",e.message,"error");}finally{setBusy(false);}};

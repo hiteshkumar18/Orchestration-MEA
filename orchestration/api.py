@@ -57,12 +57,12 @@ from driver_schema import schema_for_ui, validate_options, default_options  # no
 from checkpoints import read_checkpoints, summarise  # noqa: E402
 from mea_repo import (  # noqa: E402
     find_mea_repo, describe as describe_repo, report as report_repo,
-    find_driver_python, check_python,
+    find_driver_python, check_python, required_imports,
 )
 import native_picker  # noqa: E402
 from watcher import (  # noqa: E402
     JobConfig, Watcher, DEFAULT_WORK_DIR, JOB_LABELS,
-    check_watch_folder, has_finished_marker, list_h5, path_is_within, same_path,
+    check_watch_folder, find_recordings, has_finished_marker, list_h5, path_is_within, same_path,
 )
 import handoff  # noqa: E402
 from accounts import Accounts  # noqa: E402
@@ -274,6 +274,20 @@ class ConfigPayload(BaseModel):
     stage_min_free_gb: int = 200
     copy_input_first: bool = False
     dry_run: bool = False
+    # Where Network analyses run. None keeps what is set: a page that does
+    # not know about the cluster must not switch it off by saving.
+    executor: Optional[str] = None
+    slurm_nodes: Optional[list[dict[str, Any]]] = None
+    slurm_nas_here: Optional[str] = None
+    slurm_cpus: Optional[int] = None
+    slurm_mem_gb: Optional[int] = None
+    slurm_hours: Optional[float] = None
+    slurm_max_jobs: Optional[int] = None
+    slurm_gpu_node: Optional[str] = None
+
+
+CLUSTER_FIELDS = ("executor", "slurm_nodes", "slurm_nas_here", "slurm_cpus", "slurm_mem_gb",
+                  "slurm_hours", "slurm_max_jobs", "slurm_gpu_node")
 
 
 class BrowsePayload(BaseModel):
@@ -373,6 +387,9 @@ def api_get_config():
         "nwb_convert": cfg.nwb_convert,
         "nwb_python": cfg.nwb_python,
         "nwb_compression": cfg.nwb_compression,
+        **{k: getattr(cfg, k) for k in CLUSTER_FIELDS},
+        "slurm_client": cfg.slurm_client,
+        "cluster_ready": os.access(cfg.slurm_client, os.X_OK),
     }
 
 
@@ -435,10 +452,15 @@ def api_set_config(payload: ConfigPayload, request: Request):
     # watchdog, the run-time cap and the like. The page does not send them,
     # so building the config from the page alone put them back to their
     # defaults on every save. Keep what is set now.
-    sent = set(ConfigPayload.model_fields) | {"work_dir"}
+    sent = (set(ConfigPayload.model_fields) - set(CLUSTER_FIELDS)) | {"work_dir"}
     for f in dataclasses.fields(JobConfig):
         if f.name not in sent:
             setattr(cfg, f.name, getattr(watcher.cfg, f.name))
+    for k in CLUSTER_FIELDS:
+        v = getattr(payload, k)
+        if v is not None:
+            setattr(cfg, k, v)
+    cfg.__post_init__()
     errors = cfg.validate()
     if errors:
         raise HTTPException(400, {"errors": errors})
@@ -479,7 +501,8 @@ def api_set_config(payload: ConfigPayload, request: Request):
 
     _audit(request, "saved the settings",
            f"results {cfg.output_dir or '—'}; "
-           f"analyses {', '.join(cfg.enabled_jobs()) or 'none'}")
+           f"analyses {', '.join(cfg.enabled_jobs()) or 'none'}; "
+           f"network analyses run {'on the cluster' if cfg.on_cluster('network') else 'here'}")
     return {"ok": True, "saved_to": str(CONFIG_PATH), "cleared_detected": cleared}
 
 
@@ -807,6 +830,129 @@ def api_project_remove(payload: ProjectPayload, request: Request):
     return {"ok": True, "project": e, "waiting_dropped": dropped}
 
 
+# --------------------------------------------------------------------------- #
+# The Slurm cluster
+# --------------------------------------------------------------------------- #
+class ClusterCheckPayload(BaseModel):
+    slurm_nodes: list[dict[str, Any]] = []
+    slurm_nas_here: str = ""
+
+
+@app.post("/api/cluster/check")
+def api_cluster_check(payload: ClusterCheckPayload):
+    """Check that each cluster computer can run a date, as the compute
+    account: its Python and MEA-Analysis, the NAS, the MaxWell plugin, the
+    shared folders, and decoding one recording. One small job per computer
+    (2 CPUs, a few minutes, no GPU unless spike sorting is on); waits up to
+    four minutes for them. Only reads, apart from two empty test folders."""
+    import slurm_backend
+    w = get_watcher()
+    cfg = w.cfg
+    nodes = [slurm_backend.clean_node(n) for n in payload.slurm_nodes if n.get("node")]
+    here = payload.slurm_nas_here.rstrip("/") or cfg.slurm_nas_here
+    server = []
+    problems = slurm_backend.node_problems(nodes)
+    server.append({"what": "Settings", "ok": not problems,
+                   "say": " ".join(problems) or f"{len(nodes)} computer(s) listed."})
+    client_ok = os.access(cfg.slurm_client, os.X_OK)
+    server.append({"what": "Cluster client", "ok": client_ok,
+                   "say": f"{cfg.slurm_client} is installed." if client_ok else
+                          f"{cfg.slurm_client} is not installed on this machine."})
+    res = Path(cfg.slurm_results_dir)
+    probe_dir = res if res.is_dir() else res.parent
+    can_write = probe_dir.is_dir() and os.access(probe_dir, os.W_OK)
+    server.append({"what": "Shared results folder", "ok": can_write,
+                   "say": f"This server can write to {probe_dir}." if can_write else
+                          f"This server cannot write to {probe_dir}. It must run in the lab-jobs "
+                          "group: restart it from a fresh login after being added."})
+    if here and not Path(here).is_dir():
+        server.append({"what": "NAS here", "ok": False, "say": f"{here} is not a folder on this machine."})
+    if not all(s["ok"] for s in server):
+        return {"ok": False, "server": server, "nodes": []}
+    try:
+        res.mkdir(exist_ok=True)
+    except OSError:
+        pass
+    # One recording to decode: the newest date of a watched project on the NAS.
+    sample = ""
+    for root in cfg.watched():
+        if not path_is_within(root, here):
+            continue
+        try:
+            dates = sorted((d for d in root.iterdir() if d.is_dir()), reverse=True)[:5]
+        except OSError:
+            continue
+        for d in dates:
+            recs = find_recordings(d, cfg.h5_glob, cfg.subfolder_for("network"))
+            if recs:
+                sample = str(min(recs, key=lambda r: r.stat().st_size).relative_to(here))
+                break
+        if sample:
+            break
+    sorting = not cfg.driver_options.get("skip_spikesorting")
+    repo = Path(cfg.driver).parent if cfg.driver else None
+    try:
+        imports = list(required_imports(repo)) if repo and repo.is_dir() else []
+    except Exception:  # noqa: BLE001
+        imports = []
+    imports = imports or ["numpy", "h5py", "spikeinterface"]
+    script = slurm_backend.check_script(
+        nodes=nodes, sample_rel=sample, results_root=cfg.slurm_results_dir,
+        scratch_root=cfg.slurm_scratch_dir, hdf5_plugin_path=cfg.slurm_hdf5_plugin_path,
+        sorting=sorting, imports=imports)
+    client = slurm_backend.SlurmClient(cfg.slurm_client)
+    jobs = {}
+    out = []
+    for n in nodes:
+        try:
+            got = client.submit(script, cpus=2, mem_mib=4096, minutes=5, gpu=sorting,
+                                node=n["node"], name="mea-check")
+            jobs[n["node"]] = got["job_id"]
+        except slurm_backend.SlurmError as exc:
+            out.append({"node": n["node"], "ok": False, "state": "not sent",
+                        "steps": [{"what": "submit", "ok": False, "say": str(exc)}]})
+    deadline = time.time() + 240
+    pending = dict(jobs)
+    states: dict[str, dict] = {}
+    while pending and time.time() < deadline:
+        for node, jid in list(pending.items()):
+            try:
+                st = client.status(jid)
+            except slurm_backend.SlurmError:
+                continue
+            states[node] = st
+            if (st.get("state") or "").split()[0].rstrip("+") in slurm_backend.TERMINAL:
+                pending.pop(node)
+        if pending:
+            time.sleep(3)
+    for node, jid in jobs.items():
+        st = states.get(node, {})
+        if node in pending:
+            try:
+                client.cancel(jid)
+            except slurm_backend.SlurmError:
+                pass
+            out.append({"node": node, "ok": False, "state": st.get("state") or "?", "job_id": jid,
+                        "steps": [{"what": "queue", "ok": False,
+                                   "say": "did not run within four minutes (the computer is busy "
+                                          f"or down: {st.get('reason') or 'no reason given'}); "
+                                          "the check was cancelled."}]})
+            continue
+        try:
+            text = client.logs(jid).get("text", "")
+        except slurm_backend.SlurmError as exc:
+            text = ""
+            LOG.warning("Cluster check on %s: no log (%s)", node, exc)
+        steps = slurm_backend.parse_check(text)
+        ok = bool(steps) and all(s["ok"] for s in steps) and st.get("state") == "COMPLETED"
+        out.append({"node": node, "ok": ok, "state": st.get("state"), "job_id": jid, "steps": steps
+                    or [{"what": "output", "ok": False, "say": "the check printed nothing"}]})
+    order = [n["node"] for n in nodes]
+    out.sort(key=lambda r: order.index(r["node"]) if r["node"] in order else 99)
+    return {"ok": bool(out) and all(r["ok"] for r in out), "server": server, "nodes": out,
+            "sample": sample}
+
+
 @app.get("/api/status")
 def api_status():
     watcher = get_watcher()
@@ -971,7 +1117,8 @@ def api_overview():
         counts[r.get("status") or "unknown"] = counts.get(r.get("status") or "unknown", 0) + 1
     return {"running": running, "attention": attention, "recent": recent, "counts": counts,
             "watching": snap.get("running"), "active_jobs": snap.get("active_jobs"),
-            "limits": snap.get("limits"), "projects": snap.get("projects", [])}
+            "limits": snap.get("limits"), "projects": snap.get("projects", []),
+            "executor": snap.get("executor")}
 
 
 @app.get("/api/gpu")

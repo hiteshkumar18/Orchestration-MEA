@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import uuid
 import logging
 import os
 import re
@@ -52,6 +53,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -61,6 +63,7 @@ from typing import Any, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import checkpoints  # noqa: E402
+import slurm_backend  # noqa: E402
 import memguard  # noqa: E402
 from driver_schema import build_driver_args, default_options  # noqa: E402
 from mea_repo import find_mea_repo, find_driver_python, check_python, required_imports  # noqa: E402
@@ -148,6 +151,33 @@ class JobConfig:
     # separate, larger limit and never wait behind spike sorting.
     max_concurrent_network: int = 1
     max_concurrent_activity: int = 2
+    # --- Where Network analyses run ----------------------------------------
+    # "local": on this machine, one GPU slot at a time (max_concurrent_network).
+    # "slurm": each date is one job in the lab's Slurm queue, on whichever of
+    # the cluster's computers is free; see slurm_backend.py. Activity scans
+    # always run here: they are CPU-only and take seconds.
+    executor: str = "local"
+    slurm_client: str = slurm_backend.DEFAULT_CLIENT
+    # Each cluster computer: {"node", "python", "mea_repo", "nas"}, its own
+    # paths, since they differ between computers.
+    slurm_nodes: list = field(default_factory=list)
+    # Where the NAS is mounted on this machine. A date must be inside it for
+    # a cluster computer to find it under its own mount.
+    slurm_nas_here: str = ""
+    slurm_cpus: int = 8
+    slurm_mem_gb: int = 32
+    slurm_hours: float = 24.0
+    # Dates handed to the cluster at once. The rest wait in this server's own
+    # first-come line, where they can still be held or reordered.
+    slurm_max_jobs: int = 3
+    # Spike sorting needs a GPU; pin it to one computer (the one with the
+    # most graphics memory), or leave blank for any.
+    slurm_gpu_node: str = ""
+    slurm_results_dir: str = "/mnt/mea-cluster/results/mea-bench"
+    slurm_scratch_dir: str = "/mnt/mea-scratch/mea-bench"
+    slurm_hdf5_plugin_path: str = "/usr/local/hdf5/lib/plugin"
+    slurm_poll_seconds: int = 10
+
     # Pause after a job releases its slot, before the next queued job starts.
     # CUDA memory is not always returned the instant a process exits, so a
     # queued Kilosort run starting immediately can still hit OOM. Applies to
@@ -278,6 +308,10 @@ class JobConfig:
 
     def __post_init__(self) -> None:
         self.watch_dirs = [dict(e) for e in self.watch_dirs or [] if e.get("path")]
+        self.slurm_nodes = [slurm_backend.clean_node(n) for n in self.slurm_nodes or []
+                            if (n or {}).get("node")]
+        if self.executor not in ("local", "slurm"):
+            self.executor = "local"
         if self.watch_dir:
             self.add_watch(self.watch_dir)
             self.watch_dir = ""
@@ -447,6 +481,49 @@ class JobConfig:
                 out[str(root)] = inside
         return out
 
+    def on_cluster(self, job: str) -> bool:
+        """Whether this kind of analysis goes to the Slurm cluster."""
+        return job == JOB_NETWORK and self.executor == "slurm" and not self.dry_run
+
+    def validate_cluster(self) -> list[str]:
+        """What running Network analyses on the cluster needs."""
+        if self.executor != "slurm" or not self.run_network:
+            return []
+        errs = slurm_backend.node_problems(self.slurm_nodes)
+        if not os.access(self.slurm_client, os.X_OK):
+            errs.append(f"The cluster client {self.slurm_client} is not installed on this machine.")
+        if not self.slurm_nas_here or not Path(self.slurm_nas_here).is_dir():
+            errs.append("Give the folder where the NAS is mounted on this machine "
+                        "(Settings → Where analyses run).")
+        if self.nwb_convert:
+            errs.append("NWB conversion runs on this machine only; turn it off to use the cluster.")
+        flags = [f for f in ("config", "checkpoint_dir", "reference") if self.driver_options.get(f)]
+        if flags:
+            errs.append("The pipeline option" + ("s " if len(flags) > 1 else " ")
+                        + ", ".join("--" + f.replace("_", "-") for f in flags)
+                        + " name a folder on this machine, which the cluster's computers cannot see.")
+        if not 1 <= self.slurm_cpus <= 24:
+            errs.append("Cluster CPUs per date must be 1 to 24.")
+        if not 1 <= self.slurm_mem_gb <= 48:
+            errs.append("Cluster memory per date must be 1 to 48 GB.")
+        if not 0.1 <= self.slurm_hours <= 24:
+            errs.append("The cluster time limit must be up to 24 hours.")
+        if self.slurm_max_jobs < 1:
+            errs.append("Send at least one date to the cluster at a time.")
+        for name, path in (("cluster results folder", self.slurm_results_dir),
+                           ("cluster scratch folder", self.slurm_scratch_dir)):
+            if not path.startswith("/") or len(Path(path).parts) < 3:
+                errs.append(f"The {name} must be a full path, at least two folders deep.")
+        res = Path(self.slurm_results_dir)
+        if res.is_absolute() and not (res.is_dir() or res.parent.is_dir()):
+            errs.append(f"This server cannot see the cluster results folder {res}. Is it in the "
+                        "lab-jobs group? Restart it from a fresh login after being added.")
+        elif res.is_absolute() and not os.access(res if res.is_dir() else res.parent, os.W_OK):
+            errs.append(f"This server cannot write to {res if res.is_dir() else res.parent}. "
+                        "It must run in the lab-jobs group (restart it from a fresh login after "
+                        "being added).")
+        return errs
+
     def validate_watching(self) -> list[str]:
         """validate(), plus what watching for new recordings needs."""
         errs = self.validate()
@@ -464,6 +541,7 @@ class JobConfig:
                             f"{root}. Pause or remove it under Settings → Watched projects.")
         if not self.enabled_jobs():
             errs.append("Enable at least one analysis (Network or Activity scan).")
+        errs += self.validate_cluster()
         if self.run_network and not self.driver:
             errs.append(
                 "MEA-Analysis checkout not found. Set MEA_REPO in config.env, "
@@ -904,7 +982,10 @@ class Watcher:
         # One semaphore per analysis type. Acquired inside the worker thread, so
         # a queued job holds no resources while it waits.
         self._slots = {
-            JOB_NETWORK: threading.Semaphore(max(1, cfg.max_concurrent_network)),
+            # On the cluster, Slurm decides where; this caps how many dates
+            # are handed to it at once.
+            JOB_NETWORK: threading.Semaphore(max(1, cfg.slurm_max_jobs if cfg.on_cluster(JOB_NETWORK)
+                                                 else cfg.max_concurrent_network)),
             JOB_ACTIVITY: threading.Semaphore(max(1, cfg.max_concurrent_activity)),
         }
         # The order jobs take a free slot in: first come, first served, across
@@ -963,6 +1044,8 @@ class Watcher:
         # for the start and then undo it, not find "not watching" and let the
         # start finish afterwards.
         self._life_lock = threading.RLock()
+        if reconcile and getattr(self, "_to_adopt", None):
+            self._adopt_cluster_jobs(self._to_adopt)
 
     def _settings_snapshot(self, folder: Optional[str] = None) -> dict:
         """What a run is launched with — stored with each run in the history.
@@ -1014,6 +1097,10 @@ class Watcher:
         """
         stale = [(k, e) for k, e in self.state.all().items()
                  if e.get("status") in self.IN_FLIGHT]
+        # A job handed to the cluster outlives this process: follow it again
+        # (started at the end of __init__) instead of running it twice.
+        self._to_adopt = [(k, e) for k, e in stale if e.get("slurm_job_id") and e.get("slurm_token")]
+        stale = [(k, e) for k, e in stale if not (e.get("slurm_job_id") and e.get("slurm_token"))]
         for key, entry in stale:
             # "interrupted", not "failed". A failed job is one the pipeline
             # rejected and re-running it unchanged would fail again, so failure
@@ -1836,8 +1923,12 @@ class Watcher:
         # A cancellation is for the run that was in flight when it was asked
         # for, never for a later one of the same folder.
         self._cancel.pop(key, None)
+        # A previous run's cluster job is not this run's: a restart would
+        # otherwise follow the old job again.
         self.state.update(key, status="dispatched", dispatched_at=_now(),
-                          log=str(log_path), **common)
+                          log=str(log_path), slurm_job_id=None, slurm_token=None,
+                          slurm_log=None, slurm_out=None, slurm_log_offset=None,
+                          slurm_state=None, worker=None, **common)
         self.on_event("dispatched", {"run": run_dir.name, "job": job, "log": str(log_path)})
 
         # In line now, in the order dates are started, not when the thread
@@ -2417,6 +2508,34 @@ class Watcher:
         shutil.copytree(src, dst, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("binary", self.INPUT_DIR))
 
+    def _mirror_unless_stopped(self, src: Path, dst: Path, key: str) -> bool:
+        """_mirror, given up when the run is taken off the queue or the
+        server stops. False when it was given up. A copy over the network can
+        take minutes, and a hold must not wait for it."""
+        rsync = shutil.which("rsync")
+        if not rsync:
+            self._mirror(src, dst)
+            return True
+        dst.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile("w+") as err, subprocess.Popen(
+                [rsync, "-a", "--partial", "--exclude=binary/", f"--exclude=/{self.INPUT_DIR}/",
+                 f"{src}{os.sep}", f"{dst}{os.sep}"],
+                stdout=subprocess.DEVNULL, stderr=err) as proc:
+            while proc.poll() is None:
+                if key in self._cancel or self._halt.is_set():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return False
+                time.sleep(0.5)
+            if proc.returncode != 0:
+                err.seek(0)
+                lines = err.read().strip().splitlines()
+                raise OSError(f"rsync failed: {lines[-1] if lines else proc.returncode}")
+        return True
+
     def _scratch_root(self) -> Path:
         return Path(self.cfg.scratch_dir or (Path(self.cfg.work_dir) / "scratch"))
 
@@ -2692,7 +2811,8 @@ class Watcher:
         # Spike detection without sorting never touches the GPU, so a broken
         # driver must not block it.
         sorting = not self.cfg.driver_options.get("skip_spikesorting")
-        if job == JOB_NETWORK and sorting and not self.cfg.dry_run:
+        cluster = self.cfg.on_cluster(job)
+        if job == JOB_NETWORK and sorting and not self.cfg.dry_run and not cluster:
             gpu = self.check_gpu(self._analysis_python(cmd, job))
             if not gpu.get("ok"):
                 msg = ("the GPU is not usable, so spike sorting was not started — "
@@ -2726,7 +2846,8 @@ class Watcher:
                 return
 
             # Let the previous job's GPU memory actually be reclaimed.
-            cool = self.cfg.gpu_cooldown_seconds if job == JOB_NETWORK else 0
+            cool = (self.cfg.gpu_cooldown_seconds
+                    if job == JOB_NETWORK and not self.cfg.on_cluster(job) else 0)
             if cool > 0:
                 LOG.info("%s [%s] waiting %ss for GPU memory to free", run_dir.name, label, cool)
                 self.state.update(key, detail=f"starting in {cool}s (GPU cooldown)")
@@ -2748,6 +2869,10 @@ class Watcher:
             except Exception:                               # noqa: BLE001
                 LOG.exception("%s: clearing stale sorter output failed; "
                               "continuing to the run anyway", run_dir.name)
+
+        if cluster:
+            self._run_on_cluster(run_dir, job, key, cmd, log_path, slot)
+            return
 
         staged: Optional[Path] = None
         if job == JOB_NETWORK and self.cfg.stage_locally and not self.cfg.dry_run:
@@ -2870,53 +2995,9 @@ class Watcher:
                 LOG.error("%s [%s] %s", run_dir.name, label, copy_error)
                 self.on_event("failed", {"run": run_dir.name, "job": job, "error": copy_error})
                 return
-            if stall and self._cancel.get(key) == "held":
-                self.state.update(key, status="held", completed_at=_now(), returncode=rc,
-                                  error=None, detail=self.HELD_DETAIL,
-                                  duration_s=round(time.time() - started, 1))
-                LOG.warning("%s [%s] stopped and put on hold", run_dir.name, label)
-                self.on_event("held", {"run": run_dir.name, "job": job})
-                return
-            if stall:
-                self.state.update(key, status="failed", completed_at=_now(),
-                                  returncode=rc, error=stall,
-                                  duration_s=round(time.time() - started, 1))
-                LOG.error("%s [%s] %s (log: %s)", run_dir.name, label, stall, log_path)
-                self.on_event("failed", {"run": run_dir.name, "job": job,
-                                         "error": stall})
-                return
-            ok = rc == 0
-            # A zero exit code is necessary but not sufficient: the driver
-            # reports success even when every well failed.
-            verdict = self.read_driver_verdict(log_path) if ok else None
-            all_failed = bool(verdict and verdict.startswith("the driver exited 0 but all"))
-            if verdict:
-                LOG.warning("%s [%s]: %s", run_dir.name, label, verdict)
-            if all_failed or (verdict and verdict.startswith("the driver found no")):
-                ok = False
-            error = None
-            if not ok:
-                # A failed job must say why. Killed by the system, the driver
-                # has no chance to log anything, and the run showed only
-                # "failed" with no reason at all.
-                error = verdict if rc == 0 else self.exit_reason(
-                    rc, oomd=mem_limit is not None and memguard.oomd_kills_whole_jobs(),
-                    network=job == JOB_NETWORK)
-            self.state.update(
-                key,
-                status="done" if ok else "failed",
-                completed_at=_now(),
-                returncode=rc,
-                error=error,
-                detail=("; ".join(x for x in (verdict, mem_note) if x) or None) if ok else None,
-                duration_s=round(time.time() - started, 1),
-            )
-            (LOG.info if ok else LOG.error)(
-                "%s [%s] finished with code %s (log: %s)%s",
-                run_dir.name, label, rc, log_path, f": {error}" if error else "")
-            self.on_event("done" if ok else "failed",
-                          {"run": run_dir.name, "job": job, "returncode": rc,
-                           **({"error": error} if error else {})})
+            self._conclude(run_dir, job, key, label, rc, stall, log_path, started,
+                           mem_limit, mem_note,
+                           oomd=mem_limit is not None and memguard.oomd_kills_whole_jobs())
         except Exception as exc:  # noqa: BLE001
             self.state.update(key, status="failed", completed_at=_now(), error=str(exc))
             LOG.exception("%s [%s]: dispatch raised", run_dir.name, label)
@@ -2941,6 +3022,438 @@ class Watcher:
             self._cancel.pop(key, None)
             self._batch_finished(key)
             self._date_finished(key)
+
+    def _conclude(self, run_dir: Path, job: str, key: str, label: str, rc: int,
+                  stall: Optional[str], log_path: Path, started: float,
+                  mem_limit: Optional[float] = None, mem_note: Optional[str] = None,
+                  oomd: bool = False) -> None:
+        """Record how a job that ran ended: held, stopped, failed or done."""
+        if stall and self._cancel.get(key) == "held":
+            self.state.update(key, status="held", completed_at=_now(), returncode=rc,
+                              error=None, detail=self.HELD_DETAIL,
+                              duration_s=round(time.time() - started, 1))
+            LOG.warning("%s [%s] stopped and put on hold", run_dir.name, label)
+            self.on_event("held", {"run": run_dir.name, "job": job})
+            return
+        if stall:
+            self.state.update(key, status="failed", completed_at=_now(),
+                              returncode=rc, error=stall,
+                              duration_s=round(time.time() - started, 1))
+            LOG.error("%s [%s] %s (log: %s)", run_dir.name, label, stall, log_path)
+            self.on_event("failed", {"run": run_dir.name, "job": job,
+                                     "error": stall})
+            return
+        ok = rc == 0
+        # A zero exit code is necessary but not sufficient: the driver
+        # reports success even when every well failed.
+        verdict = self.read_driver_verdict(log_path) if ok else None
+        all_failed = bool(verdict and verdict.startswith("the driver exited 0 but all"))
+        if verdict:
+            LOG.warning("%s [%s]: %s", run_dir.name, label, verdict)
+        if all_failed or (verdict and verdict.startswith("the driver found no")):
+            ok = False
+        error = None
+        if not ok:
+            # A failed job must say why. Killed by the system, the driver
+            # has no chance to log anything, and the run showed only
+            # "failed" with no reason at all.
+            error = verdict if rc == 0 else self.exit_reason(
+                rc, oomd=oomd, network=job == JOB_NETWORK)
+        self.state.update(
+            key,
+            status="done" if ok else "failed",
+            completed_at=_now(),
+            returncode=rc,
+            error=error,
+            detail=("; ".join(x for x in (verdict, mem_note) if x) or None) if ok else None,
+            duration_s=round(time.time() - started, 1),
+        )
+        (LOG.info if ok else LOG.error)(
+            "%s [%s] finished with code %s (log: %s)%s",
+            run_dir.name, label, rc, log_path, f": {error}" if error else "")
+        self.on_event("done" if ok else "failed",
+                      {"run": run_dir.name, "job": job, "returncode": rc,
+                       **({"error": error} if error else {})})
+
+    # -- the Slurm cluster: one date, one job -------------------------------- #
+    # Consecutive failed status queries before a job is given up as unknown.
+    CLUSTER_LOST_AFTER = 30
+
+    def _slurm(self) -> "slurm_backend.SlurmClient":
+        return slurm_backend.SlurmClient(self.cfg.slurm_client)
+
+    def _cluster_out(self, token: str) -> Path:
+        return Path(self.cfg.slurm_results_dir) / token
+
+    def _run_on_cluster(self, run_dir: Path, job: str, key: str, cmd: list[str],
+                        log_path: Path, slot: Optional[threading.Semaphore]) -> None:
+        """Hand one date to the Slurm queue and see it through. Holds this
+        server's slot until the job has ended and its results are here."""
+        label = JOB_LABELS.get(job, job)
+        detached = False
+        with self._active_lock:
+            self._active[job] = self._active.get(job, 0) + 1
+        try:
+            sub = self._submit_to_cluster(run_dir, key, cmd, log_path)
+            if sub is None:
+                return
+            detached = self._follow_cluster(run_dir, job, key, label, log_path, **sub)
+        except Exception as exc:  # noqa: BLE001
+            self.state.update(key, status="failed", completed_at=_now(), error=str(exc))
+            LOG.exception("%s [%s]: the cluster job raised", run_dir.name, label)
+            self.on_event("failed", {"run": run_dir.name, "job": job, "error": str(exc)})
+        finally:
+            with self._active_lock:
+                self._active[job] = max(0, self._active.get(job, 1) - 1)
+            if slot is not None:
+                slot.release()
+            if not detached:
+                self._cancel.pop(key, None)
+                self._batch_finished(key)
+                self._date_finished(key)
+
+    def _submit_to_cluster(self, run_dir: Path, key: str, cmd: list[str],
+                           log_path: Path) -> Optional[dict]:
+        """Write the job's shared folder and submit it. The Slurm job id is
+        saved before anything else happens, so a restart finds the job
+        instead of submitting it twice. None when it was not submitted (the
+        run is then already marked failed)."""
+        def fail(msg: str) -> None:
+            self._fail_before_start(run_dir, JOB_NETWORK, key, msg)
+
+        nas = self.cfg.slurm_nas_here.rstrip("/")
+        if not path_is_within(run_dir, nas):
+            fail(f"this date is not on the NAS ({nas}), so the cluster's computers cannot "
+                 "read it. Analyse it with “Where analyses run” set to this computer.")
+            return None
+        recs = find_recordings(run_dir, self.cfg.h5_glob, self.cfg.subfolder_for(JOB_NETWORK))
+        if not recs:
+            fail("no recordings found to send to the cluster")
+            return None
+        rels = [str(r.relative_to(run_dir)) for r in recs]
+        project = self.cfg.project_of(run_dir)
+        token = slurm_backend.token_for(project, run_dir.name, uuid.uuid4().hex[:10])
+        out = self._cluster_out(token)
+
+        # The pipeline's own arguments, with this machine's paths swapped out.
+        src = str(run_dir)
+        target_rel = ""
+        if len(cmd) > 2 and cmd[2] != src and cmd[2].startswith(src + os.sep):
+            target_rel = cmd[2][len(src) + 1:]
+        args = [slurm_backend.OUT if c == str(self.cfg.output_dir) else c for c in cmd[3:]]
+
+        # Earlier results of this date go with it, so finished wells are
+        # skipped. Copied here, before submitting: the job cannot see this
+        # machine's results folder.
+        try:
+            out.mkdir(parents=True)
+            for existing in self._output_roots_for(run_dir):
+                rel = existing.relative_to(Path(self.cfg.output_dir))
+                self.state.update(key, detail="copying earlier results for the cluster")
+                if not self._mirror_unless_stopped(existing, out / "seed" / rel, key):
+                    self._remove_cluster_out(out)
+                    if not self._end_cancelled_before_start(key):
+                        fail("server shut down before the job could start")
+                    return None
+        except (OSError, shutil.Error) as exc:
+            self._remove_cluster_out(out)
+            fail(f"could not prepare the job's shared folder {out}: {exc}")
+            return None
+
+        sorting = not self.cfg.driver_options.get("skip_spikesorting")
+        script = slurm_backend.job_script(
+            token=token, project=project, date=run_dir.name, nodes=self.cfg.slurm_nodes,
+            nas_rel=str(run_dir.relative_to(nas)), recordings=rels, args=args,
+            scratch_root=self.cfg.slurm_scratch_dir, results_root=self.cfg.slurm_results_dir,
+            hdf5_plugin_path=self.cfg.slurm_hdf5_plugin_path, target_rel=target_rel)
+        names = [n["node"] for n in self.cfg.slurm_nodes]
+        node = ((self.cfg.slurm_gpu_node or None) if sorting else None) or \
+               (names[0] if len(names) == 1 else None)
+        if key in self._cancel:
+            self._remove_cluster_out(out)
+            self._end_cancelled_before_start(key)
+            return None
+        self.state.update(key, detail="sending to the cluster")
+        try:
+            got = self._slurm().submit(
+                script, cpus=self.cfg.slurm_cpus, mem_mib=int(self.cfg.slurm_mem_gb * 1024),
+                minutes=max(1, int(round(self.cfg.slurm_hours * 60))), gpu=sorting, node=node,
+                name=f"mea-{run_dir.name}")
+        except slurm_backend.SlurmError as exc:
+            if exc.uncertain:
+                # It may be in the queue all the same. Never submit again on a
+                # guess: say so, and leave the shared folder for whoever checks.
+                fail(f"the cluster may or may not have taken this date ({exc}). Check the "
+                     f"cluster queue for a job named mea-{run_dir.name} before analysing it again.")
+            else:
+                self._remove_cluster_out(out)
+                fail(f"the cluster did not take this date: {exc}")
+            return None
+        job_id = str(got.get("job_id") or "")
+        self.state.update(key, status="queued", slurm_job_id=job_id, slurm_token=token,
+                          slurm_log=got.get("log"), slurm_out=str(out), worker=None,
+                          detail="waiting in the cluster queue")
+        with open(log_path, "w") as fh:
+            fh.write(f"cluster job {job_id} ({token}), sent {_now()}\n")
+            fh.write(f"cluster job log: {got.get('log')}\n")
+            fh.write("-" * 72 + "\n")
+        LOG.info("%s: sent to the cluster as job %s (%s CPUs, %g GB%s%s)", run_dir.name, job_id,
+                 self.cfg.slurm_cpus, self.cfg.slurm_mem_gb, ", one GPU" if sorting else "",
+                 f", on {node}" if node else "")
+        self.on_event("queued", {"run": run_dir.name, "job": JOB_NETWORK, "slurm_job_id": job_id})
+        return {"job_id": job_id, "token": token, "job_log": got.get("log") or ""}
+
+    def _mirror_cluster_log(self, job_log: str, log_path: Path, offset: int) -> int:
+        """Append what the job wrote since `offset` to the run's log here."""
+        try:
+            with open(job_log, "rb") as src:
+                src.seek(offset)
+                chunk = src.read()
+        except OSError:
+            return offset
+        if chunk:
+            with open(log_path, "ab") as dst:
+                dst.write(chunk)
+        return offset + len(chunk)
+
+    def _follow_cluster(self, run_dir: Path, job: str, key: str, label: str, log_path: Path,
+                        job_id: str, token: str, job_log: str, offset: int = 0,
+                        started: Optional[float] = None) -> bool:
+        """Follow a cluster job to its end, then bring its results here.
+
+        Returns True when this server is shutting down and the job was left
+        running (a restart picks it up again); the run is then not ended."""
+        client = self._slurm()
+        poll = max(1, self.cfg.slurm_poll_seconds)
+        stall_s = max(0, self.cfg.stall_minutes) * 60
+        cap_s = max(0.0, self.cfg.max_runtime_hours) * 3600
+        last_size, last_change = -1, time.time()
+        state = node = None
+        reason: Optional[str] = None       # why this server asked for a cancel
+        cancel_sent = 0.0
+        failures = 0
+        lost = False
+        st: dict = {}
+        while True:
+            if self._halt.is_set() and self._cancel.get(key) != "stopped":
+                LOG.info("%s: left running on the cluster (job %s); picked up again on restart",
+                         run_dir.name, job_id)
+                return True
+            if reason is None and key in self._cancel:
+                reason = ("taken off the queue by hand. Finished wells are kept, so resuming "
+                          "repeats only the well in flight." if self._cancel[key] == "held" else
+                          "cancelled — stopped by hand. Finished wells are kept.")
+            if reason and time.time() - cancel_sent > 60:
+                try:
+                    client.cancel(job_id)
+                    LOG.warning("%s [%s] cancelling cluster job %s", run_dir.name, label, job_id)
+                except slurm_backend.SlurmError as exc:
+                    LOG.warning("%s: cancelling cluster job %s: %s", run_dir.name, job_id, exc)
+                cancel_sent = time.time()
+            try:
+                st = client.status(job_id)
+                failures = 0
+            except slurm_backend.SlurmError as exc:
+                failures += 1
+                if (self._cluster_out(token) / "exit_code").is_file():
+                    LOG.info("%s: job %s is no longer listed, but it wrote its outcome",
+                             run_dir.name, job_id)
+                    state = state or "COMPLETED"
+                    break
+                if failures >= self.CLUSTER_LOST_AFTER:
+                    LOG.error("%s: lost track of cluster job %s: %s", run_dir.name, job_id, exc)
+                    lost = True
+                    break
+                self._halt.wait(poll)
+                continue
+            state = (st.get("state") or "").split()[0].rstrip("+")
+            node = st.get("nodes") if st.get("nodes") not in (None, "", "(null)", "None") else node
+            if state in slurm_backend.TERMINAL:
+                break
+            if state in slurm_backend.PENDING:
+                why = st.get("reason")
+                self.state.update(key, status="queued", detail="waiting in the cluster queue"
+                                  + (f" ({why})" if why and why != "None" else ""))
+            else:
+                if started is None:
+                    started = time.time()
+                    self.state.update(key, status="running", started_at=_now(), worker=node,
+                                      detail=f"analysing on {node}")
+                    self.on_event("running", {"run": run_dir.name, "job": job, "worker": node})
+                    LOG.info("%s [%s] running on %s (cluster job %s)", run_dir.name, label,
+                             node, job_id)
+                offset = self._mirror_cluster_log(job_log, log_path, offset)
+                self.state.update(key, slurm_log_offset=offset)
+                now = time.time()
+                if offset != last_size:
+                    last_size, last_change = offset, now
+                quiet, elapsed = now - last_change, now - started
+                if not reason:
+                    self.state.update(key, detail=f"running {_hms(elapsed)} · last log output "
+                                                  f"{_hms(quiet)} ago")
+                    if stall_s and quiet > stall_s:
+                        reason = (f"no output for {_hms(quiet)} — the job was stopped as stuck "
+                                  f"after running {_hms(elapsed)}.")
+                    elif cap_s and elapsed > cap_s:
+                        reason = (f"still running after {_hms(elapsed)}, past the "
+                                  f"{self.cfg.max_runtime_hours:g}h limit — stopped.")
+            self._halt.wait(poll)
+
+        self._mirror_cluster_log(job_log, log_path, offset)
+        if started is None:
+            # Over between two looks: it ran all the same.
+            self.state.update(key, worker=node, started_at=_now())
+        started = started or time.time()
+        out = self._cluster_out(token)
+        rc: Optional[int] = None
+        try:
+            rc = int((out / "exit_code").read_text().strip())
+        except (OSError, ValueError):
+            # Ended before it could write its own: Slurm's "<code>:<signal>".
+            code = "" if (lost or failures) else str(st.get("exit_code") or "")
+            if state in ("COMPLETED", "FAILED") and code.split(":")[0].isdigit():
+                rc = int(code.split(":")[0])
+        self._sweep_left_scratch(run_dir, node, token, log_path, rc)
+        self.state.update(key, detail="copying results from the cluster", slurm_state=state)
+        copied = self._pull_cluster_results(run_dir, out)
+        if copied is not None:
+            self._remove_cluster_out(out)
+
+        stall = reason
+        if lost and rc is None:
+            stall = (f"the cluster no longer knows job {job_id}, and it left no outcome. "
+                     "Whatever results it finished were copied here; analyse the date again "
+                     "to finish it.")
+        elif rc in slurm_backend.EXIT_SAY:
+            stall = slurm_backend.EXIT_SAY[rc]
+        elif not stall and state in slurm_backend.SAY_STATE:
+            stall = slurm_backend.SAY_STATE[state] + ". Finished wells are kept."
+        elif not stall and rc is None and state == "CANCELLED":
+            stall = "cancelled on the cluster. Finished wells are kept."
+        if copied is None:
+            stall = (f"results could not be copied from the cluster; they are kept in {out}"
+                     + (f" ({stall})" if stall else ""))
+        if rc is None:
+            rc = 0 if state == "COMPLETED" else -1
+        self._conclude(run_dir, job, key, label, rc, stall, log_path, started)
+        return False
+
+    def _sweep_left_scratch(self, run_dir: Path, node: Optional[str], token: str,
+                            log_path: Path, rc: Optional[int]) -> None:
+        """A job deletes its own scratch copy on every way out it controls. One
+        Slurm killed outright (out of time or memory, or not stopping within
+        30 s) cannot: then a small job deletes it on that computer."""
+        try:
+            with open(log_path, "rb") as fh:
+                fh.seek(max(0, os.path.getsize(log_path) - 65536))
+                tail = fh.read().decode(errors="replace")
+        except OSError:
+            tail = ""
+        if ("MEA-BENCH node=" not in tail or "scratch deleted" in tail
+                or rc == slurm_backend.EXIT_COPY_RESULTS or not node):
+            return
+        try:
+            script = slurm_backend.cleanup_script(token=token,
+                                                  scratch_root=self.cfg.slurm_scratch_dir)
+            got = self._slurm().submit(script, cpus=1, mem_mib=256, minutes=10, gpu=False,
+                                       node=node, name=f"mea-cleanup-{run_dir.name}")
+        except (ValueError, slurm_backend.SlurmError) as exc:
+            LOG.warning("%s: the job did not delete its scratch copy on %s, and the clean-up "
+                        "could not be sent (%s); it is %s/%s there", run_dir.name, node, exc,
+                        self.cfg.slurm_scratch_dir, token)
+            return
+        LOG.info("%s: the job did not delete its scratch copy on %s; clean-up job %s sent",
+                 run_dir.name, node, got.get("job_id"))
+
+    def _pull_cluster_results(self, run_dir: Path, out: Path) -> Optional[int]:
+        """Copy a job's results from the shared folder into the results
+        folder here and check every file arrived. The number of files, or
+        None when the copy failed (the shared copy is then kept)."""
+        src = out / "results"
+        files = slurm_backend.listing(src)
+        if not files:
+            return 0
+        dest = Path(self.cfg.output_dir)
+        try:
+            self._mirror(src, dest)
+        except (OSError, shutil.Error) as exc:
+            LOG.error("%s: could not copy results from %s: %s", run_dir.name, src, exc)
+            return None
+        missing = [rel for rel, size in files.items()
+                   if not (dest / rel).is_file() or (dest / rel).stat().st_size != size]
+        if missing:
+            LOG.error("%s: %d result file(s) did not arrive from %s, e.g. %s", run_dir.name,
+                      len(missing), src, missing[0])
+            return None
+        LOG.info("%s: %d result file(s) copied from the cluster", run_dir.name, len(files))
+        return len(files)
+
+    def _remove_cluster_out(self, out: Path) -> None:
+        """Delete a job's shared folder: only <cluster results>/<token>."""
+        root = Path(self.cfg.slurm_results_dir)
+        try:
+            target = out.resolve()
+            if target.parent != root.resolve() or not re.fullmatch(r"[A-Za-z0-9_.-]+", target.name):
+                LOG.error("Refusing to delete %s: not a job folder inside %s", out, root)
+                return
+            if any(target == r or r in target.parents or target in r.parents
+                   for r in [Path(m) for m in network_mounts() if "mea-cluster" not in m]
+                   + [x.resolve() for x in self.cfg.input_roots()]):
+                LOG.error("Refusing to delete %s: it overlaps input data", out)
+                return
+            shutil.rmtree(target)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            LOG.warning("Could not delete the cluster job folder %s: %s", out, exc)
+
+    def _adopt_cluster_jobs(self, entries: list[tuple[str, dict]]) -> None:
+        """Jobs a previous run of this server left in the cluster: follow them
+        again rather than submit them twice."""
+        for key, e in entries:
+            run_dir = Path(key.split("::")[0])
+            job = e.get("job", JOB_NETWORK)
+            slot = self._slots.get(job)
+            took = slot.acquire(blocking=False) if slot is not None else False
+            LOG.info("%s: following cluster job %s again after the restart", run_dir.name,
+                     e["slurm_job_id"])
+
+            def follow(run_dir=run_dir, job=job, key=key, e=e, took=took):
+                label = JOB_LABELS.get(job, job)
+                detached = False
+                with self._active_lock:
+                    self._active[job] = self._active.get(job, 0) + 1
+                try:
+                    started = None
+                    if e.get("started_at"):
+                        try:
+                            started = datetime.fromisoformat(e["started_at"]).timestamp()
+                        except ValueError:
+                            started = None
+                    detached = self._follow_cluster(
+                        run_dir, job, key, label, Path(e.get("log") or self._log_path_for(run_dir, job)),
+                        e["slurm_job_id"], e["slurm_token"], e.get("slurm_log") or "",
+                        int(e.get("slurm_log_offset") or 0), started)
+                except Exception as exc:  # noqa: BLE001
+                    self.state.update(key, status="failed", completed_at=_now(), error=str(exc))
+                    LOG.exception("%s: following cluster job %s raised", run_dir.name,
+                                  e.get("slurm_job_id"))
+                finally:
+                    with self._active_lock:
+                        self._active[job] = max(0, self._active.get(job, 1) - 1)
+                    if took:
+                        self._slots[job].release()
+                    if not detached:
+                        self._cancel.pop(key, None)
+                        self._date_finished(key)
+
+            threading.Thread(target=follow, name=f"mea-cluster-{run_dir.name}", daemon=True).start()
+
+    def _fail_before_start(self, run_dir: Path, job: str, key: str, msg: str) -> None:
+        self.state.update(key, status="failed", completed_at=_now(), error=msg)
+        LOG.error("%s [%s] %s", run_dir.name, JOB_LABELS.get(job, job), msg)
+        self.on_event("failed", {"run": run_dir.name, "job": job, "error": msg})
+        self._ended_early(key)
 
     def _end_cancelled_before_start(self, key: str) -> bool:
         """Close a run that was cancelled before it started. False if it was not."""
@@ -3207,7 +3720,9 @@ class Watcher:
             "activity_output_dir": self.cfg.activity_out,
             "enabled_jobs": self.cfg.enabled_jobs(),
             "active_jobs": dict(self._active),
-            "limits": {JOB_NETWORK: self.cfg.max_concurrent_network,
+            "executor": self.cfg.executor if self.cfg.run_network else "local",
+            "limits": {JOB_NETWORK: (self.cfg.slurm_max_jobs if self.cfg.on_cluster(JOB_NETWORK)
+                                     else self.cfg.max_concurrent_network),
                        JOB_ACTIVITY: self.cfg.max_concurrent_activity},
             "counts": counts,
             "counts_by_job": by_job,
