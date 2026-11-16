@@ -837,6 +837,7 @@ function Line({
   onAgain,
   onHold,
   onResume,
+  onPriority,
   i
 }) {
   const st = folderState(f.jobs),
@@ -846,6 +847,8 @@ function Line({
     scan = f.jobs.find(j => j.job === "activity");
   const note = net ? plainNote(net) : null;
   const busy = st === "running";
+  const waiting = f.jobs.filter(j => j.line_position);
+  const prio = f.jobs.some(j => j.priority && ["dispatched", "queued", "running"].includes(j.status));
   const sum = wells?.summary;
   const netDone = net && (net.status === "done" || net.status === "failed");
   const wc = netDone && wells?.wells && wells.notes ? wellCounts(wells, true) : null;
@@ -868,7 +871,9 @@ function Line({
     className: "say"
   }, React.createElement("span", {
     className: "stamp " + ji.k
-  }, ji.say), busy && net?.worker && React.createElement("span", {
+  }, ji.say), prio && React.createElement("span", {
+    className: "stamp prio"
+  }, "priority"), busy && net?.worker && React.createElement("span", {
     className: "note-l"
   }, "on ", net.worker), busy && sum?.wells > 0 && React.createElement("span", {
     className: "note-l"
@@ -922,7 +927,11 @@ function Line({
     onClick: () => onHold(f)
   }, React.createElement(Pause, {
     s: 14
-  }), " Hold"), f.jobs.some(j => j.status === "held") && React.createElement("button", {
+  }), " Hold"), waiting.length > 0 && onPriority && React.createElement("button", {
+    className: "btn sm",
+    title: prio ? "Back to the regular line, behind the priority dates" : "Analyse before every regular date still waiting",
+    onClick: () => onPriority(f, !prio)
+  }, prio ? "Make regular" : "Make priority"), f.jobs.some(j => j.status === "held") && React.createElement("button", {
     className: "btn sm",
     title: "Put this date back in the queue",
     onClick: () => onResume(f)
@@ -952,6 +961,7 @@ function Progress({
   onAgain,
   onHold,
   onResume,
+  onPriority,
   feed,
   goAdd
 }) {
@@ -1000,7 +1010,8 @@ function Progress({
     onLog: onLog,
     onAgain: onAgain,
     onHold: onHold,
-    onResume: onResume
+    onResume: onResume,
+    onPriority: onPriority
   }))))), feed.some(l => !/^=+$|Open this in your browser|do not open index\.html|^Work dir:/.test(l.message)) && React.createElement("div", {
     className: "sec"
   }, React.createElement("div", {
@@ -1035,6 +1046,7 @@ function AddRecordings({
   const [info, setInfo] = useState({});
   const [sel, setSel] = useState({});
   const [again, setAgain] = useState(false);
+  const [prio, setPrio] = useState(false);
   const [busy, setBusy] = useState(false);
   const [browse, setBrowse] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -1106,13 +1118,15 @@ function AddRecordings({
         method: "POST",
         body: JSON.stringify({
           folders: chosen,
-          rerun: again
+          rerun: again,
+          priority: prio
         })
       });
       const n = new Set(r.queued.map(q => q.path)).size;
       const sk = (r.skipped || []).filter(x => x.job);
-      toast(`${n} date${n === 1 ? "" : "s"} added`, "They will be analysed in order. Follow them under Progress." + (sk.length ? `\n\nNot added:\n` + sk.map(x => `${x.path.split("/").pop()}: ${x.reason}`).join("\n") : ""));
+      toast(`${n} date${n === 1 ? "" : "s"} added` + (prio ? " as priority" : ""), (prio ? "They go ahead of every regular date still waiting. " : "They will be analysed in order. ") + "Follow them under Progress." + (sk.length ? `\n\nNot added:\n` + sk.map(x => `${x.path.split("/").pop()}: ${x.reason}`).join("\n") : ""));
       setSel({});
+      setPrio(false);
       onQueued();
     } catch (e) {
       toast("Nothing was added", e.message, "error");
@@ -1302,7 +1316,14 @@ function AddRecordings({
     type: "checkbox",
     checked: again,
     onChange: e => setAgain(e.target.checked)
-  }), "Run ", chosenDone === 1 ? "it" : "them", " again anyway (otherwise ", chosenDone === 1 ? "it is" : "they are", " skipped)"))), React.createElement("button", {
+  }), "Run ", chosenDone === 1 ? "it" : "them", " again anyway (otherwise ", chosenDone === 1 ? "it is" : "they are", " skipped)"))), React.createElement("label", {
+    className: "prio-pick",
+    title: "Priority dates are analysed before every regular date still waiting. Nothing already running is stopped."
+  }, React.createElement("input", {
+    type: "checkbox",
+    checked: prio,
+    onChange: e => setPrio(e.target.checked)
+  }), " Priority \u2014 before the dates already waiting"), React.createElement("button", {
     className: "btn lite",
     disabled: busy,
     onClick: go
@@ -3821,6 +3842,17 @@ function App({
       })
     }), "On hold", `${dt.big} will not be analysed until you resume it.`);
   };
+  const onPriority = (f, on) => {
+    const dt = prettyDate(f.date);
+    const paths = f.jobs.filter(j => j.line_position).map(j => j.path);
+    run_(() => api("/api/runs/priority", {
+      method: "POST",
+      body: JSON.stringify({
+        paths,
+        priority: on
+      })
+    }), on ? "Priority" : "Regular", on ? `${dt.big} goes ahead of every regular date still waiting.` : `${dt.big} is back in the regular line.`);
+  };
   const onResume = f => {
     const dt = prettyDate(f.date);
     run_(() => api("/api/queue", {
@@ -4027,6 +4059,7 @@ function App({
     onAgain: onAgain,
     onHold: onHold,
     onResume: onResume,
+    onPriority: onPriority,
     feed: feed,
     goAdd: () => setTab("add")
   })), !runId && tab === "add" && React.createElement(AddRecordings, {

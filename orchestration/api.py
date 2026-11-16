@@ -312,9 +312,15 @@ class HoldPayload(BaseModel):
     paths: list[str] = []      # state keys, "<folder>::<job>"
 
 
+class PriorityPayload(BaseModel):
+    paths: list[str] = []      # state keys, "<folder>::<job>"
+    priority: bool = True
+
+
 class QueuePayload(BaseModel):
     folders: list[str] = []
     rerun: bool = False
+    priority: bool = False     # ahead of every regular date still waiting
     auto_handoff: Optional[bool] = None   # None = use the saved setting
 
 
@@ -1166,6 +1172,19 @@ def api_hold(payload: HoldPayload, request: Request):
     return {"ok": True, **res}
 
 
+@app.post("/api/runs/priority")
+def api_priority(payload: PriorityPayload, request: Request):
+    """Move waiting runs into the priority line, or back to the regular one.
+    Running runs are not touched: a priority run waits for the next free slot."""
+    if not payload.paths:
+        raise HTTPException(400, "Choose at least one run.")
+    changed = get_watcher().set_priority(payload.paths, payload.priority)
+    if changed:
+        _audit(request, "made priority" if payload.priority else "made regular again",
+               _dates(changed))
+    return {"ok": True, "changed": changed}
+
+
 @app.post("/api/queue/reset")
 def api_queue_reset(request: Request):
     """Clear the queue: stop watching, stop running analyses, and put every
@@ -1443,9 +1462,11 @@ def api_queue(payload: QueuePayload, request: Request):
     auto = watcher.cfg.auto_handoff if payload.auto_handoff is None else payload.auto_handoff
     res = watcher.queue_folders(
         payload.folders, rerun=payload.rerun,
-        on_complete=_batch_handoff if auto else None, user=_user(request))
+        on_complete=_batch_handoff if auto else None, user=_user(request),
+        priority=payload.priority)
     if res["queued"]:
-        _audit(request, "queued for analysis" + (" again" if payload.rerun else ""),
+        _audit(request, "queued for analysis" + (" again" if payload.rerun else "")
+               + (" as priority" if payload.priority else ""),
                _dates(q["path"] for q in res["queued"]))
     if not res["queued"]:
         # Nothing to do is a useful answer, not an error — but say why.

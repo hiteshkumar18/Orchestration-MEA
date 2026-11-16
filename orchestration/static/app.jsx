@@ -327,12 +327,14 @@ function LogDrawer({log,onClose,live}){
 // Not finished, and not already on hold: what "Hold" and "Reset queue" act on.
 const HOLDABLE=["dispatched","queued","running","interrupted","waiting"];
 
-function Line({f,report,wells,open,onWells,onLog,onAgain,onHold,onResume,i}){
+function Line({f,report,wells,open,onWells,onLog,onAgain,onHold,onResume,onPriority,i}){
   const st=folderState(f.jobs), ji=jobInfo(st);
   const dt=prettyDate(f.date);
   const net=f.jobs.find(j=>j.job==="network"), scan=f.jobs.find(j=>j.job==="activity");
   const note=net?plainNote(net):null;
   const busy=st==="running";
+  const waiting=f.jobs.filter(j=>j.line_position);
+  const prio=f.jobs.some(j=>j.priority&&["dispatched","queued","running"].includes(j.status));
   const sum=wells?.summary;
   const netDone=net&&(net.status==="done"||net.status==="failed");
   const wc=netDone&&wells?.wells&&wells.notes?wellCounts(wells,true):null;
@@ -348,6 +350,7 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,onHold,onResume,i}){
       <div className="mid">
         <div className="say">
           <span className={"stamp "+ji.k}>{ji.say}</span>
+          {prio&&<span className="stamp prio">priority</span>}
           {busy&&net?.worker&&<span className="note-l">on {net.worker}</span>}
           {busy&&sum?.wells>0&&<span className="note-l">{sum.complete} wells finished so far</span>}
           {(refined||note)&&<span className={"note-l "+(refined||note).k}>{(refined||note).t}</span>}
@@ -372,6 +375,9 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,onHold,onResume,i}){
         {f.jobs.some(j=>HOLDABLE.includes(j.status))&&<button className="btn sm"
           title={busy?"Stop this date and keep it for later":"Take this date off the queue and keep it for later"}
           onClick={()=>onHold(f)}><Pause s={14}/> Hold</button>}
+        {waiting.length>0&&onPriority&&<button className="btn sm"
+          title={prio?"Back to the regular line, behind the priority dates":"Analyse before every regular date still waiting"}
+          onClick={()=>onPriority(f,!prio)}>{prio?"Make regular":"Make priority"}</button>}
         {f.jobs.some(j=>j.status==="held")&&<button className="btn sm" title="Put this date back in the queue"
           onClick={()=>onResume(f)}><Play s={11}/> Resume</button>}
         <button className="btn ghost sm" title="Analyse this date again" aria-label="Analyse again" onClick={()=>onAgain(f)}><Again s={14}/></button>
@@ -381,7 +387,7 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,onHold,onResume,i}){
   </>);
 }
 
-function Progress({folders,reports,wells,openW,onWells,onLog,onAgain,onHold,onResume,feed,goAdd}){
+function Progress({folders,reports,wells,openW,onWells,onLog,onAgain,onHold,onResume,onPriority,feed,goAdd}){
   const byProj={};
   folders.forEach(f=>{(byProj[f.project]=byProj[f.project]||[]).push(f);});
   if(!folders.length) return (
@@ -400,7 +406,7 @@ function Progress({folders,reports,wells,openW,onWells,onLog,onAgain,onHold,onRe
           {fs.map(f=><Line key={f.folder} f={f} i={i++} report={reports[`${p}/${f.date}`]}
                            wells={wells[f.folder]} open={!!openW[f.folder]}
                            onWells={onWells} onLog={onLog} onAgain={onAgain}
-                           onHold={onHold} onResume={onResume}/>)}
+                           onHold={onHold} onResume={onResume} onPriority={onPriority}/>)}
         </div>
       </div>))}
     {feed.some(l=>!/^=+$|Open this in your browser|do not open index\.html|^Work dir:/.test(l.message))&&<div className="sec">
@@ -424,6 +430,7 @@ function AddRecordings({projects,toast,ask,onQueued}){
   const [info,setInfo]=useState({});
   const [sel,setSel]=useState({});
   const [again,setAgain]=useState(false);
+  const [prio,setPrio]=useState(false);
   const [busy,setBusy]=useState(false);
   const [browse,setBrowse]=useState(false);
   const [checking,setChecking]=useState(false);
@@ -466,12 +473,12 @@ function AddRecordings({projects,toast,ask,onQueued}){
           prevLines(p).map(l=>"  • "+l).join("\n")).join("\n\n")})))return;
     setBusy(true);
     try{
-      const r=await api("/api/queue",{method:"POST",body:JSON.stringify({folders:chosen,rerun:again})});
+      const r=await api("/api/queue",{method:"POST",body:JSON.stringify({folders:chosen,rerun:again,priority:prio})});
       const n=new Set(r.queued.map(q=>q.path)).size;
       const sk=(r.skipped||[]).filter(x=>x.job);
-      toast(`${n} date${n===1?"":"s"} added`,"They will be analysed in order. Follow them under Progress."+
+      toast(`${n} date${n===1?"":"s"} added`+(prio?" as priority":""),(prio?"They go ahead of every regular date still waiting. ":"They will be analysed in order. ")+"Follow them under Progress."+
         (sk.length?`\n\nNot added:\n`+sk.map(x=>`${x.path.split("/").pop()}: ${x.reason}`).join("\n"):""));
-      setSel({});onQueued();
+      setSel({});setPrio(false);onQueued();
     }catch(e){toast("Nothing was added",e.message,"error");}
     finally{setBusy(false);}
   };
@@ -539,6 +546,8 @@ function AddRecordings({projects,toast,ask,onQueued}){
             <input type="checkbox" checked={again} onChange={e=>setAgain(e.target.checked)}/>
             Run {chosenDone===1?"it":"them"} again anyway (otherwise {chosenDone===1?"it is":"they are"} skipped)</label></div>}
       </div>
+      <label className="prio-pick" title="Priority dates are analysed before every regular date still waiting. Nothing already running is stopped.">
+        <input type="checkbox" checked={prio} onChange={e=>setPrio(e.target.checked)}/> Priority — before the dates already waiting</label>
       <button className="btn lite" disabled={busy} onClick={go}>
         {busy?<span className="spin"/>:<Play s={12}/>} Analyse {chosen.length} date{chosen.length===1?"":"s"}</button>
     </div>}
@@ -1480,6 +1489,10 @@ function App({user,onSignOut}){
     run_(()=>api("/api/runs/hold",{method:"POST",body:JSON.stringify({paths})}),
       "On hold",`${dt.big} will not be analysed until you resume it.`);
   };
+  const onPriority=(f,on)=>{const dt=prettyDate(f.date);
+    const paths=f.jobs.filter(j=>j.line_position).map(j=>j.path);
+    run_(()=>api("/api/runs/priority",{method:"POST",body:JSON.stringify({paths,priority:on})}),
+      on?"Priority":"Regular",on?`${dt.big} goes ahead of every regular date still waiting.`:`${dt.big} is back in the regular line.`);};
   const onResume=f=>{const dt=prettyDate(f.date);
     run_(()=>api("/api/queue",{method:"POST",body:JSON.stringify({folders:[f.folder]})}),
       "Resumed",`${dt.big} is back in the queue.`);};
@@ -1568,7 +1581,7 @@ function App({user,onSignOut}){
         </div>}
         <Progress folders={folders} reports={reports} wells={wells} openW={openW}
                   onWells={onWells} onLog={onLog} onAgain={onAgain} onHold={onHold} onResume={onResume}
-                  feed={feed} goAdd={()=>setTab("add")}/>
+                  onPriority={onPriority} feed={feed} goAdd={()=>setTab("add")}/>
       </>}
       {!runId&&tab==="add"&&<AddRecordings projects={projects} toast={toast} ask={ask} onQueued={()=>{refresh(true);setTab("progress");}}/>}
       {!runId&&tab==="reports"&&<AiReport cfg={cfg} reports={reports} toast={toast}/>}
