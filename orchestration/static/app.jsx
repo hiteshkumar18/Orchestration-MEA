@@ -50,6 +50,7 @@ const prettyDate=code=>{const m=/^(\d{2})(\d{2})(\d{2})$/.exec(code||"");
   const mo=+m[2]-1; return mo>=0&&mo<12?{big:`${+m[3]} ${MONTHS[mo]}`,year:`20${m[1]}`}:{big:code,year:""};};
 const projectOf=folder=>{const p=(folder||"").replace(/\/+$/,"").split("/");return p[p.length-2]||"";};
 const prettyProject=s=>(s||"").replace(/_/g," ");
+const ordinal=n=>n+(n%100>=11&&n%100<=13?"th":["th","st","nd","rd"][n%10]||"th");
 const ago=iso=>{if(!iso)return"";const t=new Date(iso);if(isNaN(t))return"";
   const s=Math.max(0,(Date.now()-t)/1e3);
   return s<60?"just now":s<3600?`${s/60|0} min ago`:s<86400?`${s/3600|0} h ago`:`${s/86400|0} days ago`;};
@@ -97,7 +98,8 @@ function plainNote(job){
   if(/settling \((\d+)s remaining\)/.test(d)){const s=+/settling \((\d+)s/.exec(d)[1];
     return {t:`Copy looks finished — confirming for ${Math.ceil(s/60)} more min`,k:""};}
   if(/waiting for MaxWell 'finished' marker/i.test(d))return{t:"Waiting for the recording to be marked finished",k:""};
-  if(/queued — waiting/i.test(d))return{t:"Waiting for a free slot",k:""};
+  if(/queued — waiting/i.test(d)){const n=job.line_position;
+    return{t:n===1?"Next in line for a free slot":n?`${ordinal(n)} in line for a free slot`:"Waiting for a free slot",k:""};}
   m=/^running (.+?) · last log output (.+)$/.exec(d);
   if(m)return{t:`Running for ${m[1].replace(/(\d+)h/,"$1 h ").replace(/(\d+)m/,"$1 min")} · last activity ${m[2].replace(/(\d+)m ago/,"$1 min ago").replace(/(\d+)s ago/,"$1 s ago")}`,k:""};
   if(/staged on local disk/i.test(d))return{t:"Working on the fast local disk",k:""};
@@ -408,8 +410,10 @@ function Progress({folders,reports,wells,openW,onWells,onLog,onAgain,onHold,onRe
 }
 
 /* ── Add recordings tab ───────────────────────────────────────────────── */
-function AddRecordings({cfg,toast,ask,onQueued}){
-  const [dir,setDir]=useState(cfg.watch_dir||"");
+function AddRecordings({projects,toast,ask,onQueued}){
+  const watched=(projects||[]).filter(p=>p.exists!==false);
+  const first=(watched.find(p=>!p.paused)||watched[0])?.path||"";
+  const [dir,setDir]=useState(first);
   const [entries,setEntries]=useState(null);
   const [info,setInfo]=useState({});
   const [sel,setSel]=useState({});
@@ -434,7 +438,7 @@ function AddRecordings({cfg,toast,ask,onQueued}){
       }
     }catch(e){setEntries([]);setChecking(false);toast("Could not read that folder",e.message,"error");}
   },[toast]);
-  useEffect(()=>{if(cfg.watch_dir)load(cfg.watch_dir);},[cfg.watch_dir,load]);
+  useEffect(()=>{if(first)load(first);},[first,load]);
 
   // "Analysed" only when every analysis for the date is finished and its
   // results are still there (whoever ran it).
@@ -472,7 +476,11 @@ function AddRecordings({cfg,toast,ask,onQueued}){
     <div className="card" style={{marginBottom:18}}><div className="card-b" style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
       <Folder s={18}/><div style={{flex:1,minWidth:0}}>
         <div className="hint-s">Looking in</div>
-        <div className="mono" style={{wordBreak:"break-all"}}>{dir||"—"}</div></div>
+        <div className="mono" style={{wordBreak:"break-all"}}>{dir||"— add a project to watch under Settings, or look somewhere else"}</div></div>
+      {watched.length>1&&<select className="sel" aria-label="Watched project" style={{maxWidth:280}}
+        value={watched.some(p=>p.path===dir)?dir:""} onChange={e=>e.target.value&&load(e.target.value)}>
+        {!watched.some(p=>p.path===dir)&&<option value="">Another folder</option>}
+        {watched.map(p=><option key={p.path} value={p.path}>{prettyProject(p.name)}</option>)}</select>}
       <button className="btn sm" onClick={()=>setBrowse(b=>!b)}>{browse?"Close":"Look somewhere else"}</button>
       <button className="btn sm" onClick={()=>load(dir)}>Refresh</button>
       {browse&&<div style={{flexBasis:"100%"}}><Browser initial={dir} onClose={()=>setBrowse(false)} onPick={p=>load(p)}/></div>}
@@ -614,6 +622,118 @@ function AiReport({cfg,reports,toast}){
   </div>);
 }
 
+/* ── Watched projects ─────────────────────────────────────────────────── */
+// A project's dates by what is happening to them.
+const projCounts=c=>{c=c||{};const n=(...k)=>k.reduce((a,x)=>a+(c[x]||0),0);
+  return {wait:n("waiting","interrupted","held","detected"),line:n("dispatched","queued"),
+          run:n("running"),done:n("done"),bad:n("failed")};};
+
+function ProjectRow({p,watching,user,acts,busy,onPause,onRemove}){
+  const c=projCounts(p.counts);
+  const st=p.exists===false?["Folder missing","bad"]:p.paused?["Paused","wait"]:watching?["Watching","ok"]:["Not watching yet","queue"];
+  return (
+    <div className="wp" data-paused={!!p.paused}>
+      <div style={{minWidth:0}}>
+        <div className="wp-n"><span className="proj-n">{prettyProject(p.name)}</span><span className={"stamp "+st[1]}>{st[0]}</span></div>
+        <div className="mono hint-s wp-p">{p.path}</div>
+        <div className="hint-s">{p.added_by?`added by ${p.added_by}${p.added_by_email===user?.email?" (you)":""}${p.added_at?` · ${whenStarted(p.added_at)}`:""}`
+          :"added before projects were listed by person"}
+          {p.last_checked&&!p.paused?` · checked ${ago(p.last_checked)}`:""}</div>
+        <div className="wp-c">
+          <span>{p.dates_found==null?(p.paused?"":"listing its dates…"):<><b>{p.dates_found}</b> date{p.dates_found===1?"":"s"} found</>}</span>
+          {c.wait>0&&<span><b>{c.wait}</b> waiting</span>}
+          {c.line>0&&<span><b>{c.line}</b> in line</span>}
+          {c.run>0&&<span><b>{c.run}</b> analysing</span>}
+          {c.done>0&&<span><b>{c.done}</b> done</span>}
+          {c.bad>0&&<span style={{color:"var(--red)"}}><b>{c.bad}</b> need{c.bad===1?"s":""} attention</span>}
+        </div>
+      </div>
+      {acts&&<div className="acts">
+        {p.paused
+          ? <button className="btn sm" disabled={busy} onClick={()=>onPause(p,false)}><Play s={11}/> Resume</button>
+          : <button className="btn sm" disabled={busy} onClick={()=>onPause(p,true)}><Pause s={14}/> Pause</button>}
+        <button className="btn ghost sm" disabled={busy} onClick={()=>onRemove(p)}><X s={13}/> Remove</button>
+      </div>}
+    </div>);
+}
+
+function WatchedProjects({projects,user,toast,ask,onChange,watching}){
+  const [path,setPath]=useState("");
+  const [br,setBr]=useState(false);
+  const [chk,setChk]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const list=projects||[];
+  const check=async p=>{p=(p??path).trim();if(!p)return;setPath(p);setBusy(true);
+    try{setChk(await api("/api/projects/check",{method:"POST",body:JSON.stringify({path:p})}));}
+    catch(e){setChk({ok:false,say:e.message,suggestions:[],problems:[]});}
+    finally{setBusy(false);}};
+  const add=async p=>{setBusy(true);
+    try{await api("/api/projects/add",{method:"POST",body:JSON.stringify({path:p})});
+      toast(`Watching ${prettyProject(p.replace(/\/+$/,"").split("/").pop())}`,
+        watching?"Its new dates join the queue once they finish copying.":"Press “Watch for new” at the top to start watching.");
+      setPath("");setChk(null);setBr(false);onChange();}
+    catch(e){toast("Not added",e.message,"error");}
+    finally{setBusy(false);}};
+  // Someone else's project: say whose it is before changing it.
+  const whose=p=>p.added_by&&p.added_by_email!==user?.email?`${p.added_by} added this project. `:"";
+  const pause=async(p,v)=>{
+    if(v&&!(await ask({title:`Pause ${prettyProject(p.name)}?`,ok:"Pause watching it",
+      body:whose(p)+"New dates in it will not be picked up until it is resumed. Dates already in line or "+
+        "analysing carry on, and finished results are not touched."})))return;
+    setBusy(true);
+    try{await api("/api/projects/pause",{method:"POST",body:JSON.stringify({path:p.path,paused:v})});
+      toast(v?"Paused":"Watching again",prettyProject(p.name));onChange();}
+    catch(e){toast("That didn’t work",e.message,"error");}
+    finally{setBusy(false);}};
+  const remove=async p=>{
+    if(!(await ask({title:`Stop watching ${prettyProject(p.name)}?`,danger:!!whose(p),ok:"Remove from the list",
+      body:whose(p)+"It is taken off the list and its new dates are no longer picked up. Nothing is deleted: "+
+        "its recordings, results and history stay as they are, and it can be added again. "+
+        "Dates already in line or analysing carry on."})))return;
+    setBusy(true);
+    try{await api("/api/projects/remove",{method:"POST",body:JSON.stringify({path:p.path})});
+      toast("Removed from the list",prettyProject(p.name));onChange();}
+    catch(e){toast("That didn’t work",e.message,"error");}
+    finally{setBusy(false);}};
+  const name=s=>prettyProject((s||"").replace(/\/+$/,"").split("/").pop());
+  return (
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Watched projects</div>
+        <div className="sec-d">New dates in these folders are analysed automatically, one at a time, in the order they finish copying.
+          Anyone can add a project; each date is credited to whoever added its project.</div></div>
+      <div className="ledger" style={{marginBottom:12}}>
+        {list.length===0
+          ?<div className="empty"><div className="empty-t">No projects are being watched</div>
+            <div className="empty-d">Add the project folder that holds the recording dates, below.</div></div>
+          :list.map(p=><ProjectRow key={p.path} p={p} watching={watching} user={user} acts busy={busy} onPause={pause} onRemove={remove}/>)}
+      </div>
+      <div className="card"><div className="card-b">
+        <div className="f" style={{marginBottom:0}}><label className="f-l" htmlFor="wp-in">Watch another project</label>
+          <div className="f-row">
+            <input id="wp-in" className="inp mono" placeholder="/mnt/…/BenShalomLab/<project>/<project>" value={path}
+                   onChange={e=>{setPath(e.target.value);setChk(null);}} onKeyDown={e=>e.key==="Enter"&&check()}/>
+            <button className="btn" onClick={()=>setBr(b=>!b)}><Folder s={15}/> Choose</button>
+            <button className="btn ink" disabled={busy||!path.trim()} onClick={()=>check()}>{busy?<span className="spin"/>:null} Check</button></div>
+          <span className="hint-s">The project folder whose folders are the recording dates (like 260929). It is only ever read, never changed.</span>
+          {br&&<Browser initial={path} onClose={()=>setBr(false)} onPick={p=>check(p)}/>}
+        </div>
+        {chk&&<div style={{marginTop:14}}>
+          <Callout kind={chk.ok?(chk.kind==="other"?"amber":"green"):"amber"} icon={chk.ok?<Check s={17}/>:<Alert s={17}/>}>
+            {chk.say}{(chk.problems||[]).map((x,i)=><div key={i} style={{marginTop:4}}>{x}</div>)}</Callout>
+          {chk.ok&&<div style={{marginTop:10}}><button className="btn ink" disabled={busy} onClick={()=>add(chk.path)}>
+            <Play s={12}/> Watch {name(chk.path)}</button></div>}
+          {!chk.ok&&(chk.suggestions||[]).length>0&&<div className="sugg">
+            {chk.suggestions.map(s=><div key={s} className="sugg-i">
+              <div style={{minWidth:0}}><b>{name(s)}</b><div className="mono-s">{s}</div></div>
+              <div style={{display:"flex",gap:8}}>
+                {list.some(p=>p.path===s)?<span className="hint-s">already watched</span>
+                  :<button className="btn sm ink" disabled={busy} onClick={()=>add(s)}><Play s={11}/> Watch this one</button>}</div>
+            </div>)}</div>}
+        </div>}
+      </div></div>
+    </div>);
+}
+
 /* ── Settings tab ─────────────────────────────────────────────────────── */
 function Field({spec,value,onChange}){
   const set=v=>onChange(spec.key,v);
@@ -636,7 +756,7 @@ function Field({spec,value,onChange}){
            onChange={e=>set(e.target.value===""?null:(num?Number(e.target.value):e.target.value))}/>{H}</div>;
 }
 
-function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
+function Settings({cfg,setCfg,schema,locked,onSave,busy,toast,ask,user,projects,watching,onProjects}){
   const [br,setBr]=useState(null);
   const [q,setQ]=useState("");
   const [openG,setOpenG]=useState({});
@@ -657,15 +777,11 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast}){
       <b>Settings are locked while analyses are running.</b> Changing them now could disturb the running work.
       They unlock as soon as the current analyses finish.</Callout></div>}
 
+    <WatchedProjects projects={projects} user={user} toast={toast} ask={ask} onChange={onProjects} watching={watching}/>
+
     <div className="sec">
-      <div className="sec-h"><div className="sec-t">Where things are</div></div>
+      <div className="sec-h"><div className="sec-t">Where results go</div></div>
       <div className="card"><div className="card-b">
-        <div className="f"><label className="f-l" htmlFor="in">Recordings come from</label>
-          <div className="f-row"><input id="in" className="inp mono" value={cfg.watch_dir} disabled={locked} onChange={e=>setT("watch_dir",e.target.value)}/>
-            <button className="btn" disabled={locked} onClick={()=>setBr(br==="in"?null:"in")}><Folder s={15}/> Choose</button></div>
-          <span className="hint-s">The project folder that contains the date folders. It is only ever read, never changed.</span>
-          {br==="in"&&<Browser initial={cfg.watch_dir} onClose={()=>setBr(null)} onPick={p=>setT("watch_dir",p)}/>}
-        </div>
         <div className="f" style={{marginBottom:0}}><label className="f-l" htmlFor="out">Results go to</label>
           <div className="f-row"><input id="out" className="inp mono" value={cfg.driver_options.output_dir??""} disabled={locked}
                  onChange={e=>setO("output_dir",e.target.value||null)}/>
@@ -889,7 +1005,7 @@ function HistoryTable({fixedLimit}){
   </>);
 }
 
-function Dashboard(){
+function Dashboard({user,goSettings}){
   const [ov,setOv]=useState(null);
   const [sys,setSys]=useState(null);
   useEffect(()=>{
@@ -898,10 +1014,20 @@ function Dashboard(){
     load();const t=setInterval(load,5000);return()=>clearInterval(t);},[]);
   if(!ov) return <div className="skel" style={{height:240}}/>;
   const lim=ov.limits||{}, act=ov.active_jobs||{};
+  const projs=ov.projects||[], on=projs.filter(p=>!p.paused);
   return (<div className="rise">
     <div className="slots">
-      <span className={"dot "+(ov.watching?"ok":"wait")}/>{ov.watching?"Watching for new recordings":"Not watching for new recordings"}
+      <span className={"dot "+(ov.watching&&on.length?"ok":"wait")}/>{ov.watching&&on.length
+        ?`Watching ${on.length} project${on.length===1?"":"s"} for new recordings`:"Not watching for new recordings"}
       <span className="hint-s">· Network analyses running {act.network||0} of {lim.network||1} · Activity scans {act.activity||0} of {lim.activity||1}</span>
+    </div>
+
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Watched projects</div>
+        <div className="sec-d">{projs.length?"New dates in these folders are analysed automatically, one at a time, first come first served":
+          "None yet"}</div>
+        <button className="btn sm" style={{marginLeft:"auto"}} onClick={goSettings}>{projs.length?"Add or change":"Add a project"}</button></div>
+      {projs.length>0&&<div className="ledger">{projs.map(p=><ProjectRow key={p.path} p={p} watching={!!ov.watching} user={user}/>)}</div>}
     </div>
 
     <div className="sec">
@@ -1192,6 +1318,8 @@ function App({user,onSignOut}){
   const runs=status?.runs||[];
   const active=(status?.active_jobs?.network||0)+(status?.active_jobs?.activity||0);
   const watching=!!status?.running;
+  const projects=status?.projects||cfg.watch_dirs||[];
+  const watchingN=projects.filter(p=>!p.paused).length;
   const tally={
     wait:folders.filter(f=>["dispatched","waiting","interrupted","detected","held"].includes(folderState(f.jobs))).length,
     run:folders.filter(f=>folderState(f.jobs)==="running").length,
@@ -1200,7 +1328,7 @@ function App({user,onSignOut}){
   };
 
   const payload=()=>({
-    watch_dir:cfg.watch_dir,driver_options:cfg.driver_options,h5_glob:cfg.h5_glob,assay_subfolder:cfg.assay_subfolder,
+    driver_options:cfg.driver_options,h5_glob:cfg.h5_glob,assay_subfolder:cfg.assay_subfolder,
     run_network:!!cfg.run_network,run_activity:!!cfg.run_activity,activity_subfolder:cfg.activity_subfolder,
     activity_output_dir:cfg.activity_output_dir||"",activity_active_hz:Number(cfg.activity_active_hz),
     activity_figures:!!cfg.activity_figures,max_concurrent_network:Number(cfg.max_concurrent_network)||1,
@@ -1223,6 +1351,9 @@ function App({user,onSignOut}){
   const inLine=runs.some(r=>["dispatched","queued","running"].includes(r.status));
   const dateList=fs=>fs.map(f=>{const d=prettyDate(f.date);return `${d.big} ${d.year}`;}).join(", ");
   const startWatch=async()=>{
+    if(!watchingN){toast(projects.length?"Every project is paused":"No project to watch",
+      projects.length?"Resume a project under Settings → Watched projects.":"Add one under Settings → Watched projects.","error");
+      pickTab("settings");return;}
     // Starting picks interrupted dates up again; say which, and let them wait.
     const intr=folders.filter(f=>f.jobs.some(j=>j.status==="interrupted"));
     let hold=false;
@@ -1307,7 +1438,7 @@ function App({user,onSignOut}){
         <div className="ctrl">
           <span className="livechip">
             <i className={"dot "+(active?"run":watching?"ok":"wait")}/>
-            {active?<><b>{active}</b> analysing now</>:watching?"Watching for new recordings":"Idle"}
+            {active?<><b>{active}</b> analysing now</>:watching&&watchingN?`Watching ${watchingN} project${watchingN===1?"":"s"}`:"Idle"}
           </span>
           {watching
             ? <button className="btn" disabled={busy} onClick={pauseWatch}><Pause s={14}/> Pause watching</button>
@@ -1326,7 +1457,7 @@ function App({user,onSignOut}){
       <div className="tabline"/>
 
       {runId&&<RunDetail id={runId} onLog={openLogPath} onBack={()=>{location.hash=tab;}}/>}
-      {!runId&&tab==="dashboard"&&<Dashboard/>}
+      {!runId&&tab==="dashboard"&&<Dashboard user={user} goSettings={()=>pickTab("settings")}/>}
       {!runId&&tab==="progress"&&<>
         <div className="tally rise" style={{"--i":1}}>
           {[["wait","Waiting"],["run","Analysing"],["done","Done"],["bad","Need attention"]].map(([k,l])=>(
@@ -1342,9 +1473,10 @@ function App({user,onSignOut}){
                   onWells={onWells} onLog={onLog} onAgain={onAgain} onHold={onHold} onResume={onResume}
                   feed={feed} goAdd={()=>setTab("add")}/>
       </>}
-      {!runId&&tab==="add"&&<AddRecordings cfg={cfg} toast={toast} ask={ask} onQueued={()=>{refresh(true);setTab("progress");}}/>}
+      {!runId&&tab==="add"&&<AddRecordings projects={projects} toast={toast} ask={ask} onQueued={()=>{refresh(true);setTab("progress");}}/>}
       {!runId&&tab==="reports"&&<AiReport cfg={cfg} reports={reports} toast={toast}/>}
-      {!runId&&tab==="settings"&&<Settings cfg={cfg} setCfg={setCfg} schema={schema} locked={active>0} onSave={save} busy={busy} toast={toast}/>}
+      {!runId&&tab==="settings"&&<Settings cfg={cfg} setCfg={setCfg} schema={schema} locked={active>0} onSave={save} busy={busy} toast={toast}
+                                            ask={ask} user={user} projects={projects} watching={watching} onProjects={()=>refresh(true)}/>}
 
       <div className="foot"><span>Orchestration-MEA</span><span>·</span><span>recordings are only ever read, never changed</span></div>
 

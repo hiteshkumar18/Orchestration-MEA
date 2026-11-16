@@ -62,7 +62,7 @@ from mea_repo import (  # noqa: E402
 import native_picker  # noqa: E402
 from watcher import (  # noqa: E402
     JobConfig, Watcher, DEFAULT_WORK_DIR, JOB_LABELS,
-    has_finished_marker, list_h5,
+    check_watch_folder, has_finished_marker, list_h5, path_is_within, same_path,
 )
 import handoff  # noqa: E402
 from accounts import Accounts  # noqa: E402
@@ -231,11 +231,20 @@ def get_watcher() -> Watcher:
     return _watcher
 
 
+def get_watcher_unlocked() -> Watcher:
+    """get_watcher() for a caller already holding _watcher_lock."""
+    global _watcher
+    if _watcher is None:
+        _watcher = Watcher(load_job_config(), on_event=_record_event)
+    return _watcher
+
+
 # --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #
 class ConfigPayload(BaseModel):
-    watch_dir: str = ""
+    # The watched projects are not part of this: they have their own calls
+    # (/api/projects/...), so they can change while analyses run.
     driver_options: dict[str, Any] = {}
     h5_glob: str = "data.raw.h5"
     assay_subfolder: str = "Network"
@@ -329,13 +338,11 @@ def api_get_config():
     env = _runtime_env()
     # First run inside a container: prefill the mount points so nobody types
     # host paths that don't exist in here.
-    if not cfg.watch_dir and env["suggested_input"]:
-        cfg.watch_dir = env["suggested_input"]
     if not cfg.driver_options.get("output_dir") and env["suggested_output"]:
         cfg.driver_options["output_dir"] = env["suggested_output"]
     return {
         "env": env,
-        "watch_dir": cfg.watch_dir,
+        "watch_dirs": cfg.watch_dirs,
         "driver_options": cfg.driver_options,
         "h5_glob": cfg.h5_glob,
         "assay_subfolder": cfg.assay_subfolder,
@@ -393,7 +400,6 @@ def api_set_config(payload: ConfigPayload, request: Request):
     opts.update(payload.driver_options)
 
     cfg = JobConfig(
-        watch_dir=payload.watch_dir,
         driver_options=opts,
         h5_glob=payload.h5_glob,
         assay_subfolder=payload.assay_subfolder,
@@ -437,9 +443,13 @@ def api_set_config(payload: ConfigPayload, request: Request):
     if errors:
         raise HTTPException(400, {"errors": errors})
 
-    cfg.save(CONFIG_PATH)
     global _watcher
     with _watcher_lock:
+        # The watched projects can change while this request runs (they have
+        # their own calls, under this lock): take them as they are now.
+        if _watcher is not None:
+            cfg.watch_dirs = [dict(e) for e in _watcher.cfg.watch_dirs]
+        cfg.save(CONFIG_PATH)
         # Stop the old one first. Replacing the reference does not stop its
         # scan loop: that thread keeps walking the watch directory and keeps
         # its own StateStore, so the process ends up with two watchers writing
@@ -468,7 +478,7 @@ def api_set_config(payload: ConfigPayload, request: Request):
             LOG.info("Dry run disabled — cleared %d detected run(s) for real analysis", cleared)
 
     _audit(request, "saved the settings",
-           f"recordings {cfg.watch_dir or '—'}; results {cfg.output_dir or '—'}; "
+           f"results {cfg.output_dir or '—'}; "
            f"analyses {', '.join(cfg.enabled_jobs()) or 'none'}")
     return {"ok": True, "saved_to": str(CONFIG_PATH), "cleared_detected": cleared}
 
@@ -571,8 +581,9 @@ def api_preview(payload: ConfigPayload):
 
     opts = default_options()
     opts.update(payload.driver_options)
+    live = get_watcher()
     cfg = JobConfig(
-        watch_dir=payload.watch_dir,
+        watch_dirs=live.cfg.watch_dirs,
         driver_options=opts,
         h5_glob=payload.h5_glob,
         assay_subfolder=payload.assay_subfolder,
@@ -595,19 +606,22 @@ def api_preview(payload: ConfigPayload):
     # Never walk the whole input tree to draw a preview. Reuse what the live
     # watcher already found for the same folder; otherwise look at one
     # recording folder, which is all an example command needs.
-    live = get_watcher()
     candidates: list = []
-    if live.cfg.watch_dir == cfg.watch_dir and live._cand_cache:
+    if live._cand_cache:
         candidates = list(live._cand_cache[1])
-    elif cfg.watch_dir and Path(cfg.watch_dir).is_dir():
-        for child in sorted(Path(cfg.watch_dir).iterdir()):
-            if child.is_dir() and not child.name.startswith("."):
-                jobs = probe.jobs_for(child)
-                if jobs:
-                    candidates = [(child, jobs)]
-                    break
+    else:
+        for root in cfg.watched():
+            if candidates or not root.is_dir():
+                continue
+            for child in sorted(root.iterdir()):
+                if child.is_dir() and not child.name.startswith("."):
+                    jobs = probe.jobs_for(child)
+                    if jobs:
+                        candidates = [(child, jobs)]
+                        break
+    first = cfg.watched()
     sample, jobs = (candidates[0] if candidates
-                    else (Path(payload.watch_dir or "/path/to") / "000000",
+                    else ((first[0] if first else Path("/path/to/project")) / "000000",
                           cfg.enabled_jobs()))
 
     commands = [
@@ -635,14 +649,15 @@ def api_start(request: Request, hold_interrupted: bool = False):
     ``hold_interrupted`` asks for them to be put on hold first. Dates found
     while watching are recorded as started by whoever started watching."""
     watcher = get_watcher()
-    errors = watcher.cfg.validate()
+    errors = watcher.cfg.validate_watching()
     if errors:
         raise HTTPException(400, {"errors": errors})
     was = watcher.is_running
     watcher.start(hold_interrupted=hold_interrupted, user=_user(request))
     if not was:
         _audit(request, "started watching for new recordings",
-               watcher.cfg.watch_dir + (" (interrupted dates kept on hold)" if hold_interrupted else ""))
+               ", ".join(r.name for r in watcher.cfg.watched())
+               + (" (interrupted dates kept on hold)" if hold_interrupted else ""))
     return {"ok": True, "running": watcher.is_running}
 
 
@@ -664,6 +679,132 @@ def api_stop(request: Request, cancel_running: bool = False):
     watcher.stop()
     _audit(request, "paused watching")
     return {"ok": True, "running": watcher.is_running, "cancelled": 0}
+
+
+# --------------------------------------------------------------------------- #
+# Routes — watched projects
+# --------------------------------------------------------------------------- #
+class ProjectPayload(BaseModel):
+    path: str
+    paused: Optional[bool] = None
+
+
+def _project_problems(cfg: JobConfig, path: str) -> list[str]:
+    """Why a folder cannot be added to the watched projects."""
+    problems = []
+    for e in cfg.watch_dirs:
+        if same_path(e["path"], path):
+            problems.append(f"{Path(path).name} is already being watched"
+                            + (f" (added by {e['added_by']})" if e.get("added_by") else "")
+                            + (" — it is paused; resume it instead" if e.get("paused") else "") + ".")
+        elif path_is_within(path, e["path"]):
+            problems.append(f"This folder is inside {e['path']}, which is already watched.")
+        elif path_is_within(e["path"], path):
+            problems.append(f"This folder contains {e['path']}, which is already watched.")
+    # Recordings are only read: nothing written or deleted may overlap them.
+    for name, w in cfg.write_paths().items():
+        if w and (path_is_within(w, path) or path_is_within(path, w)):
+            problems.append(f"The {name.lower()} ({w}) overlaps this folder. Recordings are "
+                            "read-only, so it cannot be inside a watched project, nor the "
+                            "other way round.")
+    return problems
+
+
+def _changed_projects(watcher: Watcher) -> None:
+    watcher.cfg.save(CONFIG_PATH)
+    watcher.forget_candidates()
+    watcher.candidate_runs()          # list the folders again, in the background
+
+
+@app.get("/api/projects")
+def api_projects():
+    return {"projects": get_watcher().projects_status()}
+
+
+@app.post("/api/projects/check")
+def api_project_check(payload: ProjectPayload):
+    """What a folder is, before adding it: a project, the lab folder, the
+    outer project folder or a date. Only lists folders."""
+    cfg = get_watcher().cfg
+    res = check_watch_folder(payload.path)
+    problems = _project_problems(cfg, payload.path) if res["kind"] != "missing" else []
+    return {**res, "path": payload.path, "problems": problems,
+            "ok": res["ok"] and not problems}
+
+
+@app.post("/api/projects/add")
+def api_project_add(payload: ProjectPayload, request: Request):
+    """Watch another project. Allowed while analyses run: its dates join the
+    same queue."""
+    path = payload.path.strip().rstrip("/")
+    res = check_watch_folder(path)
+    with _watcher_lock:
+        watcher = get_watcher_unlocked()
+        problems = ([] if not res["ok"] else _project_problems(watcher.cfg, path))
+        if not res["ok"] or problems:
+            raise HTTPException(400, {"errors": [res["say"]] if not res["ok"] else problems,
+                                      "suggestions": res.get("suggestions", [])})
+        entry = watcher.cfg.add_watch(path, _user(request))
+        _changed_projects(watcher)
+    _audit(request, "added a project to watch", f"{Path(path).name} ({path})")
+    return {"ok": True, "project": entry, "check": res}
+
+
+def _owner_note(e: dict, request: Request) -> str:
+    me = (_user(request) or {}).get("email")
+    by = e.get("added_by")
+    return f" — added by {by}" if by and e.get("added_by_email") != me else ""
+
+
+def _forget_waiting(watcher: Watcher, path: str) -> int:
+    """Drop the project's dates that were only waiting for their copy to
+    finish. Nothing else updates them once the project is not watched, and
+    the next scan finds them again when it is."""
+    n = 0
+    for key, e in watcher.state.all().items():
+        if e.get("status") == "waiting" and path_is_within(key.split("::")[0], path):
+            watcher.state.reset(key)
+            n += 1
+    return n
+
+
+@app.post("/api/projects/pause")
+def api_project_pause(payload: ProjectPayload, request: Request):
+    """Stop or resume watching one project. Analyses already queued or
+    running carry on; finished results are untouched."""
+    paused = True if payload.paused is None else payload.paused
+    with _watcher_lock:
+        watcher = get_watcher_unlocked()
+        e = watcher.cfg.watch_entry(payload.path)
+        if e is None:
+            raise HTTPException(404, f"{payload.path} is not a watched project.")
+        if not paused:
+            res = check_watch_folder(e["path"])
+            if res["kind"] == "missing":
+                raise HTTPException(400, res["say"])
+        e["paused"] = paused
+        dropped = _forget_waiting(watcher, e["path"]) if paused else 0
+        _changed_projects(watcher)
+    _audit(request, ("paused" if paused else "resumed") + " watching a project",
+           Path(e["path"]).name + _owner_note(e, request))
+    return {"ok": True, "project": e, "waiting_dropped": dropped}
+
+
+@app.post("/api/projects/remove")
+def api_project_remove(payload: ProjectPayload, request: Request):
+    """Stop watching a project and take it off the list. Its recordings,
+    results and history are not touched, and it can be added again."""
+    with _watcher_lock:
+        watcher = get_watcher_unlocked()
+        e = watcher.cfg.watch_entry(payload.path)
+        if e is None:
+            raise HTTPException(404, f"{payload.path} is not a watched project.")
+        watcher.cfg.watch_dirs.remove(e)
+        dropped = _forget_waiting(watcher, e["path"])
+        _changed_projects(watcher)
+    _audit(request, "removed a project from the watch list",
+           Path(e["path"]).name + _owner_note(e, request))
+    return {"ok": True, "project": e, "waiting_dropped": dropped}
 
 
 @app.get("/api/status")
@@ -711,7 +852,7 @@ def get_monitor() -> SystemMonitor:
                 cfg = w.cfg
                 return {"Output disk": cfg.output_dir or "",
                         "Fast disk": str(w._scratch_root().parent) if cfg.stage_locally else "",
-                        "Recordings (NAS)": cfg.watch_dir or "",
+                        "Recordings (NAS)": str((cfg.watched() or [""])[0]),
                         "Work folder": str(WORK_DIR)}
             _monitor = SystemMonitor(paths, own_pids=lambda: set(get_watcher()._own_pids))
         return _monitor
@@ -830,7 +971,7 @@ def api_overview():
         counts[r.get("status") or "unknown"] = counts.get(r.get("status") or "unknown", 0) + 1
     return {"running": running, "attention": attention, "recent": recent, "counts": counts,
             "watching": snap.get("running"), "active_jobs": snap.get("active_jobs"),
-            "limits": snap.get("limits")}
+            "limits": snap.get("limits"), "projects": snap.get("projects", [])}
 
 
 @app.get("/api/gpu")
@@ -1076,7 +1217,7 @@ def _build_package(pdir: Path, dates: Optional[list[str]], requirements: str,
     prompt = handoff.write_prompt(
         folder, project=pdir.name, dates=res["dates"], network_wells=res["network_wells"],
         activity_runs=res["activity_runs"], built=res["built"], results_dir=str(pdir),
-        input_dir=input_dir or cfg.watch_dir)
+        input_dir=input_dir or cfg.watch_path_for_project(pdir.name))
     return {"project": pdir.name, "dates": res["dates"], "dir": str(folder),
             "prompt": str(prompt), "report": res["report"], "report_dir": str(folder / "report"),
             "built": res["built"], "network_wells": res["network_wells"],

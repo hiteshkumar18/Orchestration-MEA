@@ -238,6 +238,7 @@ const projectOf = folder => {
   return p[p.length - 2] || "";
 };
 const prettyProject = s => (s || "").replace(/_/g, " ");
+const ordinal = n => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
 const ago = iso => {
   if (!iso) return "";
   const t = new Date(iso);
@@ -344,10 +345,13 @@ function plainNote(job) {
     t: "Waiting for the recording to be marked finished",
     k: ""
   };
-  if (/queued — waiting/i.test(d)) return {
-    t: "Waiting for a free slot",
-    k: ""
-  };
+  if (/queued — waiting/i.test(d)) {
+    const n = job.line_position;
+    return {
+      t: n === 1 ? "Next in line for a free slot" : n ? `${ordinal(n)} in line for a free slot` : "Waiting for a free slot",
+      k: ""
+    };
+  }
   m = /^running (.+?) · last log output (.+)$/.exec(d);
   if (m) return {
     t: `Running for ${m[1].replace(/(\d+)h/, "$1 h ").replace(/(\d+)m/, "$1 min")} · last activity ${m[2].replace(/(\d+)m ago/, "$1 min ago").replace(/(\d+)s ago/, "$1 s ago")}`,
@@ -1000,12 +1004,14 @@ function Progress({
   }, l.message)))))));
 }
 function AddRecordings({
-  cfg,
+  projects,
   toast,
   ask,
   onQueued
 }) {
-  const [dir, setDir] = useState(cfg.watch_dir || "");
+  const watched = (projects || []).filter(p => p.exists !== false);
+  const first = (watched.find(p => !p.paused) || watched[0])?.path || "";
+  const [dir, setDir] = useState(first);
   const [entries, setEntries] = useState(null);
   const [info, setInfo] = useState({});
   const [sel, setSel] = useState({});
@@ -1052,8 +1058,8 @@ function AddRecordings({
     }
   }, [toast]);
   useEffect(() => {
-    if (cfg.watch_dir) load(cfg.watch_dir);
-  }, [cfg.watch_dir, load]);
+    if (first) load(first);
+  }, [first, load]);
   const done = p => {
     const j = info[p]?.jobs || [];
     return j.length > 0 && j.every(x => x.analysed);
@@ -1130,7 +1136,20 @@ function AddRecordings({
     style: {
       wordBreak: "break-all"
     }
-  }, dir || "—")), React.createElement("button", {
+  }, dir || "— add a project to watch under Settings, or look somewhere else")), watched.length > 1 && React.createElement("select", {
+    className: "sel",
+    "aria-label": "Watched project",
+    style: {
+      maxWidth: 280
+    },
+    value: watched.some(p => p.path === dir) ? dir : "",
+    onChange: e => e.target.value && load(e.target.value)
+  }, !watched.some(p => p.path === dir) && React.createElement("option", {
+    value: ""
+  }, "Another folder"), watched.map(p => React.createElement("option", {
+    key: p.path,
+    value: p.path
+  }, prettyProject(p.name)))), React.createElement("button", {
     className: "btn sm",
     onClick: () => setBrowse(b => !b)
   }, browse ? "Close" : "Look somewhere else"), React.createElement("button", {
@@ -1491,6 +1510,298 @@ function AiReport({
     })
   }, last.error)))))));
 }
+const projCounts = c => {
+  c = c || {};
+  const n = (...k) => k.reduce((a, x) => a + (c[x] || 0), 0);
+  return {
+    wait: n("waiting", "interrupted", "held", "detected"),
+    line: n("dispatched", "queued"),
+    run: n("running"),
+    done: n("done"),
+    bad: n("failed")
+  };
+};
+function ProjectRow({
+  p,
+  watching,
+  user,
+  acts,
+  busy,
+  onPause,
+  onRemove
+}) {
+  const c = projCounts(p.counts);
+  const st = p.exists === false ? ["Folder missing", "bad"] : p.paused ? ["Paused", "wait"] : watching ? ["Watching", "ok"] : ["Not watching yet", "queue"];
+  return React.createElement("div", {
+    className: "wp",
+    "data-paused": !!p.paused
+  }, React.createElement("div", {
+    style: {
+      minWidth: 0
+    }
+  }, React.createElement("div", {
+    className: "wp-n"
+  }, React.createElement("span", {
+    className: "proj-n"
+  }, prettyProject(p.name)), React.createElement("span", {
+    className: "stamp " + st[1]
+  }, st[0])), React.createElement("div", {
+    className: "mono hint-s wp-p"
+  }, p.path), React.createElement("div", {
+    className: "hint-s"
+  }, p.added_by ? `added by ${p.added_by}${p.added_by_email === user?.email ? " (you)" : ""}${p.added_at ? ` · ${whenStarted(p.added_at)}` : ""}` : "added before projects were listed by person", p.last_checked && !p.paused ? ` · checked ${ago(p.last_checked)}` : ""), React.createElement("div", {
+    className: "wp-c"
+  }, React.createElement("span", null, p.dates_found == null ? p.paused ? "" : "listing its dates…" : React.createElement(React.Fragment, null, React.createElement("b", null, p.dates_found), " date", p.dates_found === 1 ? "" : "s", " found")), c.wait > 0 && React.createElement("span", null, React.createElement("b", null, c.wait), " waiting"), c.line > 0 && React.createElement("span", null, React.createElement("b", null, c.line), " in line"), c.run > 0 && React.createElement("span", null, React.createElement("b", null, c.run), " analysing"), c.done > 0 && React.createElement("span", null, React.createElement("b", null, c.done), " done"), c.bad > 0 && React.createElement("span", {
+    style: {
+      color: "var(--red)"
+    }
+  }, React.createElement("b", null, c.bad), " need", c.bad === 1 ? "s" : "", " attention"))), acts && React.createElement("div", {
+    className: "acts"
+  }, p.paused ? React.createElement("button", {
+    className: "btn sm",
+    disabled: busy,
+    onClick: () => onPause(p, false)
+  }, React.createElement(Play, {
+    s: 11
+  }), " Resume") : React.createElement("button", {
+    className: "btn sm",
+    disabled: busy,
+    onClick: () => onPause(p, true)
+  }, React.createElement(Pause, {
+    s: 14
+  }), " Pause"), React.createElement("button", {
+    className: "btn ghost sm",
+    disabled: busy,
+    onClick: () => onRemove(p)
+  }, React.createElement(X, {
+    s: 13
+  }), " Remove")));
+}
+function WatchedProjects({
+  projects,
+  user,
+  toast,
+  ask,
+  onChange,
+  watching
+}) {
+  const [path, setPath] = useState("");
+  const [br, setBr] = useState(false);
+  const [chk, setChk] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const list = projects || [];
+  const check = async p => {
+    p = (p ?? path).trim();
+    if (!p) return;
+    setPath(p);
+    setBusy(true);
+    try {
+      setChk(await api("/api/projects/check", {
+        method: "POST",
+        body: JSON.stringify({
+          path: p
+        })
+      }));
+    } catch (e) {
+      setChk({
+        ok: false,
+        say: e.message,
+        suggestions: [],
+        problems: []
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const add = async p => {
+    setBusy(true);
+    try {
+      await api("/api/projects/add", {
+        method: "POST",
+        body: JSON.stringify({
+          path: p
+        })
+      });
+      toast(`Watching ${prettyProject(p.replace(/\/+$/, "").split("/").pop())}`, watching ? "Its new dates join the queue once they finish copying." : "Press “Watch for new” at the top to start watching.");
+      setPath("");
+      setChk(null);
+      setBr(false);
+      onChange();
+    } catch (e) {
+      toast("Not added", e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const whose = p => p.added_by && p.added_by_email !== user?.email ? `${p.added_by} added this project. ` : "";
+  const pause = async (p, v) => {
+    if (v && !(await ask({
+      title: `Pause ${prettyProject(p.name)}?`,
+      ok: "Pause watching it",
+      body: whose(p) + "New dates in it will not be picked up until it is resumed. Dates already in line or " + "analysing carry on, and finished results are not touched."
+    }))) return;
+    setBusy(true);
+    try {
+      await api("/api/projects/pause", {
+        method: "POST",
+        body: JSON.stringify({
+          path: p.path,
+          paused: v
+        })
+      });
+      toast(v ? "Paused" : "Watching again", prettyProject(p.name));
+      onChange();
+    } catch (e) {
+      toast("That didn’t work", e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async p => {
+    if (!(await ask({
+      title: `Stop watching ${prettyProject(p.name)}?`,
+      danger: !!whose(p),
+      ok: "Remove from the list",
+      body: whose(p) + "It is taken off the list and its new dates are no longer picked up. Nothing is deleted: " + "its recordings, results and history stay as they are, and it can be added again. " + "Dates already in line or analysing carry on."
+    }))) return;
+    setBusy(true);
+    try {
+      await api("/api/projects/remove", {
+        method: "POST",
+        body: JSON.stringify({
+          path: p.path
+        })
+      });
+      toast("Removed from the list", prettyProject(p.name));
+      onChange();
+    } catch (e) {
+      toast("That didn’t work", e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const name = s => prettyProject((s || "").replace(/\/+$/, "").split("/").pop());
+  return React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Watched projects"), React.createElement("div", {
+    className: "sec-d"
+  }, "New dates in these folders are analysed automatically, one at a time, in the order they finish copying. Anyone can add a project; each date is credited to whoever added its project.")), React.createElement("div", {
+    className: "ledger",
+    style: {
+      marginBottom: 12
+    }
+  }, list.length === 0 ? React.createElement("div", {
+    className: "empty"
+  }, React.createElement("div", {
+    className: "empty-t"
+  }, "No projects are being watched"), React.createElement("div", {
+    className: "empty-d"
+  }, "Add the project folder that holds the recording dates, below.")) : list.map(p => React.createElement(ProjectRow, {
+    key: p.path,
+    p: p,
+    watching: watching,
+    user: user,
+    acts: true,
+    busy: busy,
+    onPause: pause,
+    onRemove: remove
+  }))), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("div", {
+    className: "f",
+    style: {
+      marginBottom: 0
+    }
+  }, React.createElement("label", {
+    className: "f-l",
+    htmlFor: "wp-in"
+  }, "Watch another project"), React.createElement("div", {
+    className: "f-row"
+  }, React.createElement("input", {
+    id: "wp-in",
+    className: "inp mono",
+    placeholder: "/mnt/\u2026/BenShalomLab/<project>/<project>",
+    value: path,
+    onChange: e => {
+      setPath(e.target.value);
+      setChk(null);
+    },
+    onKeyDown: e => e.key === "Enter" && check()
+  }), React.createElement("button", {
+    className: "btn",
+    onClick: () => setBr(b => !b)
+  }, React.createElement(Folder, {
+    s: 15
+  }), " Choose"), React.createElement("button", {
+    className: "btn ink",
+    disabled: busy || !path.trim(),
+    onClick: () => check()
+  }, busy ? React.createElement("span", {
+    className: "spin"
+  }) : null, " Check")), React.createElement("span", {
+    className: "hint-s"
+  }, "The project folder whose folders are the recording dates (like 260929). It is only ever read, never changed."), br && React.createElement(Browser, {
+    initial: path,
+    onClose: () => setBr(false),
+    onPick: p => check(p)
+  })), chk && React.createElement("div", {
+    style: {
+      marginTop: 14
+    }
+  }, React.createElement(Callout, {
+    kind: chk.ok ? chk.kind === "other" ? "amber" : "green" : "amber",
+    icon: chk.ok ? React.createElement(Check, {
+      s: 17
+    }) : React.createElement(Alert, {
+      s: 17
+    })
+  }, chk.say, (chk.problems || []).map((x, i) => React.createElement("div", {
+    key: i,
+    style: {
+      marginTop: 4
+    }
+  }, x))), chk.ok && React.createElement("div", {
+    style: {
+      marginTop: 10
+    }
+  }, React.createElement("button", {
+    className: "btn ink",
+    disabled: busy,
+    onClick: () => add(chk.path)
+  }, React.createElement(Play, {
+    s: 12
+  }), " Watch ", name(chk.path))), !chk.ok && (chk.suggestions || []).length > 0 && React.createElement("div", {
+    className: "sugg"
+  }, chk.suggestions.map(s => React.createElement("div", {
+    key: s,
+    className: "sugg-i"
+  }, React.createElement("div", {
+    style: {
+      minWidth: 0
+    }
+  }, React.createElement("b", null, name(s)), React.createElement("div", {
+    className: "mono-s"
+  }, s)), React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, list.some(p => p.path === s) ? React.createElement("span", {
+    className: "hint-s"
+  }, "already watched") : React.createElement("button", {
+    className: "btn sm ink",
+    disabled: busy,
+    onClick: () => add(s)
+  }, React.createElement(Play, {
+    s: 11
+  }), " Watch this one")))))))));
+}
 function Field({
   spec,
   value,
@@ -1565,7 +1876,12 @@ function Settings({
   locked,
   onSave,
   busy,
-  toast
+  toast,
+  ask,
+  user,
+  projects,
+  watching,
+  onProjects
 }) {
   const [br, setBr] = useState(null);
   const [q, setQ] = useState("");
@@ -1622,42 +1938,24 @@ function Settings({
     icon: React.createElement(Alert, {
       s: 17
     })
-  }, React.createElement("b", null, "Settings are locked while analyses are running."), " Changing them now could disturb the running work. They unlock as soon as the current analyses finish.")), React.createElement("div", {
+  }, React.createElement("b", null, "Settings are locked while analyses are running."), " Changing them now could disturb the running work. They unlock as soon as the current analyses finish.")), React.createElement(WatchedProjects, {
+    projects: projects,
+    user: user,
+    toast: toast,
+    ask: ask,
+    onChange: onProjects,
+    watching: watching
+  }), React.createElement("div", {
     className: "sec"
   }, React.createElement("div", {
     className: "sec-h"
   }, React.createElement("div", {
     className: "sec-t"
-  }, "Where things are")), React.createElement("div", {
+  }, "Where results go")), React.createElement("div", {
     className: "card"
   }, React.createElement("div", {
     className: "card-b"
   }, React.createElement("div", {
-    className: "f"
-  }, React.createElement("label", {
-    className: "f-l",
-    htmlFor: "in"
-  }, "Recordings come from"), React.createElement("div", {
-    className: "f-row"
-  }, React.createElement("input", {
-    id: "in",
-    className: "inp mono",
-    value: cfg.watch_dir,
-    disabled: locked,
-    onChange: e => setT("watch_dir", e.target.value)
-  }), React.createElement("button", {
-    className: "btn",
-    disabled: locked,
-    onClick: () => setBr(br === "in" ? null : "in")
-  }, React.createElement(Folder, {
-    s: 15
-  }), " Choose")), React.createElement("span", {
-    className: "hint-s"
-  }, "The project folder that contains the date folders. It is only ever read, never changed."), br === "in" && React.createElement(Browser, {
-    initial: cfg.watch_dir,
-    onClose: () => setBr(null),
-    onPick: p => setT("watch_dir", p)
-  })), React.createElement("div", {
     className: "f",
     style: {
       marginBottom: 0
@@ -2337,7 +2635,10 @@ function HistoryTable({
     onClick: () => setLimit(l => l + 50)
   }, "Show more")));
 }
-function Dashboard() {
+function Dashboard({
+  user,
+  goSettings
+}) {
   const [ov, setOv] = useState(null);
   const [sys, setSys] = useState(null);
   useEffect(() => {
@@ -2358,15 +2659,38 @@ function Dashboard() {
   });
   const lim = ov.limits || {},
     act = ov.active_jobs || {};
+  const projs = ov.projects || [],
+    on = projs.filter(p => !p.paused);
   return React.createElement("div", {
     className: "rise"
   }, React.createElement("div", {
     className: "slots"
   }, React.createElement("span", {
-    className: "dot " + (ov.watching ? "ok" : "wait")
-  }), ov.watching ? "Watching for new recordings" : "Not watching for new recordings", React.createElement("span", {
+    className: "dot " + (ov.watching && on.length ? "ok" : "wait")
+  }), ov.watching && on.length ? `Watching ${on.length} project${on.length === 1 ? "" : "s"} for new recordings` : "Not watching for new recordings", React.createElement("span", {
     className: "hint-s"
   }, "\xB7 Network analyses running ", act.network || 0, " of ", lim.network || 1, " \xB7 Activity scans ", act.activity || 0, " of ", lim.activity || 1)), React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Watched projects"), React.createElement("div", {
+    className: "sec-d"
+  }, projs.length ? "New dates in these folders are analysed automatically, one at a time, first come first served" : "None yet"), React.createElement("button", {
+    className: "btn sm",
+    style: {
+      marginLeft: "auto"
+    },
+    onClick: goSettings
+  }, projs.length ? "Add or change" : "Add a project")), projs.length > 0 && React.createElement("div", {
+    className: "ledger"
+  }, projs.map(p => React.createElement(ProjectRow, {
+    key: p.path,
+    p: p,
+    watching: !!ov.watching,
+    user: user
+  })))), React.createElement("div", {
     className: "sec"
   }, React.createElement("div", {
     className: "sec-h"
@@ -3079,6 +3403,8 @@ function App({
   const runs = status?.runs || [];
   const active = (status?.active_jobs?.network || 0) + (status?.active_jobs?.activity || 0);
   const watching = !!status?.running;
+  const projects = status?.projects || cfg.watch_dirs || [];
+  const watchingN = projects.filter(p => !p.paused).length;
   const tally = {
     wait: folders.filter(f => ["dispatched", "waiting", "interrupted", "detected", "held"].includes(folderState(f.jobs))).length,
     run: folders.filter(f => folderState(f.jobs) === "running").length,
@@ -3086,7 +3412,6 @@ function App({
     bad: folders.filter(f => folderState(f.jobs) === "failed").length
   };
   const payload = () => ({
-    watch_dir: cfg.watch_dir,
     driver_options: cfg.driver_options,
     h5_glob: cfg.h5_glob,
     assay_subfolder: cfg.assay_subfolder,
@@ -3140,6 +3465,11 @@ function App({
     return `${d.big} ${d.year}`;
   }).join(", ");
   const startWatch = async () => {
+    if (!watchingN) {
+      toast(projects.length ? "Every project is paused" : "No project to watch", projects.length ? "Resume a project under Settings → Watched projects." : "Add one under Settings → Watched projects.", "error");
+      pickTab("settings");
+      return;
+    }
     const intr = folders.filter(f => f.jobs.some(j => j.status === "interrupted"));
     let hold = false;
     if (intr.length) {
@@ -3302,7 +3632,7 @@ function App({
     className: "livechip"
   }, React.createElement("i", {
     className: "dot " + (active ? "run" : watching ? "ok" : "wait")
-  }), active ? React.createElement(React.Fragment, null, React.createElement("b", null, active), " analysing now") : watching ? "Watching for new recordings" : "Idle"), watching ? React.createElement("button", {
+  }), active ? React.createElement(React.Fragment, null, React.createElement("b", null, active), " analysing now") : watching && watchingN ? `Watching ${watchingN} project${watchingN === 1 ? "" : "s"}` : "Idle"), watching ? React.createElement("button", {
     className: "btn",
     disabled: busy,
     onClick: pauseWatch
@@ -3346,7 +3676,10 @@ function App({
     onBack: () => {
       location.hash = tab;
     }
-  }), !runId && tab === "dashboard" && React.createElement(Dashboard, null), !runId && tab === "progress" && React.createElement(React.Fragment, null, React.createElement("div", {
+  }), !runId && tab === "dashboard" && React.createElement(Dashboard, {
+    user: user,
+    goSettings: () => pickTab("settings")
+  }), !runId && tab === "progress" && React.createElement(React.Fragment, null, React.createElement("div", {
     className: "tally rise",
     style: {
       "--i": 1
@@ -3387,7 +3720,7 @@ function App({
     feed: feed,
     goAdd: () => setTab("add")
   })), !runId && tab === "add" && React.createElement(AddRecordings, {
-    cfg: cfg,
+    projects: projects,
     toast: toast,
     ask: ask,
     onQueued: () => {
@@ -3405,7 +3738,12 @@ function App({
     locked: active > 0,
     onSave: save,
     busy: busy,
-    toast: toast
+    toast: toast,
+    ask: ask,
+    user: user,
+    projects: projects,
+    watching: watching,
+    onProjects: () => refresh(true)
   }), React.createElement("div", {
     className: "foot"
   }, React.createElement("span", null, "Orchestration-MEA"), React.createElement("span", null, "\xB7"), React.createElement("span", null, "recordings are only ever read, never changed")), log && React.createElement(LogDrawer, {
