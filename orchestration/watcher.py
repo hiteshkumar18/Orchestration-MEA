@@ -993,6 +993,9 @@ class Watcher:
         # order but does not promise it (a job arriving just as a slot frees
         # can go first), and cannot say where in line a job is.
         self._line: dict[str, list[str]] = {JOB_NETWORK: [], JOB_ACTIVITY: []}
+        # Priority runs: in line ahead of every regular run, first come first
+        # served among themselves. Nothing running is stopped for them.
+        self._priority: set[str] = set()
         self._line_cv = threading.Condition()
         self._active: dict[str, int] = {JOB_NETWORK: 0, JOB_ACTIVITY: 0}
         self._preexisting: set[str] = set()
@@ -1881,7 +1884,7 @@ class Watcher:
         return {"started_by": user.get("name"), "started_by_email": user.get("email")}
 
     def dispatch(self, run_dir: Path, job: str = JOB_NETWORK, detail: str = "",
-                 user: Optional[dict] = None) -> None:
+                 user: Optional[dict] = None, priority: bool = False) -> None:
         """Start one analysis of one folder. `user` started it by hand; a
         date the scan loop found is started by whoever is watching."""
         key = self.state_key(run_dir.resolve(), job)
@@ -1909,8 +1912,13 @@ class Watcher:
         LOG.info("Dispatching %s [%s]:\n    %s", run_dir.name, label, printable)
 
         common = {"job": job, "job_label": label, "run": run_dir.name,
-                  "command": printable, "detail": detail,
+                  "command": printable, "detail": detail, "priority": bool(priority),
                   "output_dir": self.cfg.result_dir_for(run_dir, job), **who}
+        with self._line_cv:
+            if priority:
+                self._priority.add(key)
+            else:
+                self._priority.discard(key)
 
         if self.cfg.dry_run:
             self.state.update(key, status="detected", detected_at=_now(), **{
@@ -2753,9 +2761,41 @@ class Watcher:
 
     def _join_line(self, job: str, key: str) -> None:
         with self._line_cv:
-            line = self._line.setdefault(job, [])
-            if key not in line:
-                line.append(key)
+            self._place_in_line(self._line.setdefault(job, []), key)
+
+    def _place_in_line(self, line: list[str], key: str) -> None:
+        """Put `key` in line: a regular run at the back, a priority run behind
+        the priority runs already waiting. Called holding _line_cv."""
+        if key in line:
+            return
+        if key in self._priority:
+            at = next((i for i, k in enumerate(line) if k not in self._priority), len(line))
+            line.insert(at, key)
+        else:
+            line.append(key)
+
+    def set_priority(self, keys: list[str], on: bool) -> list[str]:
+        """Make waiting runs priority (or regular again) and move them in
+        line. Returns the keys that changed. Runs already started, or already
+        handed to the cluster, are left as they are."""
+        changed: list[str] = []
+        with self._line_cv:
+            for key in keys:
+                job = key.rsplit("::", 1)[-1]
+                line = self._line.get(job, [])
+                if key not in line or (key in self._priority) == on:
+                    continue
+                line.remove(key)
+                if on:
+                    self._priority.add(key)
+                else:
+                    self._priority.discard(key)
+                self._place_in_line(line, key)
+                changed.append(key)
+            self._line_cv.notify_all()
+        for key in changed:
+            self.state.update(key, priority=on)
+        return changed
 
     def _leave_line(self, job: str, key: str) -> None:
         with self._line_cv:
@@ -2771,8 +2811,7 @@ class Watcher:
         deadline = time.time() + timeout
         with self._line_cv:
             line = self._line.setdefault(job, [])
-            if key not in line:
-                line.append(key)
+            self._place_in_line(line, key)
             while True:
                 if line and line[0] == key and slot.acquire(blocking=False):
                     line.pop(0)
@@ -3550,7 +3589,7 @@ class Watcher:
 
     def queue_folders(self, paths: list[str], rerun: bool = False,
                       on_complete: Optional[Callable[[dict], None]] = None,
-                      user: Optional[dict] = None) -> dict:
+                      user: Optional[dict] = None, priority: bool = False) -> dict:
         """Queue folders for analysis, and track them as one batch.
 
         Folders already analysed are skipped unless `rerun` is asked for: a
@@ -3561,11 +3600,11 @@ class Watcher:
         """
         self.place_report_instructions()
         with self._queue_lock:
-            return self._queue_folders(paths, rerun, on_complete, user)
+            return self._queue_folders(paths, rerun, on_complete, user, priority)
 
     def _queue_folders(self, paths: list[str], rerun: bool,
                        on_complete: Optional[Callable[[dict], None]],
-                       user: Optional[dict]) -> dict:
+                       user: Optional[dict], priority: bool = False) -> dict:
         batch_id = f"batch-{int(time.time())}-{len(self._batches) + 1}"
         queued: list[dict] = []
         skipped: list[dict] = []
@@ -3621,7 +3660,8 @@ class Watcher:
             LOG.info("Queued %d job(s) as %s: %s", len(queued), batch_id,
                      ", ".join(sorted({q["name"] for q in queued})))
             for q in queued:
-                self.dispatch(Path(q["path"]), q["job"], detail="queued by hand", user=user)
+                self.dispatch(Path(q["path"]), q["job"], user=user, priority=priority,
+                              detail="queued by hand" + (" as priority" if priority else ""))
 
         return {"batch": batch_id if queued else None,
                 "queued": queued, "skipped": skipped}
