@@ -357,6 +357,23 @@ function plainNote(job) {
     t: `Running for ${m[1].replace(/(\d+)h/, "$1 h ").replace(/(\d+)m/, "$1 min")} · last activity ${m[2].replace(/(\d+)m ago/, "$1 min ago").replace(/(\d+)s ago/, "$1 s ago")}`,
     k: ""
   };
+  m = /^waiting in the cluster queue(?: \((.+)\))?/.exec(d);
+  if (m) return {
+    t: "Waiting for a free computer in the lab cluster" + (m[1] && !/^(Priority|None)$/.test(m[1]) ? ` (${m[1] === "Resources" ? "all busy" : m[1]})` : ""),
+    k: ""
+  };
+  if (/^sending to the cluster/.test(d)) return {
+    t: "Sending to the lab cluster…",
+    k: ""
+  };
+  if (/^copying (earlier )?results (from|for) the cluster/.test(d)) return {
+    t: /earlier/.test(d) ? "Copying earlier results for the cluster…" : "Copying results back from the cluster…",
+    k: ""
+  };
+  if (/^analysing on /.test(d)) return {
+    t: "Analysing on " + d.slice(13),
+    k: ""
+  };
   if (/staged on local disk/i.test(d)) return {
     t: "Working on the fast local disk",
     k: ""
@@ -851,7 +868,9 @@ function Line({
     className: "say"
   }, React.createElement("span", {
     className: "stamp " + ji.k
-  }, ji.say), busy && sum?.wells > 0 && React.createElement("span", {
+  }, ji.say), busy && net?.worker && React.createElement("span", {
+    className: "note-l"
+  }, "on ", net.worker), busy && sum?.wells > 0 && React.createElement("span", {
     className: "note-l"
   }, sum.complete, " wells finished so far"), (refined || note) && React.createElement("span", {
     className: "note-l " + (refined || note).k
@@ -1802,6 +1821,281 @@ function WatchedProjects({
     s: 11
   }), " Watch this one")))))))));
 }
+const LAB_NODES = [{
+  node: "benshalom-labtower1",
+  python: "/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python3",
+  mea_repo: "/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis",
+  nas: "/mnt/benshalom-nas"
+}, {
+  node: "benshalom-labtower2",
+  python: "/mnt/Vol20tb1/hitesh/MEA-Analysis/.venv/bin/python3",
+  mea_repo: "/mnt/Vol20tb1/hitesh/MEA-Analysis",
+  nas: "/mnt/benshalom-nas"
+}, {
+  node: "BenShalomLabServer",
+  python: "/mnt/harddrive-2/mea-bench/MEA-Analysis/.venv/bin/python3",
+  mea_repo: "/mnt/harddrive-2/mea-bench/MEA-Analysis",
+  nas: "/mnt/ben-shalom_nas"
+}];
+function ClusterSettings({
+  cfg,
+  setT,
+  locked,
+  toast,
+  sorting
+}) {
+  const [chk, setChk] = useState(null);
+  const on = cfg.executor === "slurm";
+  const nodes = cfg.slurm_nodes || [];
+  const setNode = (i, k, v) => setT("slurm_nodes", nodes.map((n, j) => j === i ? {
+    ...n,
+    [k]: v
+  } : n));
+  const check = async () => {
+    setChk({
+      checking: true
+    });
+    try {
+      setChk(await api("/api/cluster/check", {
+        method: "POST",
+        body: JSON.stringify({
+          slurm_nodes: nodes,
+          slurm_nas_here: cfg.slurm_nas_here || ""
+        })
+      }));
+    } catch (e) {
+      setChk({
+        ok: false,
+        server: [{
+          what: "Check",
+          ok: false,
+          say: e.message
+        }],
+        nodes: []
+      });
+    }
+  };
+  const num = (k, label, hint, min, max, step = 1) => React.createElement("div", {
+    className: "f"
+  }, React.createElement("label", {
+    className: "f-l",
+    htmlFor: "cl-" + k
+  }, label), React.createElement("input", {
+    id: "cl-" + k,
+    className: "inp tnum",
+    type: "number",
+    min: min,
+    max: max,
+    step: step,
+    value: cfg[k] ?? "",
+    disabled: locked,
+    onChange: e => setT(k, e.target.value === "" ? "" : Number(e.target.value))
+  }), hint && React.createElement("span", {
+    className: "hint-s"
+  }, hint));
+  const Steps = ({
+    steps
+  }) => React.createElement("ul", {
+    className: "hsteps"
+  }, steps.map((x, i) => React.createElement("li", {
+    key: i,
+    className: x.ok ? "ok" : "bad"
+  }, React.createElement("span", {
+    className: "hs-i"
+  }, x.ok ? React.createElement(Check, {
+    s: 15
+  }) : React.createElement(Alert, {
+    s: 15
+  })), React.createElement("div", null, React.createElement("b", null, x.what), x.say ? ` — ${x.say}` : ""))));
+  return React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Where analyses run"), React.createElement("div", {
+    className: "sec-d"
+  }, "Network analyses can run on this computer, or on the lab\u2019s cluster: the three lab computers share one queue, and each date runs on whichever is free. Activity scans always run here.")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement("div", {
+    className: "seg",
+    role: "radiogroup",
+    "aria-label": "Where analyses run",
+    style: {
+      marginBottom: on ? 14 : 0
+    }
+  }, [["local", "This computer"], ["slurm", "The lab cluster"]].map(([v, l]) => React.createElement("label", {
+    key: v,
+    className: "seg-o" + ((cfg.executor || "local") === v ? " on" : "")
+  }, React.createElement("input", {
+    type: "radio",
+    name: "executor",
+    value: v,
+    checked: (cfg.executor || "local") === v,
+    disabled: locked || v === "slurm" && !cfg.cluster_ready && !on,
+    onChange: () => setT("executor", v)
+  }), l))), !cfg.cluster_ready && !on && React.createElement("div", {
+    className: "hint-s",
+    style: {
+      marginTop: 8
+    }
+  }, "The cluster client (", cfg.slurm_client, ") is not installed on this computer."), on && React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "hint-s",
+    style: {
+      marginBottom: 12
+    }
+  }, "Each date\u2019s recordings are copied to the fast disk of the computer that runs it, analysed there, and the results copied back to the results folder above. Nothing is written to the NAS."), React.createElement("div", {
+    className: "f"
+  }, React.createElement("span", {
+    className: "f-l"
+  }, "The cluster\u2019s computers"), React.createElement("span", {
+    className: "hint-s"
+  }, "Each one\u2019s own paths: the analysis Python, the MEA-Analysis folder and where the NAS is mounted on it.")), React.createElement("div", {
+    className: "ledger",
+    style: {
+      marginBottom: 10
+    }
+  }, nodes.length === 0 && React.createElement("div", {
+    className: "empty"
+  }, React.createElement("div", {
+    className: "empty-t"
+  }, "No computers listed")), nodes.map((n, i) => React.createElement("div", {
+    key: i,
+    className: "cl-node"
+  }, React.createElement("input", {
+    "aria-label": "Computer",
+    className: "inp mono",
+    placeholder: "computer name",
+    value: n.node || "",
+    disabled: locked,
+    onChange: e => setNode(i, "node", e.target.value)
+  }), React.createElement("input", {
+    "aria-label": "Analysis Python",
+    className: "inp mono",
+    placeholder: "\u2026/MEA-Analysis/.venv/bin/python3",
+    value: n.python || "",
+    disabled: locked,
+    onChange: e => setNode(i, "python", e.target.value)
+  }), React.createElement("input", {
+    "aria-label": "MEA-Analysis folder",
+    className: "inp mono",
+    placeholder: "\u2026/MEA-Analysis",
+    value: n.mea_repo || "",
+    disabled: locked,
+    onChange: e => setNode(i, "mea_repo", e.target.value)
+  }), React.createElement("input", {
+    "aria-label": "NAS on it",
+    className: "inp mono",
+    placeholder: "/mnt/benshalom-nas",
+    value: n.nas || "",
+    disabled: locked,
+    onChange: e => setNode(i, "nas", e.target.value)
+  }), React.createElement("button", {
+    className: "btn ghost sm",
+    "aria-label": `Remove ${n.node || "computer"}`,
+    disabled: locked,
+    onClick: () => setT("slurm_nodes", nodes.filter((_, j) => j !== i))
+  }, React.createElement(X, {
+    s: 13
+  }))))), React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      flexWrap: "wrap",
+      marginBottom: 16
+    }
+  }, React.createElement("button", {
+    className: "btn sm",
+    disabled: locked,
+    onClick: () => setT("slurm_nodes", [...nodes, {
+      node: "",
+      python: "",
+      mea_repo: "",
+      nas: ""
+    }])
+  }, "Add a computer"), nodes.length === 0 && React.createElement("button", {
+    className: "btn sm",
+    disabled: locked,
+    onClick: () => setT("slurm_nodes", LAB_NODES)
+  }, "Use the lab\u2019s three computers")), React.createElement("div", {
+    className: "f"
+  }, React.createElement("label", {
+    className: "f-l",
+    htmlFor: "cl-nas"
+  }, "The NAS on this computer"), React.createElement("input", {
+    id: "cl-nas",
+    className: "inp mono",
+    placeholder: "/mnt/benshalom-nas",
+    value: cfg.slurm_nas_here || "",
+    disabled: locked,
+    onChange: e => setT("slurm_nas_here", e.target.value)
+  }), React.createElement("span", {
+    className: "hint-s"
+  }, "Dates must be on the NAS for the cluster\u2019s computers to read them.")), React.createElement("div", {
+    className: "row2"
+  }, num("slurm_cpus", "CPUs per date", "1 to 24.", 1, 24), num("slurm_mem_gb", "Memory per date (GB)", "Up to 48. A date that needs more is stopped.", 1, 48), num("slurm_hours", "Time limit per date (hours)", "Up to 24.", 0.1, 24, 0.5), num("slurm_max_jobs", "Dates sent to the cluster at once", "The rest wait in line here, where they can still be held.", 1, 30)), sorting && React.createElement("div", {
+    className: "f"
+  }, React.createElement("label", {
+    className: "f-l",
+    htmlFor: "cl-gpu"
+  }, "Spike sorting runs on"), React.createElement("select", {
+    id: "cl-gpu",
+    className: "sel",
+    value: cfg.slurm_gpu_node || "",
+    disabled: locked,
+    onChange: e => setT("slurm_gpu_node", e.target.value)
+  }, React.createElement("option", {
+    value: ""
+  }, "Any computer with a free graphics card"), nodes.filter(n => n.node).map(n => React.createElement("option", {
+    key: n.node,
+    value: n.node
+  }, n.node))), React.createElement("span", {
+    className: "hint-s"
+  }, "Pick the one with the most graphics memory for large recordings (labtower1: 32 GB; the others: 12 GB).")), React.createElement("button", {
+    id: "cl-check",
+    className: "btn ink",
+    disabled: !!chk?.checking || !nodes.length,
+    onClick: check
+  }, chk?.checking ? React.createElement("span", {
+    className: "spin"
+  }) : null, " Check the cluster"), React.createElement("span", {
+    className: "hint-s",
+    style: {
+      marginLeft: 10
+    }
+  }, "Sends a small test job to each computer; takes about a minute."), chk && !chk.checking && React.createElement("div", {
+    style: {
+      marginTop: 14
+    }
+  }, (chk.server || []).some(x => !x.ok) && React.createElement(Steps, {
+    steps: chk.server
+  }), (chk.nodes || []).map(r => React.createElement("div", {
+    key: r.node,
+    style: {
+      marginTop: 10
+    }
+  }, React.createElement("div", {
+    className: "f-l",
+    style: {
+      marginBottom: 6
+    }
+  }, r.node, " ", React.createElement("span", {
+    className: "stamp " + (r.ok ? "ok" : "bad")
+  }, r.ok ? "Ready" : "Not ready")), React.createElement(Steps, {
+    steps: r.steps
+  }))), chk.ok && React.createElement("div", {
+    style: {
+      marginTop: 10
+    }
+  }, React.createElement(Callout, {
+    kind: "green",
+    icon: React.createElement(Check, {
+      s: 17
+    })
+  }, "Every computer is ready. Save settings to start using the cluster.")))))));
+}
 function Field({
   spec,
   value,
@@ -2042,7 +2336,13 @@ function Settings({
     onChange: v => setT("copy_input_first", v),
     label: "Copy the recordings to the fast disk first",
     hint: cfg.nwb_convert ? "Not used while NWB conversion is on." : cfg.copy_input_first ? "On: each date's recordings are copied to the fast disk in one go, analysed there, and the copies deleted afterwards. The originals are only read. Needs room for the date's recordings." : "Off: the analysis reads the recordings from where they are, in small pieces. From the NAS that is slower."
-  })))), React.createElement("details", {
+  })))), React.createElement(ClusterSettings, {
+    cfg: cfg,
+    setT: setT,
+    locked: locked,
+    toast: toast,
+    sorting: sorting && cfg.run_network
+  }), React.createElement("details", {
     className: "adv"
   }, React.createElement("summary", null, React.createElement("span", {
     className: "chev"
@@ -2669,7 +2969,7 @@ function Dashboard({
     className: "dot " + (ov.watching && on.length ? "ok" : "wait")
   }), ov.watching && on.length ? `Watching ${on.length} project${on.length === 1 ? "" : "s"} for new recordings` : "Not watching for new recordings", React.createElement("span", {
     className: "hint-s"
-  }, "\xB7 Network analyses running ", act.network || 0, " of ", lim.network || 1, " \xB7 Activity scans ", act.activity || 0, " of ", lim.activity || 1)), React.createElement("div", {
+  }, "\xB7 Network analyses ", ov.executor === "slurm" ? "on the lab cluster" : "running", " ", act.network || 0, " of ", lim.network || 1, " \xB7 Activity scans ", act.activity || 0, " of ", lim.activity || 1)), React.createElement("div", {
     className: "sec"
   }, React.createElement("div", {
     className: "sec-h"
@@ -3440,7 +3740,17 @@ function App({
     auto_handoff: cfg.auto_handoff !== false,
     nwb_convert: !!cfg.nwb_convert,
     nwb_python: cfg.nwb_python || "",
-    nwb_compression: cfg.nwb_compression || "gzip"
+    nwb_compression: cfg.nwb_compression || "gzip",
+    ...("executor" in cfg ? {
+      executor: cfg.executor || "local",
+      slurm_nodes: (cfg.slurm_nodes || []).filter(n => (n.node || "").trim()),
+      slurm_nas_here: cfg.slurm_nas_here || "",
+      slurm_cpus: Number(cfg.slurm_cpus) || 8,
+      slurm_mem_gb: Number(cfg.slurm_mem_gb) || 32,
+      slurm_hours: Number(cfg.slurm_hours) || 24,
+      slurm_max_jobs: Number(cfg.slurm_max_jobs) || 1,
+      slurm_gpu_node: cfg.slurm_gpu_node || ""
+    } : {})
   });
   const run_ = async (fn, ok, m) => {
     setBusy(true);

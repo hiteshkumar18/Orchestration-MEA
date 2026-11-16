@@ -140,6 +140,16 @@ If the copy finished *before* you started watching, enable **Folders already
 here are ready** to skip that wait for folders present at start. Later arrivals
 still get the full window.
 
+**On the lab's Slurm cluster.** With `executor: "slurm"` (Settings → Where
+analyses run), each date's Network analysis is one job in the lab's `mea`
+queue, submitted through `/usr/local/bin/mea-slurm` and run as `lab-jobs` on
+whichever computer is free (`orchestration/slurm_backend.py`). The job copies
+the recordings to that computer's SSD, runs the pipeline there, and copies the
+results to the shared folder, checked, before deleting its scratch; the bench
+then copies them into the results folder, checked again. Job ids are saved
+before anything else, so a restart follows jobs instead of resubmitting, and
+Hold/Stop cancel the Slurm job. See `docs/CLUSTER.md`.
+
 **Several projects at once.** The watcher scans a list of project folders
 (`watch_dirs` in `job.json`; Settings → Watched projects), each recorded with
 who added it, and paused or active. Anyone signed in can add, pause or remove

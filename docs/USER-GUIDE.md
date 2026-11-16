@@ -261,6 +261,18 @@ If you turn on the fast disk, open **Advanced settings** and set **Fast-disk
 folder** to `/home/<your-user>/mea_scratch` (it is created and cleaned up for you).
 Leave everything else in Advanced as it is.
 
+**Where analyses run**
+
+Network analyses run on this computer, or on the **lab cluster**: the lab's
+three computers share one queue, and each date runs on whichever is free, so
+three dates can be analysed at once. To use the cluster, choose **The lab
+cluster**, press **Use the lab's three computers** (each one's own paths are
+filled in), and press **Check the cluster**. It sends a small test to each
+computer and shows what each one can and cannot do. When every computer says
+**Ready**, save. The Progress tab then shows *Waiting for a free computer in the
+lab cluster* or *on benshalom-labtower2* next to each date. Dates must be on
+the NAS. Details for whoever maintains it: `docs/CLUSTER.md`.
+
 Press **Save settings**.
 
 > Settings are locked while analyses are running, so a change cannot disturb
