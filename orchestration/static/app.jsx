@@ -887,7 +887,9 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast,ask,user,projects,
           <div className="f-row"><input id="out" className="inp mono" value={cfg.driver_options.output_dir??""} disabled={locked}
                  onChange={e=>setO("output_dir",e.target.value||null)}/>
             <button className="btn" disabled={locked} onClick={()=>setBr(br==="out"?null:"out")}><Folder s={15}/> Choose</button></div>
-          <span className="hint-s">Each project gets its own folder here, with its results, scans, logs and reports.</span>
+          <span className="hint-s">Each project gets its own folder here, with its results, scans, logs and reports.
+            {cfg.env?.suggested_output&&cfg.driver_options.output_dir!==cfg.env.suggested_output&&<> The lab's results folder is <span className="mono">{cfg.env.suggested_output}</span>{" "}
+              <button className="btn ghost sm" disabled={locked} onClick={()=>setO("output_dir",cfg.env.suggested_output)}>Use it</button></>}</span>
           {br==="out"&&<Browser initial={cfg.driver_options.output_dir||""} onClose={()=>setBr(null)} onPick={p=>setO("output_dir",p)}/>}
         </div>
       </div></div>
@@ -1108,14 +1110,19 @@ function HistoryTable({fixedLimit}){
   </>);
 }
 
-function Dashboard({user,goSettings}){
+function Dashboard({user,goSettings,toast}){
   const [ov,setOv]=useState(null);
   const [sys,setSys]=useState(null);
-  useEffect(()=>{
-    const load=()=>{if(document.hidden)return;
-      api("/api/overview").then(setOv).catch(()=>{});api("/api/system").then(setSys).catch(()=>{});};
-    load();const t=setInterval(load,5000);return()=>clearInterval(t);},[]);
+  const [busy,setBusy]=useState(false);
+  const load=useCallback(()=>{if(document.hidden)return;
+    api("/api/overview").then(setOv).catch(()=>{});api("/api/system").then(setSys).catch(()=>{});},[]);
+  useEffect(()=>{load();const t=setInterval(load,5000);return()=>clearInterval(t);},[load]);
+  const dismiss=async paths=>{setBusy(true);
+    try{const r=await api("/api/attention/dismiss",{method:"POST",body:JSON.stringify({paths})});load();
+      const n=r.dismissed.length;toast(`${n} card${n===1?"":"s"} dismissed`,"Nothing was deleted. The run stays in its history.");}
+    catch(e){toast("Could not dismiss",e.message,"error");}finally{setBusy(false);}};
   if(!ov) return <div className="skel" style={{height:240}}/>;
+  const failed=ov.attention.filter(a=>a.kind==="failed"&&a.path);
   const lim=ov.limits||{}, act=ov.active_jobs||{};
   const projs=ov.projects||[], on=projs.filter(p=>!p.paused);
   return (<div className="rise">
@@ -1134,7 +1141,9 @@ function Dashboard({user,goSettings}){
     </div>
 
     <div className="sec">
-      <div className="sec-h"><div className="sec-t">Needs attention</div></div>
+      <div className="sec-h"><div className="sec-t">Needs attention</div>
+        {failed.length>1&&<button className="btn ghost sm" style={{marginLeft:"auto"}} disabled={!user||busy}
+          onClick={()=>dismiss(failed.map(a=>a.path))}><X s={13}/> Dismiss all failed</button>}</div>
       {ov.attention.length===0
         ?<Callout kind="green" icon={<Check s={17}/>}>Nothing needs attention.</Callout>
         :<div className="att">{ov.attention.map((a,i)=>(
@@ -1142,6 +1151,9 @@ function Dashboard({user,goSettings}){
             <span className="ic">{a.level==="bad"?<Alert s={17}/>:<Info s={17}/>}</span>
             <div style={{flex:1,minWidth:0}}>
               {a.date&&<b>{prettyDate(a.date).big} {prettyDate(a.date).year} · {jobName(a.job)} — </b>}{a.text}</div>
+            {a.kind==="failed"&&a.path&&<button className="btn ghost sm" disabled={!user||busy} aria-label="Dismiss"
+              title={user?"Hide this card. Nothing is deleted or analysed again.":"Sign in to dismiss"}
+              onClick={e=>{e.stopPropagation();dismiss([a.path]);}}><X s={13}/> Dismiss</button>}
             {a.run_id&&<Chev s={15}/>}
           </div>))}</div>}
     </div>
@@ -1567,7 +1579,7 @@ function App({user,onSignOut}){
       <div className="tabline"/>
 
       {runId&&<RunDetail id={runId} onLog={openLogPath} onBack={()=>{location.hash=tab;}}/>}
-      {!runId&&tab==="dashboard"&&<Dashboard user={user} goSettings={()=>pickTab("settings")}/>}
+      {!runId&&tab==="dashboard"&&<Dashboard user={user} toast={toast} goSettings={()=>pickTab("settings")}/>}
       {!runId&&tab==="progress"&&<>
         <div className="tally rise" style={{"--i":1}}>
           {[["wait","Waiting"],["run","Analysing"],["done","Done"],["bad","Need attention"]].map(([k,l])=>(

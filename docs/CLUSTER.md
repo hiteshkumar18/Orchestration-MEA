@@ -86,6 +86,31 @@ Python and its packages, MEA-Analysis, the NAS, the plugin, rsync, writing to
 the shared and scratch folders, the GPU when spike sorting is on, and
 decoding one recording of a watched project.
 
+## Where results go
+
+The lab's results folder is `/mnt/MaxwellData_Backup/MEA_Analysis`, the same
+path on all three computers: on BenShalomLabServer it is its own 22 TB disk;
+the towers reach it over NFS, set up on 2026-11-18. Only that folder is
+shared, not the raw backup beside it (`Maxtwo`).
+
+```bash
+# BenShalomLabServer
+sudo install -d -o lab-jobs -g lab-jobs -m 2775 /mnt/MaxwellData_Backup/MEA_Analysis
+echo '/mnt/MaxwellData_Backup/MEA_Analysis 10.157.209.11(rw,sync,root_squash,no_subtree_check) 10.157.209.12(rw,sync,root_squash,no_subtree_check)' \
+  | sudo tee /etc/exports.d/mea-results.exports
+sudo exportfs -ra
+# each tower: /etc/systemd/system/mnt-MaxwellData_Backup-MEA_Analysis.mount
+#   What=10.157.208.197:/mnt/MaxwellData_Backup/MEA_Analysis
+#   Where=/mnt/MaxwellData_Backup/MEA_Analysis
+#   Type=nfs  Options=vers=4.2,rw,hard,_netdev,nosuid,nodev
+sudo systemctl daemon-reload && sudo systemctl enable --now mnt-MaxwellData_Backup-MEA_Analysis.mount
+```
+
+A bench with no results folder set starts from it (`MEA_OUTPUT_DIR` overrides
+that on other machines), and Settings offers it when another folder is set.
+Files the bench writes there belong to group `lab-jobs`; on the main server
+their owner shows as whoever has the bench account's number there.
+
 ## Settings (`job.json`)
 
 | Setting | Meaning |

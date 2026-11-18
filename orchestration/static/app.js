@@ -2294,7 +2294,13 @@ function Settings({
     s: 15
   }), " Choose")), React.createElement("span", {
     className: "hint-s"
-  }, "Each project gets its own folder here, with its results, scans, logs and reports."), br === "out" && React.createElement(Browser, {
+  }, "Each project gets its own folder here, with its results, scans, logs and reports.", cfg.env?.suggested_output && cfg.driver_options.output_dir !== cfg.env.suggested_output && React.createElement(React.Fragment, null, " The lab's results folder is ", React.createElement("span", {
+    className: "mono"
+  }, cfg.env.suggested_output), " ", React.createElement("button", {
+    className: "btn ghost sm",
+    disabled: locked,
+    onClick: () => setO("output_dir", cfg.env.suggested_output)
+  }, "Use it"))), br === "out" && React.createElement(Browser, {
     initial: cfg.driver_options.output_dir || "",
     onClose: () => setBr(null),
     onPick: p => setO("output_dir", p)
@@ -2958,26 +2964,47 @@ function HistoryTable({
 }
 function Dashboard({
   user,
-  goSettings
+  goSettings,
+  toast
 }) {
   const [ov, setOv] = useState(null);
   const [sys, setSys] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    if (document.hidden) return;
+    api("/api/overview").then(setOv).catch(() => {});
+    api("/api/system").then(setSys).catch(() => {});
+  }, []);
   useEffect(() => {
-    const load = () => {
-      if (document.hidden) return;
-      api("/api/overview").then(setOv).catch(() => {});
-      api("/api/system").then(setSys).catch(() => {});
-    };
     load();
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
-  }, []);
+  }, [load]);
+  const dismiss = async paths => {
+    setBusy(true);
+    try {
+      const r = await api("/api/attention/dismiss", {
+        method: "POST",
+        body: JSON.stringify({
+          paths
+        })
+      });
+      load();
+      const n = r.dismissed.length;
+      toast(`${n} card${n === 1 ? "" : "s"} dismissed`, "Nothing was deleted. The run stays in its history.");
+    } catch (e) {
+      toast("Could not dismiss", e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
   if (!ov) return React.createElement("div", {
     className: "skel",
     style: {
       height: 240
     }
   });
+  const failed = ov.attention.filter(a => a.kind === "failed" && a.path);
   const lim = ov.limits || {},
     act = ov.active_jobs || {};
   const projs = ov.projects || [],
@@ -3017,7 +3044,16 @@ function Dashboard({
     className: "sec-h"
   }, React.createElement("div", {
     className: "sec-t"
-  }, "Needs attention")), ov.attention.length === 0 ? React.createElement(Callout, {
+  }, "Needs attention"), failed.length > 1 && React.createElement("button", {
+    className: "btn ghost sm",
+    style: {
+      marginLeft: "auto"
+    },
+    disabled: !user || busy,
+    onClick: () => dismiss(failed.map(a => a.path))
+  }, React.createElement(X, {
+    s: 13
+  }), " Dismiss all failed")), ov.attention.length === 0 ? React.createElement(Callout, {
     kind: "green",
     icon: React.createElement(Check, {
       s: 17
@@ -3042,7 +3078,18 @@ function Dashboard({
       flex: 1,
       minWidth: 0
     }
-  }, a.date && React.createElement("b", null, prettyDate(a.date).big, " ", prettyDate(a.date).year, " \xB7 ", jobName(a.job), " \u2014 "), a.text), a.run_id && React.createElement(Chev, {
+  }, a.date && React.createElement("b", null, prettyDate(a.date).big, " ", prettyDate(a.date).year, " \xB7 ", jobName(a.job), " \u2014 "), a.text), a.kind === "failed" && a.path && React.createElement("button", {
+    className: "btn ghost sm",
+    disabled: !user || busy,
+    "aria-label": "Dismiss",
+    title: user ? "Hide this card. Nothing is deleted or analysed again." : "Sign in to dismiss",
+    onClick: e => {
+      e.stopPropagation();
+      dismiss([a.path]);
+    }
+  }, React.createElement(X, {
+    s: 13
+  }), " Dismiss"), a.run_id && React.createElement(Chev, {
     s: 15
   }))))), React.createElement("div", {
     className: "sec"
@@ -4020,6 +4067,7 @@ function App({
     }
   }), !runId && tab === "dashboard" && React.createElement(Dashboard, {
     user: user,
+    toast: toast,
     goSettings: () => pickTab("settings")
   }), !runId && tab === "progress" && React.createElement(React.Fragment, null, React.createElement("div", {
     className: "tally rise",

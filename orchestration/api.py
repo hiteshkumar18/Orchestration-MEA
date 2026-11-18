@@ -312,6 +312,10 @@ class HoldPayload(BaseModel):
     paths: list[str] = []      # state keys, "<folder>::<job>"
 
 
+class DismissPayload(BaseModel):
+    paths: list[str] = []      # state keys, "<folder>::<job>"
+
+
 class PriorityPayload(BaseModel):
     paths: list[str] = []      # state keys, "<folder>::<job>"
     priority: bool = True
@@ -332,6 +336,11 @@ def api_schema():
     return {"groups": schema_for_ui(), "defaults": default_options()}
 
 
+# The lab's results disk: the main server's /mnt/MaxwellData_Backup, shared at
+# the same path with both towers. MEA_OUTPUT_DIR overrides it on other machines.
+DEFAULT_OUTPUT_DIR = "/mnt/MaxwellData_Backup/MEA_Analysis"
+
+
 def _runtime_env() -> dict:
     """Detect containerization so the UI can warn about container-vs-host paths."""
     in_container = (
@@ -343,7 +352,7 @@ def _runtime_env() -> dict:
         "mea_repo": describe_repo(repo),
         "in_container": in_container,
         "suggested_input": os.environ.get("MEA_INPUT_DIR"),
-        "suggested_output": os.environ.get("MEA_OUTPUT_DIR"),
+        "suggested_output": os.environ.get("MEA_OUTPUT_DIR") or DEFAULT_OUTPUT_DIR,
     }
 
 
@@ -356,8 +365,8 @@ def api_env():
 def api_get_config():
     cfg = get_watcher().cfg
     env = _runtime_env()
-    # First run inside a container: prefill the mount points so nobody types
-    # host paths that don't exist in here.
+    # No results folder yet: start from the lab's results disk (or, inside a
+    # container, its mount point) so nobody types a path that doesn't exist.
     if not cfg.driver_options.get("output_dir") and env["suggested_output"]:
         cfg.driver_options["output_dir"] = env["suggested_output"]
     return {
@@ -1087,6 +1096,12 @@ def api_system():
     return get_monitor().snapshot()
 
 
+def _failure_mark(entry: dict) -> str:
+    """Which failure a dismissal was for: a later failure of the same date has
+    another time and comes back to Needs attention."""
+    return f"{entry.get('completed_at') or ''}|{(entry.get('error') or '')[:200]}"
+
+
 @app.get("/api/overview")
 def api_overview():
     """Everything the dashboard landing view needs, in one request."""
@@ -1109,8 +1124,8 @@ def api_overview():
                                   "text": f"No new log output for {age // 60} min — may be stuck"
                                           + (f" (stopped automatically after {stall_min} min)."
                                              if stall_min else ".")})
-        elif r.get("status") == "failed":
-            attention.append({"level": "bad", "kind": "failed", "run_id": rid,
+        elif r.get("status") == "failed" and r.get("dismissed") != _failure_mark(r):
+            attention.append({"level": "bad", "kind": "failed", "run_id": rid, "path": r["path"],
                               "project": Path(r["folder"]).parent.name, "date": r["run"],
                               "job": r.get("job"),
                               "text": (r.get("error") or "Failed").splitlines()[0][:200]})
@@ -1170,6 +1185,24 @@ def api_hold(payload: HoldPayload, request: Request):
     res = get_watcher().hold(payload.paths)
     _audit(request, "put on hold", _dates(payload.paths))
     return {"ok": True, **res}
+
+
+@app.post("/api/attention/dismiss")
+def api_dismiss(payload: DismissPayload, request: Request):
+    """Take failed runs off Needs attention. Nothing is deleted or analysed
+    again: the run keeps its status, results and history."""
+    if not payload.paths:
+        raise HTTPException(400, "Choose at least one run.")
+    st = get_watcher().state
+    done = []
+    for key in payload.paths:
+        e = st.get(key)
+        if e.get("status") == "failed":
+            st.update(key, dismissed=_failure_mark(e))
+            done.append(key)
+    if done:
+        _audit(request, "dismissed from Needs attention", _dates(done))
+    return {"ok": True, "dismissed": done}
 
 
 @app.post("/api/runs/priority")
