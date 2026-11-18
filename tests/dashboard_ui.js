@@ -42,6 +42,8 @@ const detail = {
             { chip: 'M07036', run: '000023', well: 'well003', outcome: 'not_recorded', phase: 'Preprocessing',
               spikes: null, seconds: 3, reason: "stream_id well003 is not in ['well002']" }] },
   outputs: [{ label: 'Network results', path: '/out/IPN/260821', count: 8, unit: 'wells', bytes: 123456789 },
+            { label: 'MaxWell view · chip M07036', path: '/out/IPN/ActivityScan/260821/M07036/000022/maxwell_summary.html',
+              count: 1, unit: 'page', bytes: 650000, maxwell: true },
             { label: 'Log', path: '/out/l.log', count: 1, unit: 'file', bytes: 2048, log: true }],
 };
 const data = {
@@ -122,6 +124,9 @@ const button = label => [...w.document.querySelectorAll('button')].find(b => (b.
   expect('wells table', d.includes('1,016,958') && d.includes('not in the recording file'));
   expect('NWB conversion table', d.includes('NWB conversion') && d.includes('not in the file'));
   expect('outputs listed', d.includes('Network results') && d.includes('118 MB'));
+  const mx = [...w.document.querySelectorAll('.out')].find(o => o.textContent.includes('MaxWell view'))?.querySelector('a');
+  expect('MaxWell view opens in a new tab', mx && mx.target === '_blank' &&
+    mx.getAttribute('href') === '/api/maxwell/view?path=' + encodeURIComponent('/out/IPN/ActivityScan/260821/M07036/000022/maxwell_summary.html'));
   expect('settings it ran with', d.includes('Off (spike detection only)') && d.includes('standard compression'));
   expect('no tab is selected on a run page', ![...w.document.querySelectorAll('[role=tab]')].some(b => b.getAttribute('aria-selected') === 'true'));
 

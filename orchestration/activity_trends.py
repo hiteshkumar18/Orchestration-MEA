@@ -136,7 +136,12 @@ def load_summaries(root: Path) -> list[dict[str, Any]]:
         sess_date = session_date_from_path(source) or session_date_from_path(fp)
         path_div = div_from_path(source) or div_from_path(fp)
 
+        old_units = data.get("amplitude_units") != "uV"
         for well in data.get("wells", []):
+            if old_units:
+                # Written before amplitudes were converted to µV: leave them
+                # out rather than plot them beside µV values.
+                well = {k: v for k, v in well.items() if not k.startswith("amplitude_")}
             plated = parse_date(well.get("plating_date", ""))
             div = path_div
             if div is None and plated and sess_date:
