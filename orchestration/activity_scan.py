@@ -30,6 +30,9 @@ Per run, under ``<output>/<chip>/<run_id>/``:
   per_electrode.csv         electrode id, x, y, spikes, duration, rate, amplitude
   well<NNN>_activity.png    whole-array firing-rate and amplitude maps
   plate_overview.png        all wells side by side on a common scale
+  maxwell_summary.html      the chip as MaxWell shows it: Network raster and
+                            activity, active area, rate/amplitude maps and
+                            histograms (``maxwell_summary.py``)
 
 Usage
 -----
@@ -501,6 +504,10 @@ def extract_file(path: Path, max_spikes_per_block: int = 0, *,
                 wa.sampling_hz = float(_first(blk["settings/sampling"]) or 0)
             if not wa.spike_threshold and "settings/spike_threshold" in blk:
                 wa.spike_threshold = float(_first(blk["settings/spike_threshold"]) or 0)
+            # Spike amplitudes are stored in ADC units; settings/lsb is volts
+            # per unit (about 6.3 µV at gain 512).
+            lsb = float(_first(blk["settings/lsb"]) or 0) if "settings/lsb" in blk else 0.0
+            to_uv = lsb * 1e6 if lsb > 0 else 1.0
 
             # channel -> electrode/x/y for this configuration
             chan = mapping["channel"].astype(np.int64)
@@ -526,7 +533,7 @@ def extract_file(path: Path, max_spikes_per_block: int = 0, *,
                 take = slice(0, max_spikes_per_block) if max_spikes_per_block else slice(None)
                 data = sp[take]
                 sch = data["channel"].astype(np.int64)
-                amp = np.abs(data["amplitude"].astype(np.float64))
+                amp = np.abs(data["amplitude"].astype(np.float64)) * to_uv
                 frame = data["frameno"].astype(np.int64)
 
                 valid = (sch >= 0) & (sch < n_chan)
@@ -1163,6 +1170,8 @@ def process_file(h5_path: Path, out_dir: Path, *, figures: bool = True,
         "extracted_at": datetime.now(timezone.utc).isoformat(),
         "active_threshold_hz": active_hz,
         "array_electrodes": ARRAY_ELECTRODES,
+        # Summaries without this field gave amplitudes in ADC units.
+        "amplitude_units": "uV",
         # The Network recording the selection metrics compare against (None:
         # no selection metrics). Recorded so a reader never has to guess.
         "selection_source": str(selection_from) if selection else None,
@@ -1179,6 +1188,17 @@ def process_file(h5_path: Path, out_dir: Path, *, figures: bool = True,
             plot_functional(wa, metrics[wid], dest / f"well{wid:03d}_functional.png")
         plot_plate(wells, metrics, dest / "plate_overview.png", active_hz=active_hz)
         plot_groups(metrics, dest / "group_comparison.png")
+        # The chip as MaxWell's software shows it, as one HTML page. Its own
+        # failure must not cost the scan its results.
+        try:
+            from maxwell_summary import write_page
+            net = selection_from or find_chip_network(h5_path, selection_auto or "Network", chip_id=chip_id)
+            write_page(dest / "maxwell_summary.html", scan=h5_path, network=Path(net) if net else None,
+                       title=" · ".join(x for x in (h5_path.parents[4].name if len(h5_path.parts) > 5 else "",
+                                                   session, f"chip {chip_id or '?'}") if x))
+            LOG.info("  wrote %s", dest / "maxwell_summary.html")
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("  MaxWell-style page not written: %s", exc)
 
     LOG.info("  wrote %s", dest)
     summary["output_dir"] = str(dest)

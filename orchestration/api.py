@@ -995,8 +995,8 @@ def api_status():
 # --------------------------------------------------------------------------- #
 # Dashboard: history, run detail, system health, overview
 # --------------------------------------------------------------------------- #
-from rundetail import (estimate, expected_wells_cached, outputs as run_outputs,  # noqa: E402
-                       parse_log_file)
+from rundetail import (MAXWELL_PAGE, estimate, expected_wells_cached,  # noqa: E402
+                       outputs as run_outputs, parse_log_file)
 from history import HEARTBEAT as RUN_HEARTBEAT, TERMINAL as RUN_TERMINAL  # noqa: E402
 from monitor import SystemMonitor  # noqa: E402
 
@@ -1628,6 +1628,20 @@ def api_report_view(path: str):
         raise HTTPException(404, "Report not found")
     if str(p) not in allowed:
         raise HTTPException(403, "Not a report written by this tool")
+    return FileResponse(p, media_type="text/html")
+
+
+@app.get("/api/maxwell/view")
+def api_maxwell_view(path: str):
+    """Serve one maxwell_summary.html, only from under the results folders."""
+    cfg = get_watcher().cfg
+    roots = [Path(r).resolve() for r in (cfg.output_dir, cfg.activity_out) if r]
+    try:
+        p = Path(path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(404, "Page not found")
+    if p.name != MAXWELL_PAGE or not any(p.is_relative_to(r) for r in roots):
+        raise HTTPException(403, "Not a MaxWell page of this bench's results")
     return FileResponse(p, media_type="text/html")
 
 

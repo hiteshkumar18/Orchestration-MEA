@@ -284,6 +284,17 @@ def _tree(path: Path, pattern: str, limit: int = 200000) -> tuple[int, int]:
     return n, size
 
 
+MAXWELL_PAGE = "maxwell_summary.html"
+
+
+def maxwell_pages(scan_date_dir: Path) -> list[Path]:
+    """The MaxWell-style pages of one date's activity scan: <chip>/<run>/maxwell_summary.html."""
+    try:
+        return sorted(p for p in Path(scan_date_dir).glob(f"*/*/{MAXWELL_PAGE}") if p.is_file())
+    except OSError:
+        return []
+
+
 def outputs(output_dir: Optional[str], folder: str, job: str, log: Optional[str],
             reports: list[dict]) -> list[dict[str, Any]]:
     if not output_dir:
@@ -303,6 +314,10 @@ def outputs(output_dir: Optional[str], folder: str, job: str, log: Optional[str]
         n, b = _tree(root / "ActivityScan" / date, "summary.json")
         items.append({"label": "Activity scan results", "path": str(root / "ActivityScan" / date),
                       "count": n, "unit": "chips", "bytes": b})
+        for page in maxwell_pages(root / "ActivityScan" / date):
+            chip = page.parent.parent.name
+            items.append({"label": f"MaxWell view · chip {chip}", "path": str(page), "count": 1,
+                          "unit": "page", "bytes": page.stat().st_size, "maxwell": True})
     for r in reports:
         if r.get("project") == project and r.get("label") == date:
             items.append({"label": "Report", "path": r["path"], "count": 1, "unit": "report",

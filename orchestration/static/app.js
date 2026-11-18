@@ -3505,6 +3505,13 @@ function RunDetail({
     onClick: () => onLog(o.path, `${dt.big} ${dt.year} · ${jobName(d.job)}`)
   }, React.createElement(Lines, {
     s: 13
+  }), " Open"), o.maxwell && React.createElement("a", {
+    className: "btn sm",
+    target: "_blank",
+    rel: "noopener",
+    href: `/api/maxwell/view?path=${encodeURIComponent(o.path)}`
+  }, React.createElement(Ext, {
+    s: 13
   }), " Open"))))))), React.createElement("div", {
     className: "sec"
   }, React.createElement("div", {

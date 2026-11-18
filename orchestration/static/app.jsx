@@ -1298,6 +1298,7 @@ function RunDetail({id,onLog,onBack}){
           <div className="mono hint-s" style={{wordBreak:"break-all"}}>{o.path}</div>
           {o.report&&<a className="btn sm" target="_blank" rel="noopener" href={`/api/reports/view?path=${encodeURIComponent(o.path)}`}><Ext s={13}/> Open</a>}
           {o.log&&<button className="btn sm" onClick={()=>onLog(o.path,`${dt.big} ${dt.year} · ${jobName(d.job)}`)}><Lines s={13}/> Open</button>}
+          {o.maxwell&&<a className="btn sm" target="_blank" rel="noopener" href={`/api/maxwell/view?path=${encodeURIComponent(o.path)}`}><Ext s={13}/> Open</a>}
         </div>)}</div>}</div></div>
     </div>
 
