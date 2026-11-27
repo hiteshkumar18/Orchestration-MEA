@@ -1,6 +1,6 @@
 // Source for app.js. Edit this, then: cd tests && npm run build
 //
-// MEA Bench — the lab-notebook front end for Orchestration-MEA.
+// MEA Bench — the front end for Orchestration-MEA.
 // Written for people who run experiments, not software: every label says what
 // happens in plain words, and the technical knobs live behind "Advanced".
 //
@@ -25,6 +25,17 @@ const Folder=p=><I {...p} d={<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2
 const Alert=p=><I {...p} d={<><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13.5"/><line x1="12" y1="17.2" x2="12.01" y2="17.2"/></>}/>;
 const Info =p=><I {...p} d={<><circle cx="12" cy="12" r="9.5"/><line x1="12" y1="16.5" x2="12" y2="11.5"/><line x1="12" y1="7.8" x2="12.01" y2="7.8"/></>}/>;
 const Ext  =p=><I {...p} d={<><path d="M14 4h6v6"/><line x1="20" y1="4" x2="11" y2="13"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></>}/>;
+
+// Light (default) or dark screen. Follows the computer until someone picks one;
+// the pick is remembered in this browser only.
+function ThemeSwitch(){
+  const sys=()=>{try{return matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}catch(e){return"light";}};
+  const [mode,setMode]=useState(()=>document.documentElement.dataset.theme||sys());
+  const flip=()=>{const m=mode==="dark"?"light":"dark";setMode(m);document.documentElement.dataset.theme=m;
+    try{localStorage.setItem("mea-theme",m);}catch(e){}};
+  return <button className="btn ghost sm" onClick={flip} aria-label={`Switch to ${mode==="dark"?"light":"dark"} screen`}>
+    {mode==="dark"?"Light screen":"Dark screen"}</button>;
+}
 
 /* ── API ───────────────────────────────────────────────────────────────── */
 async function api(path,opts){
@@ -1554,8 +1565,8 @@ function App({user,onSignOut}){
       <h1 className="sr">MEA Bench — analysis control</h1>
       <header className="top rise" style={{"--i":0}}>
         <div>
-          <div className="brand">MEA <i>Bench</i></div>
-          <div className="brand-sub">Ben-Shalom Lab · recordings in, reports out</div>
+          <div className="brand">MEA Bench</div>
+          <div className="brand-sub">Ben-Shalom Lab, recordings in and reports out</div>
         </div>
         <div className="grow"/>
         <div className="ctrl">
@@ -1567,6 +1578,7 @@ function App({user,onSignOut}){
             ? <button className="btn" disabled={busy} onClick={pauseWatch}><Pause s={14}/> Pause watching</button>
             : <button className="btn" disabled={busy} onClick={startWatch} title="Automatically analyse new dates as they are copied in"><Play s={12}/> Watch for new</button>}
           {active>0&&<button className="btn red" disabled={busy} onClick={stopAll}><Stop s={12}/> Stop all</button>}
+          <ThemeSwitch/>
           <span className="me" title={user.email}>{user.name}
             <button className="btn ghost sm" onClick={onSignOut}>Sign out</button></span>
         </div>
@@ -1621,8 +1633,8 @@ function Login({onIn}){
       onIn(r.user);}
     catch(x){setErr(x.message);}finally{setBusy(false);}};
   return (<div className="wrap"><div className="card rise login" style={{maxWidth:440,margin:"12vh auto"}}><div className="card-b">
-    <div className="brand">MEA <i>Bench</i></div>
-    <div className="brand-sub" style={{marginBottom:20}}>Ben-Shalom Lab · recordings in, reports out</div>
+    <div className="brand">MEA Bench</div>
+    <div className="brand-sub" style={{marginBottom:20}}>Ben-Shalom Lab, recordings in and reports out</div>
     <form onSubmit={go} noValidate>
       <label className="f"><span className="f-l">Your name</span>
         <input className="inp" name="name" autoComplete="name" value={name} onChange={e=>setName(e.target.value)} autoFocus/></label>

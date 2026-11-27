@@ -193,6 +193,29 @@ const Ext = p => React.createElement(I, _extends({}, p, {
     d: "M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"
   }))
 }));
+function ThemeSwitch() {
+  const sys = () => {
+    try {
+      return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    } catch (e) {
+      return "light";
+    }
+  };
+  const [mode, setMode] = useState(() => document.documentElement.dataset.theme || sys());
+  const flip = () => {
+    const m = mode === "dark" ? "light" : "dark";
+    setMode(m);
+    document.documentElement.dataset.theme = m;
+    try {
+      localStorage.setItem("mea-theme", m);
+    } catch (e) {}
+  };
+  return React.createElement("button", {
+    className: "btn ghost sm",
+    onClick: flip,
+    "aria-label": `Switch to ${mode === "dark" ? "light" : "dark"} screen`
+  }, mode === "dark" ? "Light screen" : "Dark screen");
+}
 async function api(path, opts) {
   if (location.protocol === "file:") throw new Error("Open this page through the server (http://localhost:8000), not as a file.");
   let r;
@@ -4018,9 +4041,9 @@ function App({
     }
   }, React.createElement("div", null, React.createElement("div", {
     className: "brand"
-  }, "MEA ", React.createElement("i", null, "Bench")), React.createElement("div", {
+  }, "MEA Bench"), React.createElement("div", {
     className: "brand-sub"
-  }, "Ben-Shalom Lab \xB7 recordings in, reports out")), React.createElement("div", {
+  }, "Ben-Shalom Lab, recordings in and reports out")), React.createElement("div", {
     className: "grow"
   }), React.createElement("div", {
     className: "ctrl"
@@ -4047,7 +4070,7 @@ function App({
     onClick: stopAll
   }, React.createElement(Stop, {
     s: 12
-  }), " Stop all"), React.createElement("span", {
+  }), " Stop all"), React.createElement(ThemeSwitch, null), React.createElement("span", {
     className: "me",
     title: user.email
   }, user.name, React.createElement("button", {
@@ -4210,12 +4233,12 @@ function Login({
     className: "card-b"
   }, React.createElement("div", {
     className: "brand"
-  }, "MEA ", React.createElement("i", null, "Bench")), React.createElement("div", {
+  }, "MEA Bench"), React.createElement("div", {
     className: "brand-sub",
     style: {
       marginBottom: 20
     }
-  }, "Ben-Shalom Lab \xB7 recordings in, reports out"), React.createElement("form", {
+  }, "Ben-Shalom Lab, recordings in and reports out"), React.createElement("form", {
     onSubmit: go,
     noValidate: true
   }, React.createElement("label", {
