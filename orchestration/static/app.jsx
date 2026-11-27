@@ -760,6 +760,55 @@ function WatchedProjects({projects,user,toast,ask,onChange,watching}){
     </div>);
 }
 
+/* ── Copy activity scans to OneDrive ──────────────────────────────────── */
+// Its own save, like the report instructions: it only changes where results
+// are copied afterwards, so it is never locked while analyses run.
+function OneDriveCopy({toast}){
+  const [st,setSt]=useState(null);
+  const [dest,setDest]=useState("");
+  const [chk,setChk]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const load=useCallback(()=>api("/api/onedrive").then(d=>{setSt(d);return d;}).catch(()=>null),[]);
+  useEffect(()=>{load().then(d=>d&&setDest(d.dest||""));},[load]);
+  useEffect(()=>{if(!st?.copying)return;const t=setTimeout(load,3000);return()=>clearTimeout(t);},[st,load]);
+  const save=async body=>{setBusy(true);
+    try{const d=await api("/api/onedrive",{method:"POST",body:JSON.stringify(body)});setSt(d);
+        toast("Saved",d.enabled&&d.dest?"Activity scans are copied to OneDrive after each scan, and every half hour.":"The OneDrive copy is off.");}
+    catch(e){toast("Not saved",e.message,"error");}finally{setBusy(false);}};
+  const check=async()=>{setChk({checking:true});
+    try{setChk(await api("/api/onedrive/check",{method:"POST",body:JSON.stringify({dest})}));}
+    catch(e){setChk({ok:false,say:e.message});}};
+  const copyNow=async()=>{try{setSt(await api("/api/onedrive/copy",{method:"POST"}));}catch(e){toast("Not started",e.message,"error");}};
+  if(!st) return null;
+  const last=st.last||{};
+  return (
+    <div className="sec">
+      <div className="sec-h"><div className="sec-t">Copy to OneDrive</div>
+        <div className="sec-d">Activity scan results stay in the results folder and are copied to OneDrive too. Nothing is ever deleted, on either side.</div></div>
+      <div className="card"><div className="card-b">
+        <Switch id="od" checked={st.enabled} disabled={busy} onChange={v=>save({enabled:v})}
+                label="Copy activity scans to OneDrive"
+                hint="After every finished activity scan, and every half hour to catch up. Only new or changed files are sent."/>
+        <div className="f" style={{marginTop:14,marginBottom:0}}><label className="f-l" htmlFor="od-dest">OneDrive folder</label>
+          <div className="f-row">
+            <input id="od-dest" className="inp mono" placeholder="onedrive:Ben-Shalom Lab/MEA activity scans" value={dest}
+                   onChange={e=>{setDest(e.target.value);setChk(null);}}/>
+            <button className="btn" disabled={!dest.trim()||chk?.checking} onClick={check}>{chk?.checking?<span className="spin"/>:null} Check</button>
+            <button className="btn ink" disabled={busy||dest===(st.dest||"")} onClick={()=>save({dest})}>Use this folder</button></div>
+          <span className="hint-s">Each project gets its own folder there: <span className="mono">&lt;project&gt;/ActivityScan/&lt;date&gt;/…</span></span>
+        </div>
+        {chk&&!chk.checking&&<div style={{marginTop:12}}><Callout kind={chk.ok?"green":"amber"} icon={chk.ok?<Check s={17}/>:<Alert s={17}/>}>{chk.say}</Callout></div>}
+        {st.enabled&&st.dest&&<div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginTop:14}}>
+          <span className="hint" style={{flex:1,minWidth:200}}>
+            {st.copying?<><span className="spin"/> Copying now…</>
+              :last.finished?(last.ok?`Last copy ${ago(last.finished)}: ${last.copied} new file${last.copied===1?"":"s"}.`
+                :`Last copy ${ago(last.finished)} had problems: ${(last.errors||[]).join("; ")}`)
+              :"Not copied yet."}</span>
+          <button className="btn sm" disabled={st.copying} onClick={copyNow}>Copy now</button></div>}
+      </div></div>
+    </div>);
+}
+
 /* ── Where analyses run: this computer or the lab's Slurm cluster ───── */
 // The lab's three computers as set up on 2026-11-13 (each one's own paths).
 const LAB_NODES=[
@@ -935,6 +984,8 @@ function Settings({cfg,setCfg,schema,locked,onSave,busy,toast,ask,user,projects,
                   "Off: the analysis reads the recordings from where they are, in small pieces. From the NAS that is slower."}/>}
       </div></div>
     </div>
+
+    <OneDriveCopy toast={toast}/>
 
     <ClusterSettings cfg={cfg} setT={setT} locked={locked} toast={toast} sorting={sorting&&cfg.run_network}/>
 

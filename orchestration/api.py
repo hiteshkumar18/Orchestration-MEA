@@ -61,10 +61,10 @@ from mea_repo import (  # noqa: E402
 )
 import native_picker  # noqa: E402
 from watcher import (  # noqa: E402
-    JobConfig, Watcher, DEFAULT_WORK_DIR, JOB_LABELS,
-    check_watch_folder, find_recordings, has_finished_marker, list_h5, path_is_within, same_path,
-)
+    JobConfig, Watcher, DEFAULT_WORK_DIR, JOB_ACTIVITY, JOB_LABELS,
+    check_watch_folder, find_recordings, has_finished_marker, list_h5, path_is_within, same_path)
 import handoff  # noqa: E402
+import onedrive  # noqa: E402
 from accounts import Accounts  # noqa: E402
 
 LOG = logging.getLogger("mea.api")
@@ -173,6 +173,8 @@ def _dates(paths) -> str:
 def _record_event(kind: str, payload: dict) -> None:
     _events.append({"kind": kind, **payload})
     del _events[:-200]  # keep the last 200
+    if kind == "done" and payload.get("job") == JOB_ACTIVITY:
+        get_onedrive().trigger(f"activity scan of {payload.get('run')} finished")
     if kind == "date_finished" and payload.get("folder"):
         # A date the watcher picked up by itself; batches report through
         # their own hook. Never on the job's thread: a report takes a while.
@@ -1019,6 +1021,17 @@ def get_monitor() -> SystemMonitor:
         return _monitor
 
 
+_onedrive: Optional[onedrive.OneDriveCopier] = None
+
+
+def get_onedrive() -> onedrive.OneDriveCopier:
+    global _onedrive
+    with _monitor_lock:
+        if _onedrive is None:
+            _onedrive = onedrive.OneDriveCopier(lambda: get_watcher().cfg, WORK_DIR / "onedrive.json")
+        return _onedrive
+
+
 def _seconds_since(iso: Optional[str]) -> Optional[float]:
     if not iso:
         return None
@@ -1129,6 +1142,11 @@ def api_overview():
                               "project": Path(r["folder"]).parent.name, "date": r["run"],
                               "job": r.get("job"),
                               "text": (r.get("error") or "Failed").splitlines()[0][:200]})
+    od = get_onedrive()
+    if od.enabled() and od.last and not od.last.get("ok") and od.last.get("dest") == w.cfg.onedrive_dest:
+        attention.append({"level": "warn", "kind": "system",
+                          "text": "Copying activity scans to OneDrive did not work: "
+                                  + "; ".join(od.last.get("errors") or ["unknown error"])[:240]})
     sysw = (get_monitor().snapshot().get("warnings") or [])
     for x in sysw:
         attention.append({**x, "kind": "system"})
@@ -1551,6 +1569,54 @@ def api_requirements(payload: RequirementsPayload, request: Request):
     return {"ok": True, "chars": len(payload.text)}
 
 
+class OneDrivePayload(BaseModel):
+    enabled: Optional[bool] = None
+    dest: Optional[str] = None
+
+
+@app.get("/api/onedrive")
+def api_onedrive():
+    return get_onedrive().status()
+
+
+@app.post("/api/onedrive")
+def api_onedrive_save(payload: OneDrivePayload, request: Request):
+    """Turn the OneDrive copy on or off and say where it goes. Allowed while
+    analyses run: it only changes where results are copied afterwards."""
+    w = get_watcher()
+    said = []
+    if payload.dest is not None:
+        dest = payload.dest.strip()
+        if dest and ":" not in dest:
+            raise HTTPException(400, "Give the destination as <remote>:<folder>, for example "
+                                     "onedrive:Ben-Shalom Lab/MEA activity scans.")
+        w.cfg.onedrive_dest = dest
+        said.append(f"to {dest or '(nowhere)'}")
+    if payload.enabled is not None:
+        w.cfg.onedrive_copy = payload.enabled
+        said.insert(0, "on" if payload.enabled else "off")
+    w.cfg.save(CONFIG_PATH)
+    _audit(request, "changed the OneDrive copy", " ".join(said))
+    od = get_onedrive()
+    od.start_timer()
+    od.trigger("settings saved")
+    return od.status()
+
+
+@app.post("/api/onedrive/check")
+def api_onedrive_check(payload: OneDrivePayload):
+    return onedrive.check((payload.dest if payload.dest is not None else get_watcher().cfg.onedrive_dest).strip())
+
+
+@app.post("/api/onedrive/copy")
+def api_onedrive_copy(request: Request):
+    od = get_onedrive()
+    if not od.trigger("copied by hand"):
+        raise HTTPException(409, "The OneDrive copy is off, or has no destination yet.")
+    _audit(request, "started a OneDrive copy")
+    return od.status()
+
+
 @app.post("/api/handoff")
 def api_handoff(payload: HandoffPayload, request: Request):
     """Start building reports and Claude packages; poll GET /api/handoff.
@@ -1766,6 +1832,10 @@ def main() -> None:
     LOG.info("  Open this in your browser:  http://%s:%s", url_host, a.port)
     LOG.info("  (do not open index.html directly — it must be served)")
     LOG.info("=" * 58)
+
+    # Copy activity scans to OneDrive every half hour (when set up), which also
+    # catches up on anything finished while the bench was off.
+    get_onedrive().start_timer()
 
     import uvicorn
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")

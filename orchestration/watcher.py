@@ -296,6 +296,13 @@ class JobConfig:
     # Prepare a handoff automatically when a queued batch finishes.
     auto_handoff: bool = True
 
+    # --- OneDrive -----------------------------------------------------------
+    # Copy every project's activity-scan results to OneDrive as well (rclone
+    # copy: nothing is ever deleted or moved). On by default; does nothing
+    # until a destination such as "onedrive:Lab/MEA activity scans" is set.
+    onedrive_copy: bool = True
+    onedrive_dest: str = ""
+
     # --- NWB ----------------------------------------------------------------
     # Convert each Network recording to NWB (one file per well) under
     # <output>/<project>/NWB/<project>/<date>/..., then analyse from the NWB

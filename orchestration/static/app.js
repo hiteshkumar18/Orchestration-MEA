@@ -1865,6 +1865,159 @@ function WatchedProjects({
     s: 11
   }), " Watch this one")))))))));
 }
+function OneDriveCopy({
+  toast
+}) {
+  const [st, setSt] = useState(null);
+  const [dest, setDest] = useState("");
+  const [chk, setChk] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => api("/api/onedrive").then(d => {
+    setSt(d);
+    return d;
+  }).catch(() => null), []);
+  useEffect(() => {
+    load().then(d => d && setDest(d.dest || ""));
+  }, [load]);
+  useEffect(() => {
+    if (!st?.copying) return;
+    const t = setTimeout(load, 3000);
+    return () => clearTimeout(t);
+  }, [st, load]);
+  const save = async body => {
+    setBusy(true);
+    try {
+      const d = await api("/api/onedrive", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      setSt(d);
+      toast("Saved", d.enabled && d.dest ? "Activity scans are copied to OneDrive after each scan, and every half hour." : "The OneDrive copy is off.");
+    } catch (e) {
+      toast("Not saved", e.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const check = async () => {
+    setChk({
+      checking: true
+    });
+    try {
+      setChk(await api("/api/onedrive/check", {
+        method: "POST",
+        body: JSON.stringify({
+          dest
+        })
+      }));
+    } catch (e) {
+      setChk({
+        ok: false,
+        say: e.message
+      });
+    }
+  };
+  const copyNow = async () => {
+    try {
+      setSt(await api("/api/onedrive/copy", {
+        method: "POST"
+      }));
+    } catch (e) {
+      toast("Not started", e.message, "error");
+    }
+  };
+  if (!st) return null;
+  const last = st.last || {};
+  return React.createElement("div", {
+    className: "sec"
+  }, React.createElement("div", {
+    className: "sec-h"
+  }, React.createElement("div", {
+    className: "sec-t"
+  }, "Copy to OneDrive"), React.createElement("div", {
+    className: "sec-d"
+  }, "Activity scan results stay in the results folder and are copied to OneDrive too. Nothing is ever deleted, on either side.")), React.createElement("div", {
+    className: "card"
+  }, React.createElement("div", {
+    className: "card-b"
+  }, React.createElement(Switch, {
+    id: "od",
+    checked: st.enabled,
+    disabled: busy,
+    onChange: v => save({
+      enabled: v
+    }),
+    label: "Copy activity scans to OneDrive",
+    hint: "After every finished activity scan, and every half hour to catch up. Only new or changed files are sent."
+  }), React.createElement("div", {
+    className: "f",
+    style: {
+      marginTop: 14,
+      marginBottom: 0
+    }
+  }, React.createElement("label", {
+    className: "f-l",
+    htmlFor: "od-dest"
+  }, "OneDrive folder"), React.createElement("div", {
+    className: "f-row"
+  }, React.createElement("input", {
+    id: "od-dest",
+    className: "inp mono",
+    placeholder: "onedrive:Ben-Shalom Lab/MEA activity scans",
+    value: dest,
+    onChange: e => {
+      setDest(e.target.value);
+      setChk(null);
+    }
+  }), React.createElement("button", {
+    className: "btn",
+    disabled: !dest.trim() || chk?.checking,
+    onClick: check
+  }, chk?.checking ? React.createElement("span", {
+    className: "spin"
+  }) : null, " Check"), React.createElement("button", {
+    className: "btn ink",
+    disabled: busy || dest === (st.dest || ""),
+    onClick: () => save({
+      dest
+    })
+  }, "Use this folder")), React.createElement("span", {
+    className: "hint-s"
+  }, "Each project gets its own folder there: ", React.createElement("span", {
+    className: "mono"
+  }, "<project>/ActivityScan/<date>/\u2026"))), chk && !chk.checking && React.createElement("div", {
+    style: {
+      marginTop: 12
+    }
+  }, React.createElement(Callout, {
+    kind: chk.ok ? "green" : "amber",
+    icon: chk.ok ? React.createElement(Check, {
+      s: 17
+    }) : React.createElement(Alert, {
+      s: 17
+    })
+  }, chk.say)), st.enabled && st.dest && React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      flexWrap: "wrap",
+      marginTop: 14
+    }
+  }, React.createElement("span", {
+    className: "hint",
+    style: {
+      flex: 1,
+      minWidth: 200
+    }
+  }, st.copying ? React.createElement(React.Fragment, null, React.createElement("span", {
+    className: "spin"
+  }), " Copying now\u2026") : last.finished ? last.ok ? `Last copy ${ago(last.finished)}: ${last.copied} new file${last.copied === 1 ? "" : "s"}.` : `Last copy ${ago(last.finished)} had problems: ${(last.errors || []).join("; ")}` : "Not copied yet."), React.createElement("button", {
+    className: "btn sm",
+    disabled: st.copying,
+    onClick: copyNow
+  }, "Copy now")))));
+}
 const LAB_NODES = [{
   node: "benshalom-labtower1",
   python: "/mnt/Vol20tb1/user_workspaces/hitesh/MEA-Analysis/.venv/bin/python3",
@@ -2386,7 +2539,9 @@ function Settings({
     onChange: v => setT("copy_input_first", v),
     label: "Copy the recordings to the fast disk first",
     hint: cfg.nwb_convert ? "Not used while NWB conversion is on." : cfg.copy_input_first ? "On: each date's recordings are copied to the fast disk in one go, analysed there, and the copies deleted afterwards. The originals are only read. Needs room for the date's recordings." : "Off: the analysis reads the recordings from where they are, in small pieces. From the NAS that is slower."
-  })))), React.createElement(ClusterSettings, {
+  })))), React.createElement(OneDriveCopy, {
+    toast: toast
+  }), React.createElement(ClusterSettings, {
     cfg: cfg,
     setT: setT,
     locked: locked,
