@@ -355,8 +355,8 @@ function Line({f,report,wells,open,onWells,onLog,onAgain,onHold,onResume,onPrior
   return (<>
     <div className="line rise" style={{"--i":i}}>
       <div>
-        <div className="d-big">{dt.big}</div>
-        <div className="d-code">{dt.year} · {f.date}</div>
+        <div className={"d-big"+(dt.year?"":" name")}>{dt.big}</div>
+        {dt.year&&<div className="d-code">{dt.year} · {f.date}</div>}
       </div>
       <div className="mid">
         <div className="say">
@@ -608,7 +608,7 @@ function AiReport({cfg,reports,toast}){
             <div className="proj"><span className="proj-n">{prettyProject(p)||"Reports"}</span><span className="proj-c">{rs.length} report{rs.length===1?"":"s"}</span></div>
             {rs.map((r,k)=>{const dt=prettyDate(r.label);return(
               <div className="line rise" key={r.path} style={{"--i":k}}>
-                <div><div className="d-big">{dt.big}</div><div className="d-code">{dt.year} · {r.label}</div></div>
+                <div><div className={"d-big"+(dt.year?"":" name")}>{dt.big}</div>{dt.year&&<div className="d-code">{dt.year} · {r.label}</div>}</div>
                 <div className="hint">Written {ago(r.built)}</div>
                 <div className="acts"><a className="btn ink sm" target="_blank" rel="noopener"
                   href={`/api/reports/view?path=${encodeURIComponent(r.path)}`}><Ext s={14}/> Open report</a></div>
