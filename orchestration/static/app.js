@@ -885,8 +885,8 @@ function Line({
       "--i": i
     }
   }, React.createElement("div", null, React.createElement("div", {
-    className: "d-big"
-  }, dt.big), React.createElement("div", {
+    className: "d-big" + (dt.year ? "" : " name")
+  }, dt.big), dt.year && React.createElement("div", {
     className: "d-code"
   }, dt.year, " \xB7 ", f.date)), React.createElement("div", {
     className: "mid"
@@ -1458,8 +1458,8 @@ function AiReport({
         "--i": k
       }
     }, React.createElement("div", null, React.createElement("div", {
-      className: "d-big"
-    }, dt.big), React.createElement("div", {
+      className: "d-big" + (dt.year ? "" : " name")
+    }, dt.big), dt.year && React.createElement("div", {
       className: "d-code"
     }, dt.year, " \xB7 ", r.label)), React.createElement("div", {
       className: "hint"
