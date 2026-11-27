@@ -1,0 +1,380 @@
+<title>MEA Bench Diagrams</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column of wide, slide-shaped figures (16:9-ish), each with a short caption beside its number. */
+:root{
+  --bg:#f4f6f8; --paper:#ffffff; --ink:#18212c; --muted:#5a6676; --line:#c3ccd7;
+  --net:#2b59c3; --net-tint:#e9effc;
+  --act:#b8650f; --act-tint:#fcf1e4;
+  --safe:#2a7a57; --safe-tint:#e5f3ec;
+  --soon:#7b5ab8; --soon-tint:#f0ebf9;
+  --box:#f9fafb;
+  --f-body:"Atkinson Hyperlegible",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#11161d; --paper:#18202a; --ink:#e6ebf1; --muted:#9aa7b7; --line:#3a4656;
+  --net:#7ea2f2; --net-tint:#1c2a47; --act:#eda35a; --act-tint:#3a2a17;
+  --safe:#6fcca0; --safe-tint:#163327; --soon:#b79cf0; --soon-tint:#2a2140; --box:#1e2733; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#11161d; --paper:#18202a; --ink:#e6ebf1; --muted:#9aa7b7; --line:#3a4656;
+  --net:#7ea2f2; --net-tint:#1c2a47; --act:#eda35a; --act-tint:#3a2a17;
+  --safe:#6fcca0; --safe-tint:#163327; --soon:#b79cf0; --soon-tint:#2a2140; --box:#1e2733; color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.5}
+.wrap{max-width:1180px;margin:0 auto;padding-block:40px 64px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:40px}
+header h1{font-size:34px;line-height:1.15;margin:0 0 6px;text-wrap:balance}
+header p{margin:0;color:var(--muted);max-width:68ch}
+.key{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:14px;font-size:14px;color:var(--muted)}
+.key span{display:inline-flex;align-items:center;gap:7px}
+.key i{width:14px;height:14px;border-radius:4px;border:2px solid;display:inline-block}
+section{display:flex;flex-direction:column;gap:14px}
+.cap{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;align-items:baseline}
+.cap .n{font-family:var(--f-mono);font-size:13px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;grid-row:span 2}
+.cap h2{margin:0;font-size:22px;line-height:1.25;text-wrap:balance}
+.cap p{margin:0;color:var(--muted);max-width:75ch;grid-column:2}
+.fig{background:var(--paper);border:1px solid var(--line);border-radius:14px;overflow-x:auto}
+.fig svg{display:block;width:100%;min-width:900px;height:auto}
+footer{color:var(--muted);font-size:14px}
+code{font-family:var(--f-mono);font-size:.9em}
+
+/* SVG parts */
+svg text{font-family:var(--f-body);fill:var(--ink)}
+.bx{fill:var(--box);stroke:var(--line);stroke-width:1.5}
+.bx.net{fill:var(--net-tint);stroke:var(--net)}
+.bx.act{fill:var(--act-tint);stroke:var(--act)}
+.bx.safe{fill:var(--safe-tint);stroke:var(--safe)}
+.bx.soon{fill:var(--soon-tint);stroke:var(--soon);stroke-dasharray:6 4}
+.grp{fill:none;stroke:var(--line);stroke-width:1.5;stroke-dasharray:4 4}
+.grp.main{fill:var(--bg);stroke:var(--ink);stroke-dasharray:none;stroke-width:2}
+.t{font-size:18px;font-weight:700}
+.d{font-size:14.5px;fill:var(--muted)}
+.m{font-family:var(--f-mono)!important;font-size:12.5px;fill:var(--muted)}
+.lbl{font-size:13px;fill:var(--muted);font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.al{font-size:13px;fill:var(--muted)}
+.ar{fill:none;stroke:var(--muted);stroke-width:2}
+.ar.net{stroke:var(--net)} .ar.act{stroke:var(--act)} .ar.soon{stroke:var(--soon);stroke-dasharray:6 4}
+.head{fill:var(--muted)} .head.net{fill:var(--net)} .head.act{fill:var(--act)} .head.soon{fill:var(--soon)}
+.num{fill:var(--ink)} .numt{fill:var(--paper);font-size:13px;font-weight:700}
+.badge{fill:var(--safe)} .badget{fill:var(--paper);font-size:11px;font-weight:700;letter-spacing:.08em}
+.badge.soon{fill:var(--soon)}
+.note{font-size:14.5px;fill:var(--muted)}
+</style>
+
+<div class="wrap">
+<header>
+  <h1>MEA Bench</h1>
+  <p>How a MaxWell recording becomes results, where the data goes, and what the bench is made of. Ben-Shalom Lab, November 2026.</p>
+  <div class="key">
+    <span><i style="border-color:var(--net);background:var(--net-tint)"></i>Network recordings</span>
+    <span><i style="border-color:var(--act);background:var(--act-tint)"></i>Activity scans</span>
+    <span><i style="border-color:var(--safe);background:var(--safe-tint)"></i>Stored data</span>
+    <span><i style="border-color:var(--soon);background:var(--soon-tint);border-style:dashed"></i>Coming soon</span>
+  </div>
+</header>
+
+<!-- ============ 1. FLOW ============ -->
+<section id="flow">
+  <div class="cap"><span class="n">Figure 1</span><h2>What happens to one recording</h2>
+  <p>Nobody has to press anything. Once a date folder lands on the NAS, the bench analyses it and the results show up on the Dashboard.</p></div>
+  <div class="fig"><svg id="svg-flow" viewBox="0 0 1240 500" role="img" aria-label="Flow: record, saved to NAS, bench notices, waits its turn, network analysis and activity scan, results folder, then MaxWell page, AI report and OneDrive copy">
+    <defs>
+      <marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+      <marker id="hn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head net" d="M0 0L10 5L0 10z"/></marker>
+      <marker id="ha" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head act" d="M0 0L10 5L0 10z"/></marker>
+      <marker id="hs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head soon" d="M0 0L10 5L0 10z"/></marker>
+    </defs>
+
+    <!-- 1 -->
+    <rect class="bx" x="20" y="148" width="175" height="118" rx="10"/>
+    <circle class="num" cx="20" cy="148" r="13"/><text class="numt" x="20" y="152.5" text-anchor="middle">1</text>
+    <text class="t" x="36" y="182">Record</text>
+    <text class="d" x="36" y="208">on the MaxWell rig:</text>
+    <text class="d" x="36" y="228">Network recording</text>
+    <text class="d" x="36" y="248">+ activity scan</text>
+    <!-- 2 -->
+    <rect class="bx safe" x="217" y="148" width="175" height="118" rx="10"/>
+    <circle class="num" cx="217" cy="148" r="13"/><text class="numt" x="217" y="152.5" text-anchor="middle">2</text>
+    <text class="t" x="233" y="182">Saved to the NAS</text>
+    <text class="d" x="233" y="208">one folder per</text>
+    <text class="d" x="233" y="228">project and date</text>
+    <text class="d" x="233" y="248">never changed</text>
+    <!-- 3 -->
+    <rect class="bx" x="414" y="148" width="175" height="118" rx="10"/>
+    <circle class="num" cx="414" cy="148" r="13"/><text class="numt" x="414" y="152.5" text-anchor="middle">3</text>
+    <text class="t" x="430" y="182">Bench notices</text>
+    <text class="d" x="430" y="208">checks every 30 s,</text>
+    <text class="d" x="430" y="228">starts once the copy</text>
+    <text class="d" x="430" y="248">has been still 10 min</text>
+    <!-- 4 -->
+    <rect class="bx" x="611" y="148" width="175" height="118" rx="10"/>
+    <circle class="num" cx="611" cy="148" r="13"/><text class="numt" x="611" y="152.5" text-anchor="middle">4</text>
+    <text class="t" x="627" y="182">Waits its turn</text>
+    <text class="d" x="627" y="208">first come,</text>
+    <text class="d" x="627" y="228">first served;</text>
+    <text class="d" x="627" y="248">2 at once per type</text>
+
+    <!-- 5 -->
+    <text class="lbl" x="816" y="58">5 · side by side</text>
+    <rect class="bx net" x="816" y="70" width="185" height="118" rx="10"/>
+    <text class="t" x="832" y="104">Network analysis</text>
+    <text class="d" x="832" y="130">MEA-Analysis pipeline</text>
+    <text class="d" x="832" y="150">spikes + bursts per well</text>
+    <text class="d" x="832" y="170">minutes per well</text>
+    <rect class="bx act" x="816" y="226" width="185" height="118" rx="10"/>
+    <text class="t" x="832" y="260">Activity scan</text>
+    <text class="d" x="832" y="286">maps of the whole chip</text>
+    <text class="d" x="832" y="306">quality check per well</text>
+    <text class="d" x="832" y="326">seconds per chip</text>
+
+    <!-- 6 -->
+    <rect class="bx safe" x="1035" y="148" width="185" height="118" rx="10"/>
+    <circle class="num" cx="1035" cy="148" r="13"/><text class="numt" x="1035" y="152.5" text-anchor="middle">6</text>
+    <text class="t" x="1051" y="182">Results folder</text>
+    <text class="d" x="1051" y="208">checked well by well</text>
+    <text class="d" x="1051" y="228">failures are shown</text>
+    <text class="d" x="1051" y="248">and can be re-run</text>
+
+    <!-- arrows main row -->
+    <path class="ar" d="M195 207H215" marker-end="url(#h)"/>
+    <path class="ar" d="M392 207H412" marker-end="url(#h)"/>
+    <path class="ar" d="M589 207H609" marker-end="url(#h)"/>
+    <path class="ar net" d="M786 207H800V129H814" marker-end="url(#hn)"/>
+    <path class="ar act" d="M786 207H800V285H814" marker-end="url(#ha)"/>
+    <path class="ar net" d="M1001 129H1017V200" />
+    <path class="ar act" d="M1001 285H1017V214" />
+    <path class="ar" d="M1017 207H1033" marker-end="url(#h)"/>
+
+    <!-- 7 outputs -->
+    <text class="lbl" x="20" y="388">7 · what you get</text>
+    <path class="ar" d="M1127 266V370"/>
+    <path class="ar" d="M660 370H1127"/>
+    <path class="ar" d="M660 370V398" marker-end="url(#h)"/>
+    <path class="ar" d="M890 370V398" marker-end="url(#h)"/>
+    <path class="ar soon" d="M1120 370V398" marker-end="url(#hs)"/>
+    <rect class="bx" x="560" y="400" width="200" height="76" rx="10"/>
+    <text class="t" x="576" y="430">MaxWell page</text>
+    <text class="d" x="576" y="454">per run, in the browser</text>
+    <rect class="bx" x="790" y="400" width="200" height="76" rx="10"/>
+    <text class="t" x="806" y="430">AI report</text>
+    <text class="d" x="806" y="454">per date, two tabs</text>
+    <rect class="bx soon" x="1020" y="400" width="200" height="76" rx="10"/>
+    <text class="t" x="1036" y="430">OneDrive copy</text>
+    <text class="d" x="1036" y="454">activity scans · IT ok</text>
+
+    <text class="note" x="20" y="420">Everything is shown live on the Dashboard:</text>
+    <text class="note" x="20" y="442">progress, time left, and anything that</text>
+    <text class="note" x="20" y="464">needs attention.</text>
+  </svg></div>
+</section>
+
+<!-- ============ 2. DATA FLOW ============ -->
+<section id="data">
+  <div class="cap"><span class="n">Figure 2</span><h2>Where the data goes</h2>
+  <p>The raw recordings are only ever read. Big temporary files go to a fast local disk and are deleted when the job ends. Results are written to one place and copied from there.</p></div>
+  <div class="fig"><svg id="svg-data" viewBox="0 0 1240 520" role="img" aria-label="Data flow: NAS raw recordings are read by the analysis, which uses SSD scratch and writes results to the results disk; results are copied to OneDrive and read by lab members and the AI assistant">
+    <defs>
+      <marker id="h2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+      <marker id="hs2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head soon" d="M0 0L10 5L0 10z"/></marker>
+    </defs>
+
+    <!-- NAS -->
+    <rect class="bx safe" x="20" y="60" width="240" height="170" rx="10"/>
+    <text class="t" x="38" y="96">NAS</text>
+    <text class="d" x="38" y="122">raw recordings from the rig</text>
+    <text class="m" x="38" y="148">MEA_Backup/raw_data/…</text>
+    <text class="m" x="38" y="168">  &lt;project&gt;/&lt;date&gt;/&lt;chip&gt;</text>
+    <rect class="badge" x="38" y="188" width="92" height="24" rx="12"/>
+    <text class="badget" x="84" y="204.5" text-anchor="middle">READ-ONLY</text>
+
+    <!-- Analysis -->
+    <rect class="bx" x="390" y="60" width="240" height="170" rx="10"/>
+    <text class="t" x="408" y="96">Analysis</text>
+    <text class="d" x="408" y="122">Network: MEA-Analysis</text>
+    <text class="d" x="408" y="144">Activity scan: the bench</text>
+    <text class="d" x="408" y="176">on this computer, or a lab</text>
+    <text class="d" x="408" y="198">cluster computer</text>
+
+    <!-- Scratch -->
+    <rect class="bx" x="390" y="320" width="240" height="140" rx="10"/>
+    <text class="t" x="408" y="356">SSD scratch</text>
+    <text class="d" x="408" y="382">fast local disk for big</text>
+    <text class="d" x="408" y="404">working files (~80 GB/well)</text>
+    <text class="d" x="408" y="436">deleted after every job</text>
+
+    <!-- Results -->
+    <rect class="bx safe" x="760" y="60" width="270" height="250" rx="10"/>
+    <text class="t" x="778" y="96">Results disk</text>
+    <text class="m" x="778" y="122">/mnt/MaxwellData_Backup/</text>
+    <text class="m" x="778" y="140">  MEA_Analysis/&lt;project&gt;/</text>
+    <text class="m" x="778" y="172">  ├ &lt;date&gt;/       Network</text>
+    <text class="m" x="778" y="192">  ├ ActivityScan/  scans</text>
+    <text class="m" x="778" y="212">  ├ AI_HANDOFF/    reports</text>
+    <text class="m" x="778" y="232">  └ orchestration_logs/</text>
+    <text class="d" x="778" y="270">on BenShalomLabServer,</text>
+    <text class="d" x="778" y="292">19 TB free of 22 TB</text>
+
+    <!-- OneDrive -->
+    <rect class="bx soon" x="1080" y="60" width="140" height="170" rx="10"/>
+    <text class="t" x="1096" y="96">OneDrive</text>
+    <text class="d" x="1096" y="122">activity scans</text>
+    <text class="d" x="1096" y="144">copy only,</text>
+    <text class="d" x="1096" y="166">kept in both</text>
+    <rect class="badge soon" x="1096" y="188" width="108" height="24" rx="12"/>
+    <text class="badget" x="1150" y="204.5" text-anchor="middle">NEEDS IT OK</text>
+
+    <!-- People -->
+    <rect class="bx" x="760" y="380" width="200" height="100" rx="10"/>
+    <text class="t" x="778" y="416">Lab members</text>
+    <text class="d" x="778" y="442">look at results and</text>
+    <text class="d" x="778" y="462">reports in the browser</text>
+    <rect class="bx" x="1000" y="380" width="220" height="100" rx="10"/>
+    <text class="t" x="1018" y="416">AI assistant</text>
+    <text class="d" x="1018" y="442">reads the results,</text>
+    <text class="d" x="1018" y="462">writes the report</text>
+
+    <!-- arrows -->
+    <path class="ar" d="M260 145H388" marker-end="url(#h2)"/>
+    <text class="al" x="324" y="135" text-anchor="middle">read</text>
+    <path class="ar" d="M490 232V318" marker-start="url(#h2)" marker-end="url(#h2)"/>
+    <text class="al" x="500" y="280">temporary files</text>
+    <path class="ar" d="M630 145H758" marker-end="url(#h2)"/>
+    <text class="al" x="694" y="135" text-anchor="middle">checked copy</text>
+    <path class="ar soon" d="M1030 145H1078" marker-end="url(#hs2)"/>
+    <text class="al" x="1055" y="131" text-anchor="middle">copy</text>
+    <path class="ar" d="M860 378V312" marker-end="url(#h2)"/>
+    <text class="al" x="870" y="350">view</text>
+    <path class="ar" d="M1110 378V340H1000V312" marker-start="url(#h2)" marker-end="url(#h2)"/>
+    <text class="al" x="1120" y="360">report</text>
+
+    <text class="note" x="20" y="300">Rules the bench keeps:</text>
+    <text class="note" x="20" y="326">· never writes to the NAS</text>
+    <text class="note" x="20" y="350">· never deletes results</text>
+    <text class="note" x="20" y="374">· checks every copy before it</text>
+    <text class="note" x="20" y="396">  deletes the temporary one</text>
+  </svg></div>
+</section>
+
+<!-- ============ 3. ARCHITECTURE ============ -->
+<section id="arch">
+  <div class="cap"><span class="n">Figure 3</span><h2>What the bench is made of</h2>
+  <p>One program on labtower1 serves the web page and runs everything behind it. The lab's analysis pipeline, MEA-Analysis, is run as is and never changed.</p></div>
+  <div class="fig"><svg id="svg-arch" viewBox="0 0 1240 620" role="img" aria-label="Architecture: lab members and AI assistant use the MEA Bench on labtower1, which runs analyses on this computer or the lab cluster and stores data on the NAS, results disk, SSD scratch and OneDrive">
+    <defs>
+      <marker id="h3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M0 0L10 5L0 10z"/></marker>
+      <marker id="hs3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head soon" d="M0 0L10 5L0 10z"/></marker>
+    </defs>
+
+    <!-- people -->
+    <text class="lbl" x="20" y="56">Who uses it</text>
+    <rect class="bx" x="20" y="74" width="220" height="122" rx="10"/>
+    <text class="t" x="38" y="108">Lab members</text>
+    <text class="d" x="38" y="134">any web browser on</text>
+    <text class="d" x="38" y="154">the lab network</text>
+    <text class="m" x="38" y="180">10.157.209.11:8000</text>
+    <rect class="bx" x="20" y="250" width="220" height="122" rx="10"/>
+    <text class="t" x="38" y="284">AI assistant</text>
+    <text class="d" x="38" y="310">Claude Code or Codex,</text>
+    <text class="d" x="38" y="330">run on the server;</text>
+    <text class="d" x="38" y="350">writes the reports</text>
+
+    <!-- bench -->
+    <rect class="grp main" x="290" y="36" width="520" height="560" rx="14"/>
+    <text class="t" x="310" y="70">MEA Bench</text>
+    <text class="d" x="408" y="70">on labtower1 · one program</text>
+
+    <rect class="bx" x="310" y="90" width="230" height="92" rx="10"/>
+    <text class="t" x="326" y="122">Web page</text>
+    <text class="d" x="326" y="146">Dashboard, Reports,</text>
+    <text class="d" x="326" y="166">Settings, sign-in</text>
+    <rect class="bx" x="560" y="90" width="230" height="92" rx="10"/>
+    <text class="t" x="576" y="122">Server</text>
+    <text class="d" x="576" y="146">answers the page,</text>
+    <text class="d" x="576" y="166">keeps who did what</text>
+
+    <rect class="bx" x="310" y="202" width="230" height="92" rx="10"/>
+    <text class="t" x="326" y="234">Watcher</text>
+    <text class="d" x="326" y="258">finds new dates in</text>
+    <text class="d" x="326" y="278">the watched projects</text>
+    <rect class="bx" x="560" y="202" width="230" height="92" rx="10"/>
+    <text class="t" x="576" y="234">Line + runner</text>
+    <text class="d" x="576" y="258">starts, follows, holds</text>
+    <text class="d" x="576" y="278">and stops analyses</text>
+
+    <rect class="bx" x="310" y="314" width="230" height="92" rx="10"/>
+    <text class="t" x="326" y="346">Run history</text>
+    <text class="d" x="326" y="370">every run, every change,</text>
+    <text class="d" x="326" y="390">kept for good</text>
+    <rect class="bx" x="560" y="314" width="230" height="92" rx="10"/>
+    <text class="t" x="576" y="346">Machine monitor</text>
+    <text class="d" x="576" y="370">CPU, memory, GPU,</text>
+    <text class="d" x="576" y="390">disks, stuck jobs</text>
+
+    <rect class="bx" x="310" y="426" width="230" height="92" rx="10"/>
+    <text class="t" x="326" y="458">Report kit</text>
+    <text class="d" x="326" y="482">instructions and data</text>
+    <text class="d" x="326" y="502">for the AI assistant</text>
+    <rect class="bx soon" x="560" y="426" width="230" height="92" rx="10"/>
+    <text class="t" x="576" y="458">OneDrive copier</text>
+    <text class="d" x="576" y="482">after each scan and</text>
+    <text class="d" x="576" y="502">every 30 min</text>
+
+    <text class="d" x="310" y="560">Written in Python (FastAPI) with a React page.</text>
+    <text class="d" x="310" y="580">Restarts pick up exactly where they left off.</text>
+
+    <!-- compute -->
+    <text class="lbl" x="860" y="56">Where analyses run</text>
+    <rect class="bx" x="860" y="74" width="170" height="100" rx="10"/>
+    <text class="t" x="876" y="106">This computer</text>
+    <text class="d" x="876" y="130">labtower1 GPU</text>
+    <text class="d" x="876" y="150">in use now</text>
+    <rect class="bx" x="1050" y="74" width="170" height="100" rx="10"/>
+    <text class="t" x="1066" y="106">Lab cluster</text>
+    <text class="d" x="1066" y="130">Slurm queue "mea"</text>
+    <text class="d" x="1066" y="150">3 computers</text>
+    <rect class="bx net" x="860" y="190" width="360" height="80" rx="10"/>
+    <text class="t" x="876" y="222">MEA-Analysis</text>
+    <text class="d" x="876" y="246">the lab's pipeline, run as a program, never changed</text>
+
+    <!-- storage -->
+    <text class="lbl" x="860" y="318">Where data lives</text>
+    <rect class="bx safe" x="860" y="336" width="170" height="100" rx="10"/>
+    <text class="t" x="876" y="368">NAS</text>
+    <text class="d" x="876" y="392">raw recordings</text>
+    <text class="d" x="876" y="412">read-only</text>
+    <rect class="bx safe" x="1050" y="336" width="170" height="100" rx="10"/>
+    <text class="t" x="1066" y="368">Results disk</text>
+    <text class="d" x="1066" y="392">results and reports,</text>
+    <text class="d" x="1066" y="412">on the lab server</text>
+    <rect class="bx soon" x="860" y="452" width="170" height="100" rx="10"/>
+    <text class="t" x="876" y="484">OneDrive</text>
+    <text class="d" x="876" y="508">activity scans</text>
+    <text class="d" x="876" y="528">needs IT approval</text>
+    <rect class="bx" x="1050" y="452" width="170" height="100" rx="10"/>
+    <text class="t" x="1066" y="484">SSD scratch</text>
+    <text class="d" x="1066" y="508">temporary files,</text>
+    <text class="d" x="1066" y="528">deleted after jobs</text>
+
+    <!-- arrows -->
+    <path class="ar" d="M240 135H308" marker-start="url(#h3)" marker-end="url(#h3)"/>
+    <path class="ar" d="M540 136H560"/>
+    <path class="ar" d="M130 372V472H308" marker-start="url(#h3)" marker-end="url(#h3)"/>
+    <path class="ar" d="M790 248H830V124H858" marker-end="url(#h3)"/>
+    <text class="al" x="846" y="186" transform="rotate(-90 846 186)" text-anchor="middle">starts jobs</text>
+    <path class="ar" d="M540 248H558" marker-end="url(#h3)"/>
+    <path class="ar" d="M1030 124H1048" />
+    <path class="ar" d="M945 174V188" marker-end="url(#h3)"/>
+    <path class="ar" d="M1135 174V188" marker-end="url(#h3)"/>
+    <path class="ar" d="M1015 270V334" marker-end="url(#h3)"/>
+    <text class="al" x="1008" y="300" text-anchor="end">read</text>
+    <path class="ar" d="M1135 270V334" marker-end="url(#h3)"/>
+    <text class="al" x="1145" y="306">write</text>
+    <path class="ar soon" d="M790 472H858" marker-end="url(#hs3)"/>
+  </svg></div>
+</section>
+
+<footer>Source: the bench's code and its live settings on labtower1, 27 Nov 2026. Analyses currently run on labtower1; the lab cluster is one switch away in Settings.</footer>
+</div>
